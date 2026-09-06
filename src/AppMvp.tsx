@@ -192,6 +192,14 @@ function AppMvp() {
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
 
+  function expireSession() {
+    localStorage.removeItem(tokenKey);
+    setToken("");
+    setApiOnline(false);
+    setModal(null);
+    setToast("Сессия закончилась. Войдите снова.");
+  }
+
   useEffect(() => {
     async function loadPortfolio() {
       try {
@@ -208,6 +216,15 @@ function AppMvp() {
           fetch(`${apiUrl}/transactions`, { headers }),
           fetch(`${apiUrl}/portfolio/history`, { headers }),
         ]);
+        if (
+          productsResponse.status === 401 ||
+          paymentsResponse.status === 401 ||
+          transactionsResponse.status === 401 ||
+          historyResponse.status === 401
+        ) {
+          expireSession();
+          return;
+        }
         if (
           !productsResponse.ok ||
           !paymentsResponse.ok ||
@@ -513,6 +530,7 @@ function AppMvp() {
       {modal === "product" && (
         <ProductModal
           token={token}
+          onUnauthorized={expireSession}
           onClose={() => setModal(null)}
           onSubmit={addProduct}
         />
@@ -1205,10 +1223,12 @@ function Login({
 }
 function ProductModal({
   token,
+  onUnauthorized,
   onClose,
   onSubmit,
 }: {
   token: string;
+  onUnauthorized: () => void;
   onClose: () => void;
   onSubmit: (product: Product) => void;
 }) {
@@ -1252,6 +1272,10 @@ function ProductModal({
         error?: string;
         items?: Array<{ name: string; type: AssetType; amount: number; institution: string }>;
       };
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
       if (!response.ok || !result.items?.length) throw new Error(result.error || "Не удалось распознать изображение");
       const item = result.items[0];
       setName(item.name);
