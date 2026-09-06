@@ -9,6 +9,7 @@ type Product = { id: string; name: string; type: string; amount: number; investe
 type Payment = { id: string; title: string; amount: number; date: string; type: string }
 type Transaction = { id: string; title: string; amount: number; date: string; kind: string; productId?: string }
 type Store = { products: Product[]; payments: Payment[]; transactions: Transaction[] }
+type Snapshot = { date: string; value: number }
 type User = { id: string; email: string; passwordHash: string; salt: string }
 type BrokerConnection = { provider: 'tinkoff'; connectedAt: string; maskedToken: string; status: 'connected' | 'pending' }
 
@@ -26,6 +27,19 @@ app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 async function readStore(): Promise<Store> {
   return JSON.parse(await readFile(dataPath, 'utf8')) as Store
+}
+async function recordSnapshot(store: Store, date = new Date().toISOString().slice(0, 10)) {
+  const snapshots = (store as Store & { snapshots?: Snapshot[] }).snapshots || []
+  const value = store.products.reduce((sum, item) => sum + item.amount, 0)
+  if (!store.products.length) {
+    ;(store as Store & { snapshots: Snapshot[] }).snapshots = []
+    return
+  }
+  const existing = snapshots.find((snapshot) => snapshot.date === date)
+  if (existing) existing.value = value
+  else snapshots.push({ date, value })
+  snapshots.sort((a, b) => a.date.localeCompare(b.date))
+  ;(store as Store & { snapshots: Snapshot[] }).snapshots = snapshots.slice(-365)
 }
 async function loadUsers() {
   const saved = JSON.parse(await readFile(usersPath, 'utf8')) as User[]
@@ -92,6 +106,13 @@ app.get('/api/portfolio/summary', async (_request, response) => {
   const paid = store.transactions.filter((item) => item.kind === 'Выплата').reduce((sum, item) => sum + item.amount, 0)
   response.json({ total, invested, profit: total - invested, expected, paid, products: store.products.length })
 })
+app.get('/api/portfolio/history', async (request, response) => {
+  if (!requireAuth(request, response)) return
+  const store = await readStore()
+  await recordSnapshot(store)
+  await writeStore(store)
+  response.json((store as Store & { snapshots?: Snapshot[] }).snapshots || [])
+})
 
 app.get('/api/products', async (request, response) => { if (!requireAuth(request, response)) return; response.json((await readStore()).products) })
 app.post('/api/products', async (request, response) => {
@@ -104,14 +125,14 @@ app.post('/api/products', async (request, response) => {
       ticker: typeof body.ticker === 'string' ? body.ticker.trim() : '', date: requiredText(body.date, 'date'),
       institution: typeof body.institution === 'string' ? body.institution.trim() : 'Ручной ввод', currency: typeof body.currency === 'string' ? body.currency : 'RUB',
     }
-    const store = await readStore(); store.products.push(product); await writeStore(store); response.status(201).json(product)
+    const store = await readStore(); store.products.push(product); await recordSnapshot(store); await writeStore(store); response.status(201).json(product)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
 })
 app.delete('/api/products/:id', async (request, response) => {
   if (!requireAuth(request, response)) return
   const store = await readStore(); const before = store.products.length; store.products = store.products.filter((item) => item.id !== request.params.id)
   if (store.products.length === before) return response.status(404).json({ error: 'Product not found' })
-  await writeStore(store); response.status(204).send()
+  await recordSnapshot(store); await writeStore(store); response.status(204).send()
 })
 
 app.get('/api/payments', async (request, response) => { if (!requireAuth(request, response)) return; response.json((await readStore()).payments) })
@@ -141,7 +162,7 @@ app.post('/api/transactions', async (request, response) => {
       if (cash) { cash.amount += amount; cash.invested += amount }
     }
     const transaction: Transaction = { id: randomUUID(), title: requiredText(body.title, 'title'), amount, date: requiredText(body.date, 'date'), kind, productId: body.productId }
-    store.transactions.push(transaction); await writeStore(store); response.status(201).json(transaction)
+    store.transactions.push(transaction); await recordSnapshot(store); await writeStore(store); response.status(201).json(transaction)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
 
