@@ -1262,11 +1262,8 @@ function ProductModal({
     try {
       const response = await fetch(`${apiUrl}/ocr/preview`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ filename: file.name, mimeType: file.type, size: file.size }),
+        headers: { Authorization: `Bearer ${token}` },
+        body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
       });
       const result = (await response.json()) as {
         error?: string;

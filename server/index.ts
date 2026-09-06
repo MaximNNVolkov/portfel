@@ -1,11 +1,14 @@
 import cors from 'cors'
 import express, { type Request, type Response } from 'express'
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import multer from 'multer'
+import { createWorker } from 'tesseract.js'
 
 type Product = { id: string; name: string; type: string; amount: number; invested: number; ticker: string; date: string; institution: string; currency: string }
+type AssetType = 'Облигации' | 'Акции' | 'Вклады' | 'Фонды' | 'Деньги' | 'Прочее'
 type Payment = { id: string; title: string; amount: number; date: string; type: string }
 type Transaction = { id: string; title: string; amount: number; date: string; kind: string; productId?: string }
 type Store = { products: Product[]; payments: Payment[]; transactions: Transaction[] }
@@ -20,6 +23,7 @@ const usersPath = resolve(process.cwd(), 'server/users.json')
 const users = new Map<string, User>()
 const sessions = new Set<string>()
 const brokerConnections = new Map<string, BrokerConnection>()
+const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
 
 app.use(cors())
 app.use(express.json())
@@ -52,6 +56,13 @@ async function writeStore(store: Store) {
 function requiredText(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is required`)
   return value.trim()
+}
+function decodeUploadName(value: string) {
+  try {
+    return Buffer.from(value, 'latin1').toString('utf8')
+  } catch {
+    return value
+  }
 }
 function positiveNumber(value: unknown, field: string): number {
   const result = Number(value)
@@ -92,14 +103,23 @@ app.post('/api/brokers/tinkoff/connect', (request, response) => {
 app.post('/api/brokers/tinkoff/sync', (request, response) => { if (!requireAuth(request, response)) return; const connection = brokerConnections.get(authToken(request)); if (!connection) return response.status(409).json({ error: 'Broker is not connected' }); response.status(202).json({ status: 'pending', message: 'Синхронизация ожидает подключения провайдера рыночных данных.' }) })
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'portfolio-api' }))
-app.post('/api/ocr/preview', async (request, response) => {
+app.post('/api/ocr/preview', upload.single('image'), async (request, response) => {
   if (!requireAuth(request, response)) return
-  const filename = requiredText(request.body?.filename, 'filename')
-  const mimeType = requiredText(request.body?.mimeType, 'mimeType')
-  const size = Number(request.body?.size)
-  if (!['image/png', 'image/jpeg'].includes(mimeType)) return response.status(400).json({ error: 'Поддерживаются только PNG и JPG' })
-  if (!Number.isFinite(size) || size <= 0 || size > 10 * 1024 * 1024) return response.status(400).json({ error: 'Размер изображения должен быть от 1 байта до 10 МБ' })
-  response.status(202).json({ status: 'needs_confirmation', source: filename, items: [{ name: 'Распознанный продукт', type: 'Облигации', amount: 0, institution: 'Проверьте источник', confidence: 0.62 }], message: 'Результат подготовлен для проверки. OCR-провайдер подключается отдельно.' })
+  if (!request.file) return response.status(400).json({ error: 'Изображение не загружено или имеет неподдерживаемый формат' })
+  const worker = await createWorker('rus+eng')
+  try {
+    const result = await worker.recognize(request.file.path)
+    const text = result.data.text.replace(/\s+/g, ' ').trim()
+    const amountMatch = text.match(/(?:₽|руб(?:лей|\.)?|RUB)\s*([\d\s,.]+)/i) || text.match(/([\d\s]{3,}(?:[,.]\d{1,2})?)\s*(?:₽|руб|RUB)/i)
+    const amount = amountMatch ? Number(amountMatch[1].replace(/\s/g, '').replace(',', '.')) : 0
+    const type: AssetType = /облигац|bond|ОФЗ/i.test(text) ? 'Облигации' : /акци|share|stock|SBER/i.test(text) ? 'Акции' : /вклад|депозит/i.test(text) ? 'Вклады' : 'Прочее'
+    const name = text.split(/[|•]/)[0]?.trim().slice(0, 100) || 'Распознанный продукт'
+    const source = decodeUploadName(request.file.originalname)
+    response.status(202).json({ status: 'needs_confirmation', source, text, items: [{ name, type, amount, institution: 'Проверьте источник', confidence: amount ? 0.86 : 0.42 }], message: amount ? 'Текст распознан. Проверьте поля перед сохранением.' : 'Текст распознан, но сумма не найдена. Заполните её вручную перед сохранением.' })
+  } finally {
+    await worker.terminate()
+    await unlink(request.file.path).catch(() => undefined)
+  }
 })
 app.get('/api/portfolio/summary', async (_request, response) => {
   if (!requireAuth(_request, response)) return
