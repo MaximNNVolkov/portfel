@@ -95,6 +95,10 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, service
 app.post('/api/ocr/preview', async (request, response) => {
   if (!requireAuth(request, response)) return
   const filename = requiredText(request.body?.filename, 'filename')
+  const mimeType = requiredText(request.body?.mimeType, 'mimeType')
+  const size = Number(request.body?.size)
+  if (!['image/png', 'image/jpeg'].includes(mimeType)) return response.status(400).json({ error: 'Поддерживаются только PNG и JPG' })
+  if (!Number.isFinite(size) || size <= 0 || size > 10 * 1024 * 1024) return response.status(400).json({ error: 'Размер изображения должен быть от 1 байта до 10 МБ' })
   response.status(202).json({ status: 'needs_confirmation', source: filename, items: [{ name: 'Распознанный продукт', type: 'Облигации', amount: 0, institution: 'Проверьте источник', confidence: 0.62 }], message: 'Результат подготовлен для проверки. OCR-провайдер подключается отдельно.' })
 })
 app.get('/api/portfolio/summary', async (_request, response) => {

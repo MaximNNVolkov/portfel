@@ -511,7 +511,11 @@ function AppMvp() {
         )}
       </main>
       {modal === "product" && (
-        <ProductModal onClose={() => setModal(null)} onSubmit={addProduct} />
+        <ProductModal
+          token={token}
+          onClose={() => setModal(null)}
+          onSubmit={addProduct}
+        />
       )}
       {modal === "payment" && (
         <PaymentModal onClose={() => setModal(null)} onSubmit={addPayment} />
@@ -1200,9 +1204,11 @@ function Login({
   );
 }
 function ProductModal({
+  token,
   onClose,
   onSubmit,
 }: {
+  token: string;
   onClose: () => void;
   onSubmit: (product: Product) => void;
 }) {
@@ -1211,8 +1217,10 @@ function ProductModal({
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [institution, setInstitution] = useState("");
-  const [file, setFile] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState(false);
+  const [recognizing, setRecognizing] = useState(false);
+  const [error, setError] = useState("");
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -1227,6 +1235,36 @@ function ProductModal({
       currency: "RUB",
     });
   };
+  async function recognizeScreenshot() {
+    if (!file) return;
+    setRecognizing(true);
+    setError("");
+    try {
+      const response = await fetch(`${apiUrl}/ocr/preview`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ filename: file.name, mimeType: file.type, size: file.size }),
+      });
+      const result = (await response.json()) as {
+        error?: string;
+        items?: Array<{ name: string; type: AssetType; amount: number; institution: string }>;
+      };
+      if (!response.ok || !result.items?.length) throw new Error(result.error || "Не удалось распознать изображение");
+      const item = result.items[0];
+      setName(item.name);
+      setType(item.type);
+      setAmount(item.amount > 0 ? String(item.amount) : "");
+      setInstitution(item.institution);
+      setPreview(true);
+    } catch (recognitionError) {
+      setError(recognitionError instanceof Error ? recognitionError.message : "Не удалось распознать изображение");
+    } finally {
+      setRecognizing(false);
+    }
+  }
   return (
     <Modal title="Добавить продукт" onClose={onClose}>
       <div className="mode-switch">
@@ -1253,24 +1291,27 @@ function ProductModal({
           <input
             type="file"
             accept="image/png,image/jpeg"
-            onChange={(event) => setFile(event.target.files?.[0]?.name || "")}
+            onChange={(event) => {
+              const selected = event.target.files?.[0] || null;
+              setFile(selected);
+              setPreview(false);
+              setError("");
+            }}
           />
           {file && (
             <>
-              <p>{file}</p>
+              <p>{file.name}</p>
               <button
                 className="outline-button"
-                onClick={() => {
-                  setPreview(true);
-                  setName("Распознанный продукт");
-                  setAmount("100000");
-                }}
+                onClick={() => void recognizeScreenshot()}
+                disabled={recognizing}
                 type="button"
               >
-                Распознать данные
+                {recognizing ? "Распознаваем..." : "Распознать данные"}
               </button>
             </>
           )}
+          {error && <small className="form-error">{error}</small>}
         </div>
       )}
       {mode === "screenshot" && preview && (
