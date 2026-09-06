@@ -1,0 +1,19 @@
+{
+  "products": [
+    {"id":"ofz","name":"ОФЗ 26241","type":"Облигации","amount":540200,"invested":502000,"ticker":"SU26241RMFS8","date":"2026-02-12","institution":"Т-Инвестиции","currency":"RUB"},
+    {"id":"sber","name":"Сбербанк","type":"Акции","amount":342380,"invested":303500,"ticker":"SBER","date":"2026-03-18","institution":"Т-Инвестиции","currency":"RUB"},
+    {"id":"deposit","name":"Надёжный доход","type":"Вклады","amount":420000,"invested":400000,"ticker":"","date":"2026-01-05","institution":"Т-Банк","currency":"RUB"},
+    {"id":"fund","name":"Фонд ликвидности","type":"Фонды","amount":111740,"invested":107240,"ticker":"LQDT","date":"2026-04-21","institution":"Т-Инвестиции","currency":"RUB"},
+    {"id":"cash","name":"Свободные деньги","type":"Деньги","amount":136100,"invested":136100,"ticker":"","date":"2026-09-06","institution":"Т-Инвестиции","currency":"RUB"}
+  ],
+  "payments": [
+    {"id":"p1","title":"Купон ОФЗ 26241","amount":12480,"date":"2026-09-20","type":"Облигации"},
+    {"id":"p2","title":"Дивиденд Сбера","amount":8920,"date":"2026-09-27","type":"Акции"},
+    {"id":"p3","title":"Проценты по вкладу","amount":17100,"date":"2026-10-10","type":"Вклады"}
+  ],
+  "transactions": [
+    {"id":"t1","title":"Покупка ОФЗ 26241","amount":502000,"date":"2026-02-12","kind":"Покупка"},
+    {"id":"t2","title":"Пополнение брокерского счёта","amount":250000,"date":"2026-03-18","kind":"Пополнение"},
+    {"id":"t3","title":"Купон ОФЗ 26241","amount":12480,"date":"2026-08-20","kind":"Выплата"}
+  ]
+}
