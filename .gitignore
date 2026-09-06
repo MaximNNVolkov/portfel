@@ -33,3 +33,4 @@ dist-ssr
 server/users.json
 server/data.json
 server/uploads/
+*.traineddata
