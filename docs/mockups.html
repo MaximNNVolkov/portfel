@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ТЗ: веб-приложение для учёта инвестиционного портфеля</title>
+<style>
+:root{
+  --bg:#ffffff; --bg-alt:#f7f7f5; --surface:#ffffff; --border:#e4e2dc;
+  --text:#1f1e1c; --text-2:#5b594f; --text-3:#8b897d;
+  --accent:#185fa5; --accent-bg:#e6f1fb;
+  --green:#3b6d11; --green-bg:#eaf3de;
+  --red:#a32d2d; --red-bg:#fcebeb;
+  --amber:#854f0b; --amber-bg:#faeeda;
+  --mvp:#0f6e56; --mvp-bg:#e1f5ee;
+  --v2:#993556; --v2-bg:#fbeaf0;
+  font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+}
+*{box-sizing:border-box;}
+body{margin:0; background:var(--bg-alt); color:var(--text); line-height:1.6;}
+.wrap{max-width:900px; margin:0 auto; padding:0 24px 80px;}
+header.doc-head{background:var(--text); color:#fff; padding:48px 24px; text-align:center;}
+header.doc-head h1{font-size:26px; font-weight:600; margin:0 0 8px;}
+header.doc-head p{color:#cfcdc4; margin:0; font-size:14px;}
+nav.jump{display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:20px;}
+nav.jump a{color:#fff; background:rgba(255,255,255,0.12); padding:8px 16px; border-radius:20px; text-decoration:none; font-size:13px;}
+nav.jump a:hover{background:rgba(255,255,255,0.22);}
+main{background:var(--surface); margin-top:-24px; border-radius:16px 16px 0 0; padding:40px 40px 20px; box-shadow:0 -4px 20px rgba(0,0,0,0.04);}
+h1{font-size:24px; margin:2.2em 0 0.6em; padding-top:0.4em; border-top:1px solid var(--border);}
+main > h1:first-child{border-top:none; margin-top:0;}
+h2{font-size:19px; margin:2em 0 0.6em; color:var(--text);}
+h3{font-size:16px; margin:1.6em 0 0.5em;}
+p{font-size:15px; color:var(--text-2); margin:0.7em 0;}
+li{font-size:15px; color:var(--text-2); margin:0.3em 0;}
+strong{color:var(--text); font-weight:600;}
+hr{border:none; border-top:1px solid var(--border); margin:2em 0;}
+code, pre{font-family:"SF Mono", Menlo, monospace; font-size:13px;}
+pre{background:#1f1e1c; color:#e8e6df; padding:16px; border-radius:8px; overflow-x:auto; line-height:1.5;}
+blockquote{border-left:3px solid var(--amber); background:var(--amber-bg); margin:1em 0; padding:10px 16px; border-radius:0 8px 8px 0;}
+blockquote p{color:var(--amber); margin:0.3em 0; font-size:14px;}
+table{border-collapse:collapse; width:100%; margin:1em 0; font-size:14px;}
+th,td{border:1px solid var(--border); padding:6px 10px; text-align:left;}
+th{background:var(--bg-alt);}
+
+.section-nav-anchor{position:relative; top:-70px;}
+
+.badge{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; margin-left:6px; vertical-align:middle;}
+
+.mock-block{background:var(--bg-alt); border-radius:16px; padding:24px; margin:24px 0;}
+.mock-tabs{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;}
+.mock-tabs button{font-size:13px; padding:7px 14px; border-radius:20px; border:1px solid var(--border); background:#fff; color:var(--text-2); cursor:pointer;}
+.mock-tabs button.active{background:var(--text); color:#fff; border-color:var(--text);}
+.phone{background:#fff; border:1px solid var(--border); border-radius:22px; overflow:hidden; max-width:340px; margin:0 auto; box-shadow:0 8px 24px rgba(0,0,0,0.06);}
+.phone-head{display:flex; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); font-size:14px; font-weight:600;}
+.phone-body{padding:16px; min-height:420px;}
+.opt-card{display:flex; gap:12px; align-items:center; border:1px solid var(--border); border-radius:10px; padding:12px;}
+.opt-card p{margin:0;}
+.grp-row{display:flex; justify-content:space-between; font-size:13px; padding:8px 0; border-bottom:1px solid var(--border); color:var(--text-2);}
+.row{border-bottom:1px solid var(--border); padding:10px 0; cursor:pointer;}
+.row-main{display:flex; justify-content:space-between; font-size:13px; font-weight:600;}
+.row-sub{display:flex; justify-content:space-between; margin-top:2px; font-size:12px; color:var(--text-3);}
+.row-detail{display:none; font-size:12px; color:var(--text-2); margin-top:6px;}
+.row.open .row-detail{display:block;}
+.ocr-row{display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border);}
+.ocr-row p{margin:0;}
+.ocr-row.err{background:var(--red-bg); border-radius:8px; padding:10px 12px;}
+.mini-btn{font-size:12px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:#fff; cursor:pointer;}
+.chip{font-size:11px; padding:4px 10px; border-radius:20px; border:1px solid var(--border); color:var(--text-2); white-space:nowrap; cursor:pointer; flex-shrink:0;}
+.chip.active{background:var(--text); color:#fff; border-color:var(--text);}
+.pay-row{display:flex; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--border); font-size:13px;}
+.pay-type{font-size:10px; padding:2px 7px; border-radius:20px;}
+.type-coupon{background:var(--accent-bg); color:var(--accent);}
+.type-interest{background:var(--mvp-bg); color:var(--mvp);}
+.type-div{background:#eeedfe; color:#3c3489;}
+.type-principal{background:var(--amber-bg); color:var(--amber);}
+.type-redemption{background:#faece7; color:#712b13;}
+@media(max-width:640px){ main{padding:24px 16px;} header.doc-head{padding:32px 16px;} }
+
+</style>
+</head>
+<body>
+
+<header class="doc-head">
+  <h1>Веб-приложение для учёта и анализа инвестиционного портфеля</h1>
+  <p>Техническое задание + макеты ключевых экранов · v4</p>
+  <nav class="jump">
+    <a href="#tor">Текст ТЗ</a>
+    <a href="#mockup-screens">Макеты экранов</a>
+    <a href="#mockup-payouts">Макет выплат</a>
+  </nav>
+</header>
+
+<div class="wrap">
+<main>
+
+<div id="tor">
+<h1 id="веб-приложение-для-учёта-и-анализа-инвестиционного-портфеля">Веб-приложение для учёта и анализа инвестиционного портфеля</h1>
+<hr />
+<h2 id="приоритизация-mvp-v1-vs-v2">0. Приоритизация: MVP v1 vs v2</h2>
+<p>Документ описывает полную целевую версию продукта. Чтобы не растягивать первый релиз, все функции размечены по приоритету:</p>
+<ul>
+<li><strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong> — обязательно для первого запуска. Без этого продукт не решает основную задачу.</li>
+<li><strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong> — важно для полноценного продукта, но не блокирует первый релиз. Разрабатывается после того, как MVP подтвердил свою пользу.</li>
+</ul>
+<p>Разметка проставлена по разделам ниже и продублирована в разделе 36 «Этапы разработки».</p>
+<p><strong>Состав MVP v1 (коротко):</strong> портфель, группы инструментов, карточка инструмента, ручной ввод, OCR-добавление по скриншоту, интеграция с Т-Инвестициями, базовый расчёт P&amp;L, календарь выплат (без сложной аналитики), 3-5 правил рекомендаций, авторизация email+пароль, базовая безопасность.</p>
+<p><strong>Вынесено в v2:</strong> PDF-отчёты, административная панель, email/Telegram-уведомления, импорт/экспорт CSV/XLSX, XIRR и исторические курсы валют, несколько портфелей/счетов на пользователя, поддержка брокеров кроме Т-Инвестиций.</p>
+<hr />
+<h2 id="назначение-проекта-mvp">1. Назначение проекта <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Веб-приложение предназначено для агрегации, учёта и анализа личного инвестиционного портфеля пользователя.</p>
+<p>Приложение объединяет в единую систему:</p>
+<ul>
+<li>банковские вклады;</li>
+<li>ОФЗ;</li>
+<li>корпоративные и муниципальные облигации;</li>
+<li>акции;</li>
+<li>ПИФы и биржевые фонды;</li>
+<li>денежные средства;</li>
+<li>прочие инвестиционные инструменты.</li>
+</ul>
+<p>Данные могут поступать из:</p>
+<ol type="1">
+<li>ручного ввода;</li>
+<li>загрузки скриншотов с последующим OCR + LLM-анализом;</li>
+<li>API брокера;</li>
+<li>импорта CSV/Excel <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</li>
+</ol>
+<p><strong>Основная задача:</strong> пользователь не должен вручную сводить информацию из нескольких банковских и брокерских приложений. Система автоматически формирует единую картину портфеля, рассчитывает финансовый результат, показывает будущие выплаты и предоставляет аналитические подсказки.</p>
+<hr />
+<h2 id="формат-приложения-mvp">2. Формат приложения <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<ul>
+<li>Тип: веб-приложение.</li>
+<li>Размещение: собственный VPS/VDS-сервер.</li>
+<li>Доступ: через браузер по HTTPS.</li>
+</ul>
+<p>Требования:</p>
+<ul>
+<li>адаптивная вёрстка;</li>
+<li>полноценная работа на компьютере;</li>
+<li>работа на планшете;</li>
+<li>базовая поддержка мобильного браузера;</li>
+<li>Chrome, Safari, Firefox, Яндекс Браузер.</li>
+</ul>
+<p>Приложение не требует установки на устройство.</p>
+<hr />
+<h2 id="архитектура-mvp">3. Архитектура <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Рекомендуемая схема:</p>
+<pre><code>БРАУЗЕР
+   │
+   ▼
+Web Frontend
+   │
+   ▼
+REST API
+   │
+   ├──────────────┬──────────────────┐
+   ▼              ▼                  ▼
+Database      OCR/LLM          Market Data
+                                    │
+                                    ▼
+                              MOEX / ЦБ
+   │
+   ▼
+Portfolio Engine
+   │
+   ▼
+Broker Connectors
+   │
+   ▼
+Т-Инвестиции</code></pre>
+<p><strong>Backend отвечает за:</strong> авторизацию, пользователей, портфели, счета, инструменты, операции, выплаты, расчёты, котировки, OCR, рекомендации, формирование PDF <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, интеграции с брокерами, уведомления <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</p>
+<p><strong>Frontend отвечает за:</strong> отображение портфеля, формы, графики, загрузку документов, подтверждение OCR, настройки, отчёты <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</p>
+<hr />
+<h2 id="пользователь-mvp">4. Пользователь <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>На MVP:</p>
+<ul>
+<li>одна роль — пользователь/инвестор;</li>
+<li>пользователь видит только собственные данные.</li>
+</ul>
+<p>В архитектуре предусмотреть возможность дальнейшего добавления <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>:</p>
+<ul>
+<li>нескольких портфелей;</li>
+<li>семейного доступа;</li>
+<li>нескольких пользователей;</li>
+<li>ролей.</li>
+</ul>
+<hr />
+<h2 id="авторизация-mvp">5. Авторизация <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>На MVP:</p>
+<ul>
+<li>email + пароль.</li>
+</ul>
+<p>В будущем предусмотреть возможность <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>:</p>
+<ul>
+<li>Telegram;</li>
+<li>Google;</li>
+<li>двухфакторной авторизации.</li>
+</ul>
+<hr />
+<h2 id="основные-разделы-приложения">6. Основные разделы приложения</h2>
+<p>Главное меню:</p>
+<ol type="1">
+<li>Портфель <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Инструменты <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Операции <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Выплаты <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Аналитика <strong>[MVP, базовый набор]</strong> / <strong>[v2, расширенный]</strong></li>
+<li>Рекомендации <strong>[MVP, базовый набор]</strong></li>
+<li>Отчёты <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong></li>
+<li>Интеграции <strong>[MVP — Т-Инвестиции]</strong> / <strong>[v2 — остальные брокеры]</strong></li>
+<li>Импорт <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong></li>
+<li>Настройки <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+</ol>
+<hr />
+<h2 id="главный-экран-портфель-mvp">7. Главный экран — «Портфель» <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Назначение: единая сводная картина всех активов пользователя.</p>
+<h3 id="общие-показатели">7.1. Общие показатели</h3>
+<p>Отображать:</p>
+<ul>
+<li>общую стоимость портфеля;</li>
+<li>вложено;</li>
+<li>финансовый результат;</li>
+<li>доходность в %;</li>
+<li>полученные выплаты;</li>
+<li>ожидаемые выплаты;</li>
+<li>денежные средства;</li>
+<li>дату и время последнего обновления.</li>
+</ul>
+<p>Пример:</p>
+<pre><code>ПОРТФЕЛЬ
+2 350 420 ₽
++184 320 ₽  ·  +8,51%
+
+Инвестировано        2 120 000 ₽
+Выплаты получено        94 320 ₽
+Ожидается                38 500 ₽
+Свободные деньги        136 100 ₽</code></pre>
+<h3 id="структура-портфеля">7.2. Структура портфеля</h3>
+<p>Минимальные группы:</p>
+<ul>
+<li>вклады;</li>
+<li>облигации;</li>
+<li>акции;</li>
+<li>ПИФы/фонды;</li>
+<li>денежные средства;</li>
+<li>прочее.</li>
+</ul>
+<p>Для каждой группы: вложено, текущая стоимость, P&amp;L в рублях, P&amp;L в процентах, доля портфеля.</p>
+<p>Группы должны быть расширяемыми.</p>
+<h3 id="графики">7.3. Графики</h3>
+<ul>
+<li>структура портфеля;</li>
+<li>стоимость портфеля во времени;</li>
+<li>финансовый результат во времени.</li>
+</ul>
+<p>Если актуальная цена инструмента отсутствует, явно показывать: <em>«Актуальная цена недоступна»</em> или <em>«Оценка приблизительна»</em>.</p>
+<p><strong>Никогда не отображать отсутствие цены как стоимость 0.</strong></p>
+<p>Логика пустого/деградированного состояния портфеля — см. раздел 40.1.</p>
+<hr />
+<h2 id="детализация-по-группе-mvp">8. Детализация по группе <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>При выборе группы отображать список инструментов.</p>
+<p>Для каждого: название, тикер, ISIN, количество, средняя цена, текущая цена, текущая стоимость, P&amp;L, доходность, дата погашения (если применимо).</p>
+<p><strong>Сортировка:</strong> по стоимости, по доходности, по P&amp;L, по дате погашения.</p>
+<p><strong>Фильтры:</strong> банк, брокер, счёт, валюта, статус.</p>
+<p>В верхней части — суммарные показатели группы.</p>
+<p>Адаптивное отображение списка (без широких таблиц, пагинация, разворачивание строки) — см. раздел 40.3.</p>
+<hr />
+<h2 id="карточка-инструмента-mvp">9. Карточка инструмента <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Для каждого инструмента отображать: полное название, тип, тикер, ISIN, эмитент, валюту, количество, сумму вложения, среднюю цену, текущую цену, текущую стоимость, реализованный P&amp;L, нереализованный P&amp;L, полученные выплаты, ожидаемые выплаты, доходность, дату покупки/открытия, дату погашения/оферты, источник данных.</p>
+<p><strong>История:</strong> изменения стоимости, операции, выплаты.</p>
+<p>Для данных, введённых вручную или через OCR, разрешить редактирование и удаление.</p>
+<hr />
+<h2 id="финансовая-модель-mvp-базовая-логика-xirr-и-historical-fx-v2">10. Финансовая модель [MVP — базовая логика; XIRR и historical FX — v2]</h2>
+<p>Это обязательная часть системы. Необходимо разделять:</p>
+<p><strong>10.1. Нереализованный результат</strong> — изменение стоимости активов, которые ещё находятся в портфеле.</p>
+<p><strong>10.2. Реализованный результат</strong> — результат от продажи активов.</p>
+<p><strong>10.3. Полученный доход</strong> — купоны, дивиденды, проценты по вкладам, прочие выплаты.</p>
+<p><strong>10.4. Расходы</strong> — комиссии брокера, комиссии биржи, прочие расходы.</p>
+<p><strong>10.5. Налоги</strong> — учитывать, если доступны из источника данных.</p>
+<p><strong>10.6. Общий финансовый результат.</strong> Базовая логика:</p>
+<pre><code>изменение стоимости активов
++ полученные выплаты
+− комиссии
+− налоги
+= финансовый результат</code></pre>
+<p>При пополнениях и выводах денежных средств доходность должна рассчитываться с учётом движения денежных средств.</p>
+<p>Для доходности портфеля предусмотреть XIRR <strong>[v2 — на MVP допустима упрощённая формула простой доходности без учёта таймингов пополнений]</strong>.</p>
+<p>Методика расчётов должна быть реализована централизованно в Portfolio Engine и не дублироваться на frontend.</p>
+<hr />
+<h2 id="сущности-базы-данных-mvp-базовый-набор-ниже">11. Сущности базы данных [MVP — базовый набор ниже]</h2>
+<p><strong>User:</strong> id, email, password_hash, created_at, settings</p>
+<p><strong>Portfolio:</strong> id, user_id, name, base_currency, created_at <em>(Архитектура должна позволять пользователю иметь несколько портфелей — реализация multi-portfolio UI в v2, но схема БД проектируется под это сразу.)</em></p>
+<p><strong>Account:</strong> id, portfolio_id, type, broker/bank, account_number (маскированный), currency, status</p>
+<p><strong>AssetGroup:</strong> id, name, type <em>(группы расширяемые)</em></p>
+<p><strong>Instrument:</strong> id, asset_group_id, ticker, ISIN, name, currency, issuer, nominal, maturity_date, coupon_rate, instrument_type</p>
+<p><strong>Position:</strong> id, account_id, instrument_id, quantity, average_price, current_price, current_value</p>
+<p><strong>Transaction:</strong> id, account_id, instrument_id, type, date, quantity, price, amount, currency, commission, tax, source</p>
+<p>Типы операций: BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION.</p>
+<p><strong>Payout:</strong> id, instrument_id, account_id, date, type, amount, currency, status</p>
+<p><strong>BrokerConnection:</strong> id, user_id, broker_type, encrypted_token, last_sync_at, status</p>
+<p><strong>UploadedDocument:</strong> id, user_id, file, processing_status, extracted_json, instrument_id, created_at</p>
+<p><strong>Recommendation:</strong> id, user_id, rule_type, text, created_at, status</p>
+<hr />
+<h2 id="денежные-средства-mvp">12. Денежные средства <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Денежные остатки на брокерских счетах являются частью портфеля.</p>
+<p>На MVP поддержать: RUB, USD, CNY. В будущем — другие валюты <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</p>
+<p>Отображать: сумму, валюту, стоимость в базовой валюте, долю портфеля.</p>
+<hr />
+<h2 id="валюты-mvp-текущий-курс-исторические-курсы-v2">13. Валюты [MVP — текущий курс; исторические курсы — v2]</h2>
+<p>Пользователь выбирает базовую валюту портфеля. Для MVP: RUB, USD, CNY.</p>
+<p>Источник текущего курса на MVP: официальный курс ЦБ РФ (см. также архитектурную схему в разделе 3). MOEX ISS используется только для рыночных цен ценных бумаг (раздел 20), не для курсов валют.</p>
+<p>Для каждой валюты хранить: курс, дату курса, источник.</p>
+<p>При расчёте общей стоимости портфеля выполнять конвертацию в базовую валюту.</p>
+<p>Исторические графики должны использовать исторические курсы, а не текущий курс <strong>[v2 — на MVP допустимо использовать текущий курс для упрощения, с явной пометкой в UI]</strong>.</p>
+<hr />
+<h2 id="облигации-mvp">14. Облигации <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Учитывать: количество, цену, среднюю цену покупки, текущую цену, номинал, НКД, купон, дату выплаты купона, дату погашения, оферту, амортизацию, валюту.</p>
+<p>Отдельно отображать: рыночную стоимость, НКД, полную стоимость позиции.</p>
+<hr />
+<h2 id="банковские-вклады-mvp">15. Банковские вклады <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Хранить: банк, название вклада, первоначальную сумму, текущую сумму, ставку, эффективную ставку, дату открытия, дату окончания, капитализацию, периодичность выплаты процентов, возможность пополнения, возможность частичного снятия, автоматическую пролонгацию, валюту.</p>
+<p>Система должна рассчитывать ожидаемые проценты и формировать будущие выплаты.</p>
+<hr />
+<h2 id="добавление-инструмента-mvp-п.1-3-импорт-v2">16. Добавление инструмента [MVP — п.1-3; импорт — v2]</h2>
+<p>Единая кнопка <strong>«Добавить продукт»</strong>.</p>
+<p>Способы:</p>
+<ol type="1">
+<li>Ручной ввод. <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Скриншот. <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>API брокера. <strong><span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></strong></li>
+<li>Импорт CSV/XLSX. <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong></li>
+</ol>
+<hr />
+<h2 id="ручной-ввод-mvp">17. Ручной ввод <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Форма зависит от типа инструмента.</p>
+<p><strong>Обязательные поля:</strong> тип, название, сумма, дата.</p>
+<p><strong>Дополнительные поля:</strong> ставка, купон, дата погашения, банк, брокер, счёт, тикер, ISIN, валюта, количество.</p>
+<p>Пошаговый сценарий формы (тип → минимум обязательных полей → опциональные детали) — см. раздел 40.5.</p>
+<hr />
+<h2 id="ocr-и-распознавание-скриншотов-mvp">18. OCR и распознавание скриншотов <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Пользователь может загрузить один или несколько скриншотов. Система должна уметь распознавать несколько продуктов на одном изображении.</p>
+<p>Процесс:</p>
+<pre><code>Скриншот → OCR → LLM → Структурированные данные
+   → Определение типа продукта
+   → Поиск существующего инструмента (дедупликация)
+   → Сохранение как есть
+   → Экран-сводка добавленных записей</code></pre>
+<p>LLM должен возвращать структурированный JSON. <strong>Подтверждения полей перед сохранением нет</strong> — данные сохраняются как распознаны, без промежуточного шага проверки (см. раздел 40.4). Правка выполняется постфактум, отдельной кнопкой «Редактировать» у каждой записи в экране-сводке.</p>
+<h3 id="дедупликация">Дедупликация</h3>
+<p>При повторной загрузке система должна искать существующий инструмент по комбинации: название, дата открытия/покупки, дата погашения, сумма, банк/брокер, ISIN/тикер (если доступен).</p>
+<blockquote>
+<p><strong>Открытый вопрос перед стартом:</strong> поскольку шага ручного подтверждения перед сохранением больше нет (см. раздел 40.4), нужно решить, как ведёт себя дедупликация при найденном совпадении. Вариант А — система молча создаёт новую запись, а пользователь сам замечает дубликат в экране-сводке и правит/удаляет вручную. Вариант Б — для случая именно дедупликации (не для правки полей) делается единственное исключение и показывается лёгкий inline-выбор «Похожий инструмент уже существует. Обновить или создать новый?» перед сохранением конкретно этой записи. Разработчику стоит выбрать один вариант до старта этапа 2, чтобы не переделывать OCR-флоу.</p>
+</blockquote>
+<hr />
+<h2 id="интеграция-с-т-инвестициями-mvp">19. Интеграция с Т-Инвестициями <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p><strong>MVP: Tinkoff Invest API v2.</strong></p>
+<p>Синхронизировать: счета, позиции, количество, текущие цены, операции, купоны, дивиденды, информацию об инструментах, параметры облигаций.</p>
+<p>Периодичность: автоматическая синхронизация, по умолчанию один раз в сутки, ручное обновление.</p>
+<blockquote>
+<p><strong>Открытый вопрос перед стартом:</strong> уточнить актуальные лимиты запросов и условия использования Tinkoff Invest API, включая ограничения на использование данных при коммерческом/публичном (не только для одного пользователя) сценарии.</p>
+</blockquote>
+<h3 id="архитектура-брокеров-mvp-интерфейс-остальные-коннекторы-v2">Архитектура брокеров [MVP — интерфейс; остальные коннекторы — v2]</h3>
+<p>Использовать общий интерфейс:</p>
+<pre><code>BrokerConnector
+   ├── TinkoffConnector   <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span>
+   ├── BCSConnector       <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span>
+   ├── SberConnector      <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span>
+   └── AlfaConnector      <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></code></pre>
+<p>Добавление нового брокера не должно требовать изменения бизнес-логики расчёта портфеля.</p>
+<hr />
+<h2 id="рыночные-данные-mvp">20. Рыночные данные <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Источники: данные брокера, MOEX ISS, другие разрешённые источники.</p>
+<p>Для каждого источника определить: перечень предоставляемых данных, периодичность обновления, ограничения API, условия использования.</p>
+<p>Хранить историю котировок.</p>
+<blockquote>
+<p><strong>Открытый вопрос перед стартом:</strong> MOEX ISS API имеет ограничения по коммерческому использованию данных — нужно заранее проверить условия лицензии для сценария, когда сервис используется не только автором, а публично (несколько пользователей). Это может повлиять на выбор источника рыночных данных или потребовать отдельного соглашения с биржей.</p>
+</blockquote>
+<hr />
+<h2 id="история-портфеля-mvp">21. История портфеля <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Сохранять ежедневные snapshots. Например:</p>
+<pre><code>28.08.2026 — 2 350 420 ₽
+27.08.2026 — 2 342 100 ₽
+26.08.2026 — 2 355 800 ₽</code></pre>
+<p>При построении графиков отдельно учитывать: изменение рынка, пополнения, выводы, выплаты.</p>
+<hr />
+<h2 id="календарь-выплат-mvp">22. Календарь выплат <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Отдельный раздел «Выплаты».</p>
+<p><strong>Режимы:</strong> по дням, по месяцам, по годам.</p>
+<p><strong>Типы:</strong></p>
+<ol type="1">
+<li>проценты по вкладам;</li>
+<li>купоны облигаций;</li>
+<li>дивиденды;</li>
+<li>возврат тела вклада;</li>
+<li>погашение номинала облигации.</li>
+</ol>
+<p>Для каждой выплаты: дата, инструмент, счёт, тип, сумма, валюта, статус.</p>
+<p><strong>Статусы:</strong> ожидается, получено.</p>
+<p>Предусмотреть фильтры по типу, инструменту, счёту и периоду.</p>
+<p>Показывать прогноз: <em>«В сентябре ожидается 47 200 ₽»</em>.</p>
+<hr />
+<h2 id="аналитика-mvp-базовый-набор-ниже-риск-метрики-v2">23. Аналитика [MVP — базовый набор ниже; риск-метрики — v2]</h2>
+<p><strong>Структура <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span>:</strong> по классам активов, по валютам, по брокерам, по банкам, по инструментам, по эмитентам.</p>
+<p><strong>Доходность [MVP — простая; XIRR — v2]:</strong> за день, месяц, год, весь период, произвольный период.</p>
+<p><strong>Риск <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span>:</strong> концентрация, доля одного инструмента, доля эмитента, доля валюты, доля класса активов. <em>(Простейшая версия концентрации — «доля инструмента &gt;X%» — уже покрыта разделом 24 «Рекомендации» и может быть в MVP; полноценный риск-дашборд — в v2.)</em></p>
+<hr />
+<h2 id="рекомендации-mvp-3-5-правил-ниже">24. Рекомендации [MVP — 3-5 правил ниже]</h2>
+<p>Рекомендации являются аналитическими уведомлениями и <strong>не являются индивидуальными инвестиционными рекомендациями</strong>.</p>
+<p>Правила для MVP:</p>
+<p><strong>Концентрация.</strong> Если инструмент/группа/эмитент занимает более X% портфеля: <em>«ОФЗ 26238 занимает 31% портфеля»</em>. Порог по умолчанию: 20–25%, настраиваемый.</p>
+<p><strong>Погашение.</strong> Если крупная позиция погашается в ближайшие N дней: <em>«Через 23 дня погашается облигация на 350 000 ₽»</em>.</p>
+<p><strong>Просадка.</strong> Если инструмент показывает значительное снижение: <em>«Стоимость инструмента снизилась на 12% относительно цены покупки»</em>. Без рекомендации продавать.</p>
+<p><strong>Выплаты.</strong> Анализировать календарь выплат и выявлять периоды с низкими/нулевыми выплатами.</p>
+<p><strong>Валюта [v2, если исторические курсы ещё не готовы].</strong> Если доля валютных активов превышает заданный порог: <em>«Доля валютных активов составляет 28%»</em>.</p>
+<hr />
+<h2 id="уведомления-v2">25. Уведомления <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></h2>
+<p>Предусмотреть уведомления: приближение погашения, купон, дивиденд, окончание вклада, крупная выплата, ошибка синхронизации, давно не обновлялись данные, значительное изменение стоимости.</p>
+<p>На MVP: уведомления внутри приложения (баннер/бейдж на странице) — без email-рассылки.</p>
+<p>v2: email-уведомления, Telegram.</p>
+<hr />
+<h2 id="pdf-отчёт-v2">26. PDF-отчёт <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></h2>
+<p>PDF не входит в MVP, но проектируется заранее, так как требует данных, уже присутствующих в системе.</p>
+<p>Раздел <strong>«Отчёты»</strong>. Пользователь выбирает: портфель, период, степень детализации. Система формирует PDF на сервере.</p>
+<p><strong>Содержание отчёта:</strong></p>
+<ol type="1">
+<li>Титульная страница — название портфеля, период, дата формирования.</li>
+<li>Общие показатели — стоимость, вложено, финансовый результат, доходность, полученные/ожидаемые выплаты.</li>
+<li>Структура портфеля — круговая/кольцевая диаграмма.</li>
+<li>Динамика — график стоимости портфеля.</li>
+<li>Инструменты — таблица: Инструмент | Кол-во | Стоимость | P&amp;L | Доходность.</li>
+<li>Выплаты — полученные, ожидаемые, по месяцам.</li>
+<li>Ближайшие погашения — инструмент, дата, сумма.</li>
+<li>Аналитические заметки — ключевые особенности портфеля.</li>
+<li>Дисклеймер — <em>«Информация носит исключительно информационный характер и не является индивидуальной инвестиционной рекомендацией»</em>.</li>
+</ol>
+<p>PDF должен иметь аккуратный профессиональный дизайн и быть пригоден для сохранения/печати.</p>
+<hr />
+<h2 id="импорт-и-экспорт-v2">27. Импорт и экспорт <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></h2>
+<p><strong>Импорт:</strong> CSV, XLSX, скриншоты (скриншоты — MVP, см. раздел 18; CSV/XLSX — v2).</p>
+<p>При импорте показать пользователю: количество найденных записей, ошибки, дубликаты, итоговое количество импортируемых инструментов.</p>
+<p><strong>Экспорт:</strong> CSV, XLSX, PDF.</p>
+<hr />
+<h2 id="безопасность-mvp">28. Безопасность <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Обязательно: HTTPS, хеширование паролей, шифрование чувствительных данных, безопасное хранение токенов, защита API, серверная валидация, защита от SQL injection, XSS, CSRF, rate limiting, журналирование ошибок без секретных данных, резервное копирование БД.</p>
+<p>Токены брокеров никогда не записывать в обычные логи.</p>
+<p>Пользователь должен иметь возможность удалить свой аккаунт и все связанные данные.</p>
+<blockquote>
+<p><strong>Дополнительное требование:</strong> поскольку система хранит персональные и финансовые данные пользователя (в т.ч. токены доступа к брокерским счетам), необходимо явно предусмотреть соответствие 152-ФЗ «О персональных данных» — включая размещение персональных данных граждан РФ на серверах, физически находящихся на территории РФ, если сервис ориентирован на пользователей из РФ. Это стоит зафиксировать как обязательное требование к выбору VPS-провайдера ещё на этапе 0.</p>
+</blockquote>
+<hr />
+<h2 id="административная-панель-v2">29. Административная панель <span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></h2>
+<p>Предусмотреть отдельную роль администратора.</p>
+<p>Функции: список пользователей, блокировка/разблокировка, состояние интеграций, ошибки синхронизации, состояние OCR, управление справочниками, управление группами инструментов, статистика использования, системные ошибки.</p>
+<p>Административная панель не должна предоставлять доступ к секретным токенам пользователей в открытом виде.</p>
+<hr />
+<h2 id="логирование-и-мониторинг-mvp-базовый-уровень">30. Логирование и мониторинг [MVP — базовый уровень]</h2>
+<p>Фиксировать: ошибки API, ошибки брокеров, ошибки OCR, ошибки формирования PDF <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, ошибки синхронизации, системные ошибки.</p>
+<p>Для интеграций отображать:</p>
+<pre><code>Последняя синхронизация: 28.08.2026 09:42
+Статус: Успешно</code></pre>
+<hr />
+<h2 id="резервное-копирование-mvp">31. Резервное копирование <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Backend должен автоматически создавать backup БД.</p>
+<p>Минимум: ежедневный backup, хранение нескольких последних копий, возможность восстановления.</p>
+<hr />
+<h2 id="технологический-стек">32. Технологический стек</h2>
+<p><strong>Frontend:</strong> React / Next.js.</p>
+<p><strong>Backend:</strong> Python + FastAPI.</p>
+<p><strong>Database:</strong> PostgreSQL.</p>
+<p><strong>Background jobs:</strong> Celery + Redis либо аналогичный механизм.</p>
+<p>Фоновые задачи: синхронизация брокера, обновление котировок, OCR, формирование PDF <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, уведомления <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</p>
+<p><strong>Deployment:</strong> Docker Compose — nginx, frontend, backend, postgres, redis, worker, scheduler.</p>
+<hr />
+<h2 id="требования-к-api-mvp-базовые-группы-reports-imports-v2">33. Требования к API [MVP — базовые группы; /reports, /imports — v2]</h2>
+<p>Backend должен предоставлять API для frontend.</p>
+<p>Основные группы: <code>/auth</code>, <code>/users</code>, <code>/portfolios</code>, <code>/accounts</code>, <code>/instruments</code>, <code>/positions</code>, <code>/transactions</code>, <code>/payouts</code>, <code>/analytics</code>, <code>/recommendations</code>, <code>/reports</code> <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, <code>/ocr</code>, <code>/brokers</code>, <code>/market-data</code>, <code>/imports</code> <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>.</p>
+<p>API должно иметь: авторизацию, валидацию, пагинацию, фильтрацию, сортировку, обработку ошибок, документацию OpenAPI/Swagger.</p>
+<hr />
+<h2 id="производительность-mvp">34. Производительность <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>Приложение должно нормально работать при: не менее 10 000 инструментов в базе, не менее 100 000 операций, большом количестве исторических котировок.</p>
+<p>Тяжёлые операции выполнять асинхронно: OCR, синхронизацию брокера, генерацию PDF, массовый импорт.</p>
+<p>Пользователь должен видеть статус выполнения операции.</p>
+<hr />
+<h2 id="первый-запуск-mvp">35. Первый запуск <span class="badge" style="background:var(--mvp-bg);color:var(--mvp);">MVP</span></h2>
+<p>После регистрации пользователь видит:</p>
+<pre><code>Добро пожаловать!
+Как добавить портфель?
+
+[ Загрузить скриншоты ]
+[ Подключить брокера ]
+[ Ввести вручную ]
+[ Импортировать Excel / CSV ]  ← кнопка видна, но ведёт на заглушку &quot;скоро&quot; до v2</code></pre>
+<p>После первого импорта показать: количество найденных инструментов, общую стоимость, структуру портфеля, ближайшие выплаты.</p>
+<hr />
+<h2 id="этапы-разработки-с-приоритетом-mvp-v2">36. Этапы разработки (с приоритетом MVP / v2)</h2>
+<h3 id="mvp-v1-до-первого-релиза">MVP v1 — до первого релиза</h3>
+<p><strong>Этап 0 — Архитектура</strong> Проектирование БД, API, финансовая модель (упрощённая), Portfolio Engine, авторизация, безопасность, Docker-инфраструктура. <em>Здесь же — закрыть открытые вопросы по MOEX ISS и размещению ПДн (см. разделы 20, 28).</em></p>
+<p><strong>Этап 1 — Основной портфель</strong> Главный экран, группы, инструменты, счета, денежные средства, ручной ввод, операции, расчёт P&amp;L (простая формула, без XIRR).</p>
+<p><strong>Этап 2 — OCR</strong> Загрузка изображений, OCR, LLM, структурирование, дедупликация, сохранение как есть, экран-сводка добавленных записей с постфактум-редактированием каждой.</p>
+<p><strong>Этап 3 — Т-Инвестиции</strong> Подключение, синхронизация, позиции, операции, выплаты, инструменты.</p>
+<p><strong>Этап 4 — Выплаты и базовая аналитика</strong> Календарь выплат (дни/месяцы/годы, фильтры), структура портфеля по классам/валютам/эмитентам, простая доходность.</p>
+<p><strong>Этап 5 — Рекомендации (базовые правила)</strong> Концентрация, погашение, просадка, разрывы в выплатах.</p>
+<p><strong>Этап 6 — Production-подготовка MVP</strong> Безопасность, backup, базовый мониторинг, тестирование браузеров, deployment на VPS.</p>
+<h3 id="v2-после-запуска-и-обратной-связи-от-пользователя">v2 — после запуска и обратной связи от пользователя</h3>
+<p><strong>Этап 7 — Точная финансовая модель</strong> XIRR, исторические курсы валют, реализованный/нереализованный P&amp;L в полном объёме.</p>
+<p><strong>Этап 8 — PDF-отчёты</strong> Дизайн, графики, таблицы, генерация на сервере, скачивание.</p>
+<p><strong>Этап 9 — Импорт/экспорт</strong> CSV, XLSX — импорт и экспорт.</p>
+<p><strong>Этап 10 — Уведомления</strong> Email, затем Telegram.</p>
+<p><strong>Этап 11 — Расширение брокеров</strong> БКС, Сбер, Альфа — коннекторы по интерфейсу <code>BrokerConnector</code>.</p>
+<p><strong>Этап 12 — Административная панель</strong> Управление пользователями, справочниками, мониторинг интеграций.</p>
+<p><strong>Этап 13 — Мультипортфельность и доступ</strong> Несколько портфелей, семейный доступ, роли.</p>
+<hr />
+<h2 id="критерии-приёмки-mvp">37. Критерии приёмки MVP</h2>
+<p>Приложение считается готовым к первому релизу, если пользователь может:</p>
+<ol type="1">
+<li>зарегистрироваться и войти;</li>
+<li>создать портфель;</li>
+<li>добавить брокерский/банковский счёт;</li>
+<li>добавить инструмент вручную;</li>
+<li>загрузить скриншот и распознать данные;</li>
+<li>отредактировать любую запись, добавленную со скриншота (постфактум, отдельной страницей);</li>
+<li>подключить Т-Инвестиции;</li>
+<li>синхронизировать позиции;</li>
+<li>увидеть стоимость портфеля;</li>
+<li>увидеть P&amp;L;</li>
+<li>увидеть простую доходность;</li>
+<li>увидеть денежные остатки;</li>
+<li>увидеть календарь выплат;</li>
+<li>увидеть историю портфеля;</li>
+<li>получить аналитические уведомления (внутри приложения);</li>
+<li>пользоваться приложением через Chrome и Safari;</li>
+<li>восстановить данные из резервной копии.</li>
+</ol>
+<p><em>(PDF-отчёт, экспорт данных и email-уведомления вынесены в критерии приёмки v2 — см. раздел 36.)</em></p>
+<hr />
+<h2 id="вопросы-которые-необходимо-решить-до-начала-разработки">38. Вопросы, которые необходимо решить до начала разработки</h2>
+<ol type="1">
+<li>Какой конкретно OCR/LLM-провайдер использовать.</li>
+<li>Какие источники рыночных данных использовать для каждого типа инструмента — с учётом ограничения на коммерческое использование MOEX ISS (см. раздел 20).</li>
+<li>Какие ограничения и условия использования Tinkoff Invest API применимы к сценарию (см. раздел 19).</li>
+<li>Требуется ли размещение персональных данных на серверах в РФ (152-ФЗ) — влияет на выбор VPS-провайдера (см. раздел 28).</li>
+<li>Какой механизм email-уведомлений использовать (актуально для v2).</li>
+<li>Какой срок хранения истории и backup.</li>
+<li>Нужна ли двухфакторная авторизация на MVP.</li>
+<li>Нужна ли регистрация через Telegram/Google на MVP.</li>
+<li>Нужна ли монетизация на первом этапе.</li>
+<li>Как ведёт себя дедупликация OCR при найденном совпадении — молча создавать новую запись (пользователь правит вручную) или делать разовое исключение и показывать inline-выбор перед сохранением именно для этого случая (см. раздел 18).</li>
+</ol>
+<hr />
+<h2 id="результат-проекта">39. Результат проекта</h2>
+<p>В результате MVP v1 должен быть развёрнутый на VPS веб-сервис, доступный по HTTPS, позволяющий пользователю в одном интерфейсе:</p>
+<ul>
+<li>собрать весь инвестиционный портфель;</li>
+<li>автоматически обновлять данные через API Т-Инвестиций;</li>
+<li>добавлять активы вручную;</li>
+<li>распознавать активы со скриншотов;</li>
+<li>видеть реальную структуру портфеля;</li>
+<li>рассчитывать финансовый результат (упрощённо);</li>
+<li>отслеживать выплаты и видеть ближайшие погашения;</li>
+<li>получать базовые аналитические уведомления внутри приложения.</li>
+</ul>
+<p>Приложение должно быть спроектировано так, чтобы функции v2 (PDF-отчёты, импорт/экспорт, дополнительные брокеры, несколько портфелей, семейный доступ, Telegram-бот, email-уведомления, административная панель) добавлялись без существенной переработки архитектуры, заложенной на этапе 0.</p>
+<hr />
+<h2 id="uiux-требования-детализация-интерфейса">40. UI/UX-требования (детализация интерфейса)</h2>
+<p>Раздел уточняет, как именно должны быть устроены ключевые экраны и сценарии, описанные функционально в разделах 6-22. Design system (цвета, шрифты, отступы) в этом ТЗ намеренно не фиксируется — оставлено на усмотрение разработчика (см. 40.6), но структура навигации, состояния экранов и поведение списков — обязательны к исполнению.</p>
+<h3 id="навигация-боковой-сайдбар">40.1. Навигация — боковой сайдбар</h3>
+<p>Основная навигация — фиксированный сайдбар слева.</p>
+<ul>
+<li>На десктопе/планшете: сайдбар всегда виден, с иконкой и подписью для каждого раздела — полный состав пунктов соответствует главному меню из раздела 6: Портфель, Инструменты, Операции, Выплаты, Аналитика, Рекомендации, Отчёты <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, Интеграции, Импорт <strong><span class="badge" style="background:var(--v2-bg);color:var(--v2);">v2</span></strong>, Настройки.</li>
+<li>Активный раздел визуально выделен.</li>
+<li>Внизу сайдбара — блок пользователя (email/аватар) и выход из аккаунта.</li>
+<li>На мобильном экране сайдбар скрывается в выдвижное меню (открывается по кнопке-гамбургеру), но остаётся тем же списком разделов — не заменяется на нижний таббар и не меняет состав пунктов.</li>
+</ul>
+<p>Никаких вкладок/табов верхнего уровня, дублирующих сайдбар, не предусмотрено.</p>
+<h3 id="пустой-и-деградированный-портфель">40.2. Пустой и деградированный портфель</h3>
+<p>Три возможных состояния экрана «Портфель», в порядке деградации данных:</p>
+<p><strong>A. Портфель полностью пустой (новый пользователь, ни одного инструмента).</strong> Показывается экран-приглашение, перечисляющий все способы добавления актива, каждый — как отдельная крупная опция с кратким пояснением:</p>
+<pre><code>Ваш портфель пуст. Добавьте первый актив:
+
+[ 📷 Загрузить скриншот из приложения банка/брокера ]
+   Распознаем данные автоматически
+
+[ 🔗 Подключить брокера по API ]
+   Т-Инвестиции — данные обновляются автоматически
+
+[ ✍️ Ввести вручную ]
+   Если у вас нет скриншота под рукой</code></pre>
+<p><strong>B. Есть подключённый брокер, но актуальная синхронизация недоступна (нет связи с API), при этом ранее данные уже загружались.</strong> Показываем последние сохранённые данные из кэша, с явным баннером над соответствующим блоком/счётом:</p>
+<pre><code>⚠ Данные от брокера «Т-Инвестиции» по состоянию на 26.08.2026.
+Не удалось обновить. [ Повторить попытку ]</code></pre>
+<p>Баннер крепится к конкретному счёту/брокеру, если брокеров несколько — у каждого своя пометка с датой его последних данных, а не общая для всего портфеля.</p>
+<p><strong>C. Синхронизация недоступна, и кэшированных данных от этого брокера ещё нет вовсе</strong> (первая синхронизация не состоялась), но в портфеле есть другие активы (введённые вручную/через скриншоты). Показываем ту часть портфеля, которая доступна (ручные + OCR-инструменты + другие подключённые брокеры), и явную пометку:</p>
+<pre><code>⚠ Не удалось загрузить данные от брокера «Т-Инвестиции».
+Показана только доступная часть портфеля.
+[ Повторить подключение ]</code></pre>
+<p>Общая стоимость портфеля на главном экране в состояниях B и C должна визуально помечаться как неполная/по состоянию на дату (не выдавать точную цифру без оговорки).</p>
+<h3 id="списки-и-таблицы-без-широких-таблиц">40.3. Списки и таблицы — без широких таблиц</h3>
+<p>Табличные данные (разделы 8, 22, 23) никогда не отображаются как классическая широкая HTML-таблица с горизонтальным скроллом. Вместо этого:</p>
+<ul>
+<li><strong>Список карточек/строк</strong>, адаптированный под ширину экрана: на десктопе — компактная строка в 1 линию с ключевыми колонками (название, стоимость, P&amp;L), на мобильном — тот же принцип, но с меньшим числом колонок в свёрнутом виде.</li>
+<li><strong>Разворачивание строки.</strong> По клику/тапу на строку она разворачивается на месте (аккордеон, без перехода на новую страницу) и показывает 2-3 дополнительные строки деталей (например: количество, средняя цена, дата погашения) — в зависимости от того, сколько деталей помещается по ширине экрана. Повторный клик сворачивает обратно.</li>
+<li>Переход на полноценную отдельную страницу инструмента (раздел 9) выполняется через явный элемент — например, название инструмента как ссылка, или кнопка «Подробнее» внутри развёрнутой строки — а не через сам факт разворачивания.</li>
+<li><strong>Пагинация.</strong> По умолчанию показываются первые 20 строк. Внизу списка — две отдельные кнопки/контрола:
+<ul>
+<li><strong>«Загрузить ещё»</strong> — подгружает следующие 20 строк, добавляя их в конец списка (без перезагрузки страницы).</li>
+<li><strong>Выбор количества строк на странице</strong> — переключатель (например, 20 / 50 / 100), меняющий текущий объём загруженных и отображаемых строк.</li>
+</ul></li>
+<li>Данное поведение (карточный список, разворачивание, пагинация 20+«загрузить ещё») — единый паттерн для всех списков в приложении: инструменты внутри группы, операции, выплаты, распознанные записи со скриншота.</li>
+</ul>
+<h3 id="экран-подтверждения-после-ocr-без-правки-на-лету">40.4. Экран подтверждения после OCR — без правки “на лету”</h3>
+<p>После обработки одного или нескольких загруженных скриншотов пользователь не редактирует данные в процессе распознавания. Логика:</p>
+<ol type="1">
+<li>Скриншот(ы) загружены → обработаны OCR/LLM.</li>
+<li>Все успешно распознанные записи <strong>сохраняются в портфель как есть</strong>, без промежуточного шага подтверждения полей.</li>
+<li>Пользователю показывается отдельная страница-сводка: <strong>«Добавлено со скриншота от дд.мм.гггг»</strong> — список всех записей, которые были распознаны и добавлены с этой конкретной загрузки.</li>
+<li>У каждой строки в этом списке — кнопка <strong>«Редактировать»</strong>, ведущая на отдельную страницу редактирования именно этого инструмента (та же форма, что и для ручного ввода), если пользователь хочет что-то поправить или дополнить.</li>
+<li>Если какой-то файл/фрагмент не удалось распознать — в этом же списке отдельной строкой показывается: <em>«Не удалось распознать [имя файла]»</em> с кнопкой <strong>«Добавить вручную»</strong>.</li>
+</ol>
+<p>Список из этого экрана не пропадает после ухода со страницы — те же записи попадают в общий список группы инструментов, у каждой сохраняется отметка источника «добавлено со скриншота от дд.мм.гггг» (видна в карточке инструмента, раздел 9).</p>
+<h3 id="форма-ручного-ввода-пошаговый-сценарий">40.5. Форма ручного ввода — пошаговый сценарий</h3>
+<p>Форма добавления вручную (раздел 17) реализуется как пошаговый визард, а не один длинный экран:</p>
+<p><strong>Шаг 1 — выбор типа инструмента.</strong> Крупные тап-карточки: Вклад / Облигация / Акция / ПИФ / Прочее.</p>
+<p><strong>Шаг 2 — только обязательные поля</strong> для выбранного типа: название, сумма, дата. Ничего лишнего на этом шаге не показывается — цель шага 2 дать пользователю быстро сохранить запись.</p>
+<p><strong>Шаг 3 — подтверждение и сохранение.</strong> Показывается сводка введённых данных и кнопка «Добавить». Опциональные поля (ставка, дата погашения, брокер/банк, тикер/ISIN, валюта, количество) не показываются по умолчанию — доступны через явный элемент <strong>«Добавить дополнительные детали»</strong>, разворачивающий необязательный блок на этом же шаге.</p>
+<p>После сохранения — подтверждение с двумя действиями: <strong>«Добавить ещё один актив»</strong> или <strong>«Перейти к портфелю»</strong>.</p>
+<h3 id="design-system">40.6. Design system</h3>
+<p>Специфика визуального стиля (палитра, типографика, плотность интерфейса, иконки инструментов) в этом ТЗ не фиксируется и оставляется на усмотрение разработчика.</p>
+<p>Обязательные ограничения: - тёмная тема как минимум одним из вариантов темы (по образцу исходных скриншотов пользователя); - устойчивая цветовая семантика прибыль/убыток — зелёный/красный — единообразно во всём приложении; - единый набор иконок по типам инструментов (вклад, облигация, акция, ПИФ и т.д.), различимый на карточках и в списках; - минимальный контраст текста должен соответствовать общим требованиям доступности (WCAG AA).</p>
+<h3 id="модальные-окна-не-используются">40.7. Модальные окна — не используются</h3>
+<p>В приложении не используются модальные окна/попапы для содержательных действий. Все сценарии — включая добавление продукта, все шаги формы ручного ввода, редактирование инструмента, экран подтверждения после OCR, подключение/переподключение брокера, настройки — реализуются как <strong>отдельные страницы с собственным URL</strong>, с обычной браузерной навигацией «назад».</p>
+<p>Исключение — только служебные системные диалоги браузера (например, нативное окно выбора файла при загрузке скриншота), которые не являются частью UI-слоя приложения.</p>
+<p>Для действий, требующих подтверждения (например, удаление инструмента), также используется отдельная страница подтверждения, а не всплывающее окно.</p>
+
+</div>
+
+<hr>
+
+<h1 id="mockup-screens" class="section-nav-anchor">Приложение А. Макеты экранов</h1>
+<p>Интерактивный прототип ключевых экранов из раздела 40: пустой портфель, главный экран с деградацией данных, адаптивный список инструментов, экран после OCR, форма ручного ввода. Переключайтесь кнопками вкладок выше макета.</p>
+
+<div class="mock-block">
+  <div class="mock-tabs">
+    <button id="m1-empty" onclick="m1show('empty')">Пустой</button>
+    <button id="m1-main" onclick="m1show('main')">Портфель</button>
+    <button id="m1-list" onclick="m1show('list')">Список</button>
+    <button id="m1-ocr" onclick="m1show('ocr')">OCR</button>
+    <button id="m1-form" onclick="m1show('form')">Форма</button>
+  </div>
+  <div class="phone">
+    <div class="phone-head"><span>&#9776;</span><span id="m1-title">Портфель</span></div>
+    <div class="phone-body" id="m1-body"></div>
+  </div>
+</div>
+<script>
+const m1screens = {
+  empty: {title:'Портфель', html: `
+    <p style="font-size:14px;color:var(--text-2);margin:0 0 14px;">Ваш портфель пуст. Добавьте первый актив:</p>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div class="opt-card"><div><p style="font-size:13px;font-weight:600;">Загрузить скриншот</p><p style="font-size:12px;color:var(--text-3);">Распознаем данные автоматически</p></div></div>
+      <div class="opt-card"><div><p style="font-size:13px;font-weight:600;">Подключить брокера</p><p style="font-size:12px;color:var(--text-3);">Т-Инвестиции по API</p></div></div>
+      <div class="opt-card"><div><p style="font-size:13px;font-weight:600;">Ввести вручную</p><p style="font-size:12px;color:var(--text-3);">Если скриншота нет под рукой</p></div></div>
+    </div>`},
+  main: {title:'Портфель', html: `
+    <div style="background:var(--amber-bg);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+      <p style="font-size:12px;color:var(--amber);margin:0;">Данные от «Т-Инвестиции» на 26.08.2026. Не удалось обновить.</p>
+    </div>
+    <p style="font-size:13px;color:var(--text-3);margin:0;">Стоимость портфеля</p>
+    <p style="font-size:24px;font-weight:700;margin:2px 0 2px;">2 044 863 ₽</p>
+    <p style="font-size:13px;color:var(--green);margin:0 0 16px;">+184 320 ₽ · +8,51%</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+      <div style="background:var(--bg-alt);border-radius:8px;padding:10px;"><p style="font-size:12px;color:var(--text-3);margin:0;">Вложено</p><p style="font-size:15px;font-weight:700;margin:2px 0 0;">1 860 543 ₽</p></div>
+      <div style="background:var(--bg-alt);border-radius:8px;padding:10px;"><p style="font-size:12px;color:var(--text-3);margin:0;">Ожидается</p><p style="font-size:15px;font-weight:700;margin:2px 0 0;">38 500 ₽</p></div>
+    </div>
+    <p style="font-size:13px;font-weight:600;margin:0 0 8px;">Структура</p>
+    <div class="grp-row"><span>Вклады</span><span>1 189 222 ₽</span></div>
+    <div class="grp-row"><span>Фонды</span><span>628 707 ₽</span></div>
+    <div class="grp-row"><span>Облигации</span><span>140 539 ₽</span></div>
+    <div class="grp-row"><span>ПИФы</span><span>86 395 ₽</span></div>`},
+  list: {title:'Облигации', html: `
+    <div class="row" onclick="this.classList.toggle('open')">
+      <div class="row-main"><span>Томск 34009</span><span style="color:var(--red);">66 603 ₽</span></div>
+      <div class="row-sub"><span>129 шт</span><span style="color:var(--red);">-1 035 ₽ · -1,54%</span></div>
+      <div class="row-detail">Цена: 510,6 ₽ · Купон: 12,5%<br>Погашение: 15.03.2028</div>
+    </div>
+    <div class="row" onclick="this.classList.toggle('open')">
+      <div class="row-main"><span>РУСАЛ БО-001Р-08</span><span style="color:var(--red);">8 476 ₽</span></div>
+      <div class="row-sub"><span>1 шт</span><span style="color:var(--red);">-240 ₽ · -2,77%</span></div>
+      <div class="row-detail">Цена: 8 415,17 ₽ · Купон: 14%</div>
+    </div>
+    <div class="row" onclick="this.classList.toggle('open')">
+      <div class="row-main"><span>ГК Самолет БО-П14</span><span style="color:var(--red);">12 971 ₽</span></div>
+      <div class="row-sub"><span>15 шт</span><span style="color:var(--red);">-851 ₽ · -6,15%</span></div>
+      <div class="row-detail">Цена: 864,7 ₽ · Купон: 15%</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button class="mini-btn" style="flex:1;">Загрузить ещё</button>
+      <button class="mini-btn">20 ▾</button>
+    </div>`},
+  ocr: {title:'Добавлено со скриншота', html: `
+    <p style="font-size:12px;color:var(--text-3);margin:0 0 12px;">от 28.08.2026</p>
+    <div class="ocr-row"><div><p style="font-size:13px;font-weight:600;">Вклад до 24.08.2029</p><p style="font-size:12px;color:var(--text-3);margin:2px 0 0;">10 000 ₽ · 13%</p></div><button class="mini-btn">Ред.</button></div>
+    <div class="ocr-row"><div><p style="font-size:13px;font-weight:600;">Вклад до 24.07.2029</p><p style="font-size:12px;color:var(--text-3);margin:2px 0 0;">10 051 ₽ · 13%</p></div><button class="mini-btn">Ред.</button></div>
+    <div class="ocr-row err"><div><p style="font-size:13px;font-weight:600;color:var(--red);">Не удалось распознать</p><p style="font-size:12px;color:var(--red);margin:2px 0 0;">screenshot_04.jpeg</p></div><button class="mini-btn">Вручную</button></div>`},
+  form: {title:'Новый актив · шаг 2 из 3', html: `
+    <div style="display:flex;gap:4px;margin-bottom:18px;">
+      <div style="flex:1;height:3px;border-radius:2px;background:var(--accent);"></div>
+      <div style="flex:1;height:3px;border-radius:2px;background:var(--accent);"></div>
+      <div style="flex:1;height:3px;border-radius:2px;background:var(--border);"></div>
+    </div>
+    <p style="font-size:12px;color:var(--text-3);margin:0 0 12px;">Вклад · обязательные поля</p>
+    <label style="font-size:12px;color:var(--text-2);">Название</label>
+    <input placeholder="Например, Вклад до 24.09.2027" style="width:100%;margin:4px 0 12px;padding:8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+    <label style="font-size:12px;color:var(--text-2);">Сумма, ₽</label>
+    <input placeholder="10 000" style="width:100%;margin:4px 0 12px;padding:8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+    <label style="font-size:12px;color:var(--text-2);">Дата открытия</label>
+    <input placeholder="28.08.2026" style="width:100%;margin:4px 0 14px;padding:8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+    <p style="font-size:12px;color:var(--accent);margin:0 0 16px;">+ Добавить дополнительные детали</p>
+    <button class="mini-btn" style="width:100%;padding:10px;background:var(--text);color:#fff;border-color:var(--text);">Далее</button>`}
+};
+function m1show(key){
+  document.getElementById('m1-title').textContent = m1screens[key].title;
+  document.getElementById('m1-body').innerHTML = m1screens[key].html;
+  document.querySelectorAll('.mock-block')[0].querySelectorAll('.mock-tabs button').forEach(b=>b.classList.remove('active'));
+  document.getElementById('m1-'+key).classList.add('active');
+}
+m1show('empty');
+</script>
+
+
+<h1 id="mockup-payouts" class="section-nav-anchor">Приложение Б. Макет страницы выплат</h1>
+<p>Календарь выплат из раздела 22: переключение по дням/месяцам/годам, фильтр по типу выплаты в режиме «Дни».</p>
+
+<div class="mock-block">
+  <div class="mock-tabs">
+    <button id="m2-days" onclick="m2mode('days')">Дни</button>
+    <button id="m2-months" onclick="m2mode('months')">Месяцы</button>
+    <button id="m2-years" onclick="m2mode('years')">Годы</button>
+  </div>
+  <div class="phone">
+    <div class="phone-head"><span>&#9776;</span><span>Выплаты</span></div>
+    <div class="phone-body">
+      <div class="mock-tabs" id="m2-chips" style="margin-bottom:10px;">
+        <span class="chip active" onclick="m2filter('all',this)">Все</span>
+        <span class="chip" onclick="m2filter('interest',this)">Проценты</span>
+        <span class="chip" onclick="m2filter('coupon',this)">Купоны</span>
+        <span class="chip" onclick="m2filter('div',this)">Дивиденды</span>
+        <span class="chip" onclick="m2filter('principal',this)">Тело</span>
+      </div>
+      <div id="m2-body"></div>
+    </div>
+  </div>
+</div>
+<script>
+const m2day = [
+  {date:'02 сен', instrument:'ОФЗ 26238', type:'Купон', amount:2340, status:'Ожидается', cls:'coupon'},
+  {date:'05 сен', instrument:'Ключевой Премьер', type:'Тело вклада', amount:129133, status:'Ожидается', cls:'principal'},
+  {date:'05 сен', instrument:'Ключевой Премьер', type:'Проценты', amount:8402, status:'Ожидается', cls:'interest'},
+  {date:'15 сен', instrument:'Кредит 3', type:'Тело вклада', amount:200000, status:'Ожидается', cls:'principal'},
+  {date:'20 сен', instrument:'Сберегательный в юанях', type:'Дивиденды', amount:1120, status:'Получено', cls:'div'},
+  {date:'23 сен', instrument:'ОФЗ 26240', type:'Купон', amount:3015, status:'Ожидается', cls:'coupon'}
+];
+const m2month = [
+  {date:'Сентябрь 2026', instrument:'6 выплат', amount:344010, cls:'all'},
+  {date:'Октябрь 2026', instrument:'4 выплаты', amount:306327, cls:'all'},
+  {date:'Ноябрь 2026', instrument:'3 выплаты', amount:12344, cls:'all'},
+  {date:'Декабрь 2026', instrument:'5 выплат', amount:19872, cls:'all'}
+];
+const m2year = [
+  {date:'2026', instrument:'42 выплаты', amount:712940, cls:'all'},
+  {date:'2027', instrument:'58 выплат', amount:126478, cls:'all'},
+  {date:'2028', instrument:'31 выплата', amount:71205, cls:'all'}
+];
+let m2mode_ = 'days'; let m2filter_ = 'all';
+function m2rows(data, withType){
+  return data.map(r => `
+    <div class="pay-row">
+      <div style="min-width:52px;color:var(--text-3);">${r.date}</div>
+      <div style="flex:1;padding:0 8px;">
+        <p style="font-weight:600;margin:0;">${r.instrument}</p>
+        ${withType && r.type ? `<span class="pay-type type-${r.cls}">${r.type}</span> <span style="font-size:11px;color:var(--text-3);">${r.status}</span>` : ''}
+      </div>
+      <div style="font-weight:600;text-align:right;white-space:nowrap;">${r.amount.toLocaleString('ru-RU')} ₽</div>
+    </div>`).join('');
+}
+function m2render(){
+  let data = m2mode_==='days' ? m2day : m2mode_==='months' ? m2month : m2year;
+  let withType = m2mode_==='days';
+  if(withType && m2filter_!=='all'){ data = data.filter(r=>r.cls===m2filter_); }
+  const total = data.reduce((s,r)=>s+r.amount,0);
+  document.getElementById('m2-body').innerHTML = `
+    <p style="font-size:12px;color:var(--text-2);margin:0 0 10px;">Итого за период: <strong>${total.toLocaleString('ru-RU')} ₽</strong></p>
+    ${data.length ? m2rows(data, withType) : '<p style="font-size:13px;color:var(--text-3);">Нет выплат этого типа</p>'}`;
+}
+function m2mode(m){
+  m2mode_ = m; m2filter_ = 'all';
+  document.querySelectorAll('#m2-days,#m2-months,#m2-years').forEach(b=>b.classList.remove('active'));
+  document.getElementById('m2-'+m).classList.add('active');
+  document.querySelectorAll('#m2-chips .chip').forEach(c=>c.classList.remove('active'));
+  document.querySelector('#m2-chips .chip').classList.add('active');
+  m2render();
+}
+function m2filter(t, el){
+  if(m2mode_!=='days') return;
+  m2filter_ = t;
+  document.querySelectorAll('#m2-chips .chip').forEach(c=>c.classList.remove('active'));
+  el.classList.add('active');
+  m2render();
+}
+document.getElementById('m2-days').classList.add('active');
+m2render();
+</script>
+
+
+</main>
+</div>
+
+</body>
+</html>

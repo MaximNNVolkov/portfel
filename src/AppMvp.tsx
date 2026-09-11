@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import {
+  Link,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import "./App.css";
 
 type AssetType =
@@ -14,6 +24,7 @@ type Product = {
   date: string;
   institution: string;
   currency: string;
+  source: string;
 };
 type Payment = {
   id: string;
@@ -31,6 +42,8 @@ type Transaction = {
   productId?: string;
 };
 type Snapshot = { date: string; value: number };
+type OcrFailure = { filename: string; reason: string };
+type OcrUploadResult = { date: string; items: Product[]; failures: OcrFailure[] };
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "http://localhost:3001/api";
@@ -46,6 +59,7 @@ const initialProducts: Product[] = [
     date: "2026-02-12",
     institution: "Т-Инвестиции",
     currency: "RUB",
+    source: "manual",
   },
   {
     id: "sber",
@@ -57,6 +71,7 @@ const initialProducts: Product[] = [
     date: "2026-03-18",
     institution: "Т-Инвестиции",
     currency: "RUB",
+    source: "manual",
   },
   {
     id: "deposit",
@@ -68,6 +83,7 @@ const initialProducts: Product[] = [
     date: "2026-01-05",
     institution: "Т-Банк",
     currency: "RUB",
+    source: "manual",
   },
   {
     id: "fund",
@@ -79,6 +95,7 @@ const initialProducts: Product[] = [
     date: "2026-04-21",
     institution: "Т-Инвестиции",
     currency: "RUB",
+    source: "manual",
   },
   {
     id: "cash",
@@ -90,6 +107,7 @@ const initialProducts: Product[] = [
     date: "2026-09-06",
     institution: "Т-Инвестиции",
     currency: "RUB",
+    source: "manual",
   },
 ];
 const initialPayments: Payment[] = [
@@ -140,13 +158,13 @@ const initialTransactions: Transaction[] = [
 ];
 
 const navItems = [
-  ["Портфель", "◈"],
-  ["Инструменты", "▦"],
-  ["Операции", "↕"],
-  ["Выплаты", "◷"],
-  ["Аналитика", "⌁"],
-  ["Рекомендации", "✦"],
-  ["Интеграции", "⇄"],
+  ["Портфель", "◈", "/portfolio"],
+  ["Инструменты", "▦", "/products"],
+  ["Операции", "↕", "/transactions"],
+  ["Выплаты", "◷", "/payments"],
+  ["Аналитика", "⌁", "/analytics"],
+  ["Рекомендации", "✦", "/recommendations"],
+  ["Интеграции", "⇄", "/integrations"],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -158,6 +176,8 @@ const typeColors: Record<AssetType, string> = {
 };
 const money = (value: number) =>
   `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
+const pct = (numerator: number, denominator: number) =>
+  denominator ? (numerator / denominator) * 100 : 0;
 const dateLabel = (date: string) =>
   new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" })
     .format(new Date(`${date}T12:00:00`))
@@ -176,14 +196,11 @@ function chartPath(history: Snapshot[], close = false) {
 }
 
 function AppMvp() {
+  const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [payments, setPayments] = useState<Payment[]>(initialPayments);
   const [transactions, setTransactions] =
     useState<Transaction[]>(initialTransactions);
-  const [activeNav, setActiveNav] = useState("Портфель");
-  const [modal, setModal] = useState<
-    "product" | "payment" | "transaction" | null
-  >(null);
   const [toast, setToast] = useState("");
   const [hideAmounts, setHideAmounts] = useState(false);
   const [token, setToken] = useState(
@@ -191,12 +208,13 @@ function AppMvp() {
   );
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
+  const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
 
   function expireSession() {
     localStorage.removeItem(tokenKey);
     setToken("");
     setApiOnline(false);
-    setModal(null);
+    setOcrSummary(null);
     setToast("Сессия закончилась. Войдите снова.");
   }
 
@@ -298,8 +316,8 @@ function AppMvp() {
       product = (await response.json()) as Product;
     }
     setProducts((current) => [...current, product]);
-    setModal(null);
     setToast("Продукт добавлен в портфель");
+    navigate("/products");
   }
   async function addPayment(payment: Payment) {
     if (apiOnline) {
@@ -312,8 +330,8 @@ function AppMvp() {
       payment = (await response.json()) as Payment;
     }
     setPayments((current) => [...current, payment]);
-    setModal(null);
     setToast("Выплата добавлена в календарь");
+    navigate("/payments");
   }
   async function removeProduct(id: string) {
     if (apiOnline) {
@@ -325,6 +343,28 @@ function AppMvp() {
     }
     setProducts((current) => current.filter((product) => product.id !== id));
     setToast("Продукт удалён");
+    navigate("/products");
+  }
+  async function updateProduct(product: Product) {
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/products/${product.id}`, {
+        method: "PATCH",
+        headers: authHeaders,
+        body: JSON.stringify(product),
+      });
+      if (!response.ok) throw new Error("Не удалось сохранить изменения");
+      product = (await response.json()) as Product;
+    }
+    setProducts((current) =>
+      current.map((item) => (item.id === product.id ? product : item)),
+    );
+    setToast("Изменения сохранены");
+    navigate(-1);
+  }
+  function applyOcrResult(result: OcrUploadResult) {
+    setProducts((current) => [...current, ...result.items]);
+    setOcrSummary(result);
+    navigate("/ocr-summary");
   }
   async function addTransaction(transaction: Transaction) {
     if (apiOnline) {
@@ -357,8 +397,8 @@ function AppMvp() {
           : product,
       ),
     );
-    setModal(null);
     setToast("Операция проведена");
+    navigate("/transactions");
   }
   async function signIn(
     event: FormEvent<HTMLFormElement>,
@@ -386,10 +426,17 @@ function AppMvp() {
       mode === "register" ? "Аккаунт создан" : "Добро пожаловать в Капитал",
     );
   }
-  function signOut() {
+  async function signOut() {
+    if (apiOnline) {
+      await fetch(`${apiUrl}/auth/logout`, {
+        method: "POST",
+        headers: authHeaders,
+      }).catch(() => undefined);
+    }
     localStorage.removeItem(tokenKey);
     setToken("");
     setApiOnline(false);
+    setOcrSummary(null);
   }
 
   if (!token) return <Login onSubmit={signIn} />;
@@ -407,29 +454,29 @@ function AppMvp() {
           <span className="chevron">⌄</span>
         </div>
         <nav className="nav-list" aria-label="Основная навигация">
-          {navItems.map(([label, icon]) => (
-            <button
-              className={`nav-item ${activeNav === label ? "active" : ""}`}
+          {navItems.map(([label, icon, path]) => (
+            <NavLink
+              className={({ isActive }) =>
+                `nav-item ${isActive ? "active" : ""}`
+              }
               key={label}
-              onClick={() => setActiveNav(label)}
-              type="button"
+              to={path}
             >
               <span className="nav-icon">{icon}</span>
               {label}
               {label === "Рекомендации" && (
                 <span className="notification-dot" />
               )}
-            </button>
+            </NavLink>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <button
-            className="nav-item"
-            onClick={() => setActiveNav("Настройки")}
-            type="button"
+          <NavLink
+            className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            to="/settings"
           >
             <span className="nav-icon">⚙</span>Настройки
-          </button>
+          </NavLink>
           <div className="profile">
             <span className="avatar">М</span>
             <span>
@@ -470,81 +517,109 @@ function AppMvp() {
             </button>
           </div>
         </header>
-        {activeNav === "Портфель" && (
-          <Dashboard
-            total={total}
-            invested={invested}
-            profit={profit}
-            paid={paid}
-            expected={expected}
-            groups={groups}
-            products={products}
-            payments={payments}
-            history={history}
-            hideAmounts={hideAmounts}
-            onHide={() => setHideAmounts(!hideAmounts)}
-            onAdd={() => setModal("product")}
-            onOpen={setActiveNav}
+        <Routes>
+          <Route path="/" element={<Navigate to="/portfolio" replace />} />
+          <Route
+            path="/portfolio"
+            element={
+              <Dashboard
+                total={total}
+                invested={invested}
+                profit={profit}
+                paid={paid}
+                expected={expected}
+                groups={groups}
+                products={products}
+                payments={payments}
+                history={history}
+                hideAmounts={hideAmounts}
+                onHide={() => setHideAmounts(!hideAmounts)}
+              />
+            }
           />
-        )}
-        {activeNav === "Инструменты" && (
-          <ProductsPage
-            products={products}
-            onAdd={() => setModal("product")}
-            onRemove={removeProduct}
+          <Route
+            path="/products"
+            element={<ProductsPage products={products} />}
           />
-        )}
-        {activeNav === "Операции" && (
-          <TransactionsPage
-            transactions={transactions}
-            products={products}
-            onAdd={() => setModal("transaction")}
+          <Route
+            path="/products/new"
+            element={
+              <ProductFormPage
+                token={token}
+                onUnauthorized={expireSession}
+                onSubmit={addProduct}
+                onOcrComplete={applyOcrResult}
+              />
+            }
           />
-        )}
-        {activeNav === "Выплаты" && (
-          <PaymentsPage payments={payments} onAdd={() => setModal("payment")} />
-        )}
-        {activeNav === "Аналитика" && (
-          <AnalyticsPage total={total} groups={groups} profit={profit} />
-        )}
-        {activeNav === "Рекомендации" && (
-          <Recommendations
-            products={products}
-            payments={payments}
-            total={total}
+          <Route
+            path="/products/:id/edit"
+            element={<EditProductPage products={products} onSubmit={updateProduct} />}
           />
-        )}
-        {activeNav === "Интеграции" && <Integrations token={token} />}
-        {activeNav === "Настройки" && (
-          <Settings
-            onReset={() => {
-              localStorage.removeItem(storageKey);
-              setProducts(initialProducts);
-              setPayments(initialPayments);
-              setTransactions(initialTransactions);
-              setToast("Демонстрационные данные восстановлены");
-            }}
+          <Route
+            path="/products/:id/delete"
+            element={
+              <DeleteProductPage products={products} onConfirm={removeProduct} />
+            }
           />
-        )}
+          <Route
+            path="/transactions"
+            element={
+              <TransactionsPage transactions={transactions} products={products} />
+            }
+          />
+          <Route
+            path="/transactions/new"
+            element={
+              <TransactionFormPage products={products} onSubmit={addTransaction} />
+            }
+          />
+          <Route
+            path="/payments"
+            element={<PaymentsPage payments={payments} />}
+          />
+          <Route
+            path="/payments/new"
+            element={<PaymentFormPage onSubmit={addPayment} />}
+          />
+          <Route
+            path="/analytics"
+            element={
+              <AnalyticsPage total={total} groups={groups} profit={profit} />
+            }
+          />
+          <Route
+            path="/recommendations"
+            element={
+              <Recommendations
+                products={products}
+                payments={payments}
+                total={total}
+              />
+            }
+          />
+          <Route path="/integrations" element={<Integrations token={token} />} />
+          <Route
+            path="/settings"
+            element={
+              <Settings
+                onReset={() => {
+                  localStorage.removeItem(storageKey);
+                  setProducts(initialProducts);
+                  setPayments(initialPayments);
+                  setTransactions(initialTransactions);
+                  setToast("Демонстрационные данные восстановлены");
+                }}
+              />
+            }
+          />
+          <Route
+            path="/ocr-summary"
+            element={<OcrSummaryPage summary={ocrSummary} />}
+          />
+          <Route path="*" element={<Navigate to="/portfolio" replace />} />
+        </Routes>
       </main>
-      {modal === "product" && (
-        <ProductModal
-          token={token}
-          onUnauthorized={expireSession}
-          onClose={() => setModal(null)}
-          onSubmit={addProduct}
-        />
-      )}
-      {modal === "payment" && (
-        <PaymentModal onClose={() => setModal(null)} onSubmit={addPayment} />
-      )}
-      {modal === "transaction" && (
-        <TransactionModal
-          products={products}
-          onClose={() => setModal(null)}
-          onSubmit={addTransaction}
-        />
-      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -562,8 +637,6 @@ function Dashboard({
   history,
   hideAmounts,
   onHide,
-  onAdd,
-  onOpen,
 }: {
   total: number;
   invested: number;
@@ -576,13 +649,45 @@ function Dashboard({
   history: Snapshot[];
   hideAmounts: boolean;
   onHide: () => void;
-  onAdd: () => void;
-  onOpen: (page: string) => void;
 }) {
+  const navigate = useNavigate();
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
   const linePath = chartPath(history);
   const areaPath = chartPath(history, true);
   const lastSnapshot = history.at(-1);
+  if (products.length === 0) {
+    return (
+      <div className="content-wrap">
+        <section className="empty-portfolio">
+          <p className="eyebrow">ПОРТФЕЛЬ</p>
+          <h1>Ваш портфель пуст. Добавьте первый актив:</h1>
+          <div className="empty-options">
+            <Link className="empty-option" to="/products/new?mode=screenshot">
+              <span className="empty-option-icon">📷</span>
+              <div>
+                <strong>Загрузить скриншот из приложения банка/брокера</strong>
+                <small>Распознаем данные автоматически</small>
+              </div>
+            </Link>
+            <Link className="empty-option" to="/integrations">
+              <span className="empty-option-icon">🔗</span>
+              <div>
+                <strong>Подключить брокера по API</strong>
+                <small>Т-Инвестиции — данные обновляются автоматически</small>
+              </div>
+            </Link>
+            <Link className="empty-option" to="/products/new">
+              <span className="empty-option-icon">✍️</span>
+              <div>
+                <strong>Ввести вручную</strong>
+                <small>Если у вас нет скриншота под рукой</small>
+              </div>
+            </Link>
+          </div>
+        </section>
+      </div>
+    );
+  }
   return (
     <div className="content-wrap">
       <section className="page-heading">
@@ -595,9 +700,9 @@ function Dashboard({
             Вот как чувствует себя ваш капитал сегодня.
           </p>
         </div>
-        <button className="primary-button" onClick={onAdd} type="button">
+        <Link className="primary-button" to="/products/new">
           <span>＋</span> Добавить продукт
-        </button>
+        </Link>
       </section>
       <section className="hero-grid">
         <article className="total-card">
@@ -619,7 +724,7 @@ function Dashboard({
           <div className="profit-line">
             <span className="positive-pill">↗ {display(profit)}</span>
             <strong>
-              +{((profit / invested) * 100).toFixed(2).replace(".", ",")}%
+              +{pct(profit, invested).toFixed(2).replace(".", ",")}%
             </strong>
             <span className="muted">за всё время</span>
           </div>
@@ -688,7 +793,7 @@ function Dashboard({
           </div>
           <button
             className="text-button"
-            onClick={() => onOpen("Инструменты")}
+            onClick={() => navigate("/products")}
             type="button"
           >
             Подробнее о портфеле <span>→</span>
@@ -702,7 +807,7 @@ function Dashboard({
         </div>
         <button
           className="outline-button"
-          onClick={() => onOpen("Инструменты")}
+          onClick={() => navigate("/products")}
           type="button"
         >
           Все инструменты <span>→</span>
@@ -736,11 +841,11 @@ function Dashboard({
                 <div className="holding-value">
                   <strong>{display(value)}</strong>
                   <small className="teal-text">
-                    {((value / total) * 100).toFixed(1).replace(".", ",")}%
+                    {pct(value, total).toFixed(1).replace(".", ",")}%
                   </small>
                 </div>
                 <span className="share">
-                  {Math.round((value / total) * 100)}%
+                  {Math.round(pct(value, total))}%
                 </span>
               </div>
             ))}
@@ -754,7 +859,7 @@ function Dashboard({
             </div>
             <button
               className="round-arrow"
-              onClick={() => onOpen("Выплаты")}
+              onClick={() => navigate("/payments")}
               aria-label="Открыть календарь выплат"
               type="button"
             >
@@ -784,7 +889,7 @@ function Dashboard({
           </div>
           <button
             className="text-button full-width"
-            onClick={() => onOpen("Выплаты")}
+            onClick={() => navigate("/payments")}
             type="button"
           >
             Открыть календарь выплат <span>→</span>
@@ -799,21 +904,13 @@ function Dashboard({
   );
 }
 
-function ProductsPage({
-  products,
-  onAdd,
-  onRemove,
-}: {
-  products: Product[];
-  onAdd: () => void;
-  onRemove: (id: string) => void;
-}) {
+function ProductsPage({ products }: { products: Product[] }) {
   return (
     <Page title="Инструменты" subtitle="Все продукты в вашем портфеле">
       <div className="toolbar">
-        <button className="primary-button" onClick={onAdd} type="button">
+        <Link className="primary-button" to="/products/new">
           ＋ Добавить продукт
-        </button>
+        </Link>
         <button className="outline-button" type="button">
           Фильтр: все типы⌄
         </button>
@@ -840,18 +937,25 @@ function ProductsPage({
             <strong>{money(product.amount)}</strong>
             <span className="teal-text">
               +
-              {(((product.amount - product.invested) / product.invested) * 100)
+              {pct(product.amount - product.invested, product.invested)
                 .toFixed(1)
                 .replace(".", ",")}
               %
             </span>
-            <button
-              className="delete-button"
-              onClick={() => onRemove(product.id)}
-              type="button"
-            >
-              Удалить
-            </button>
+            <div className="row-actions">
+              <Link
+                className="outline-button"
+                to={`/products/${product.id}/edit`}
+              >
+                Редактировать
+              </Link>
+              <Link
+                className="delete-button"
+                to={`/products/${product.id}/delete`}
+              >
+                Удалить
+              </Link>
+            </div>
           </div>
         ))}
       </div>
@@ -861,18 +965,16 @@ function ProductsPage({
 function TransactionsPage({
   transactions,
   products,
-  onAdd,
 }: {
   transactions: Transaction[];
   products: Product[];
-  onAdd: () => void;
 }) {
   return (
     <Page title="Операции" subtitle="История пополнений, покупок и выплат">
       <div className="toolbar">
-        <button className="primary-button" onClick={onAdd} type="button">
+        <Link className="primary-button" to="/transactions/new">
           ＋ Новая операция
-        </button>
+        </Link>
       </div>
       <div className="table-card">
         <div className="table-head">
@@ -900,19 +1002,13 @@ function TransactionsPage({
     </Page>
   );
 }
-function PaymentsPage({
-  payments,
-  onAdd,
-}: {
-  payments: Payment[];
-  onAdd: () => void;
-}) {
+function PaymentsPage({ payments }: { payments: Payment[] }) {
   return (
     <Page title="Выплаты" subtitle="Календарь ожидаемых доходов">
       <div className="toolbar">
-        <button className="primary-button" onClick={onAdd} type="button">
+        <Link className="primary-button" to="/payments/new">
           ＋ Добавить выплату
-        </button>
+        </Link>
       </div>
       <div className="payment-grid">
         {payments.map((payment) => (
@@ -951,7 +1047,7 @@ function AnalyticsPage({
         <article className="stat-card">
           <span>Доходность</span>
           <strong>
-            +{((profit / (total - profit)) * 100).toFixed(2).replace(".", ",")}%
+            +{pct(profit, total - profit).toFixed(2).replace(".", ",")}%
           </strong>
           <small>простая доходность</small>
         </article>
@@ -964,9 +1060,7 @@ function AnalyticsPage({
           <span>Доля облигаций</span>
           <strong>
             {Math.round(
-              ((groups.find(([name]) => name === "Облигации")?.[1] || 0) /
-                total) *
-                100,
+              pct(groups.find(([name]) => name === "Облигации")?.[1] || 0, total),
             )}
             %
           </strong>
@@ -1021,7 +1115,7 @@ function Recommendations({
           <div>
             <strong>Свободные деньги работают</strong>
             <p>
-              {((cash / total) * 100).toFixed(1).replace(".", ",")}% портфеля
+              {pct(cash, total).toFixed(1).replace(".", ",")}% портфеля
               сейчас находится в денежных средствах.
             </p>
           </div>
@@ -1149,14 +1243,26 @@ function Integrations({ token }: { token: string }) {
 function Page({
   title,
   subtitle,
+  back,
   children,
 }: {
   title: string;
   subtitle: string;
+  back?: boolean;
   children: React.ReactNode;
 }) {
+  const navigate = useNavigate();
   return (
     <div className="content-wrap inner-page">
+      {back && (
+        <button
+          className="outline-button back-button"
+          onClick={() => navigate(-1)}
+          type="button"
+        >
+          ← Назад
+        </button>
+      )}
       <section className="page-heading">
         <div>
           <p className="eyebrow">ПОРТФЕЛЬ · MVP</p>
@@ -1221,24 +1327,27 @@ function Login({
     </div>
   );
 }
-function ProductModal({
+function ProductFormPage({
   token,
   onUnauthorized,
-  onClose,
   onSubmit,
+  onOcrComplete,
 }: {
   token: string;
   onUnauthorized: () => void;
-  onClose: () => void;
   onSubmit: (product: Product) => void;
+  onOcrComplete: (result: OcrUploadResult) => void;
 }) {
-  const [mode, setMode] = useState<"manual" | "screenshot">("manual");
+  const [searchParams] = useSearchParams();
+  const [mode, setMode] = useState<"manual" | "screenshot">(
+    searchParams.get("mode") === "screenshot" ? "screenshot" : "manual",
+  );
   const [type, setType] = useState<AssetType>("Облигации");
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
+  const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState(false);
   const [recognizing, setRecognizing] = useState(false);
   const [error, setError] = useState("");
   const submit = (event: FormEvent) => {
@@ -1248,11 +1357,12 @@ function ProductModal({
       name,
       type,
       amount: Number(amount),
-      invested: Number(amount),
+      invested: Number(invested || amount),
       ticker: "",
       date: new Date().toISOString().slice(0, 10),
       institution: institution || "Ручной ввод",
       currency: "RUB",
+      source: "manual",
     });
   };
   async function recognizeScreenshot() {
@@ -1260,26 +1370,27 @@ function ProductModal({
     setRecognizing(true);
     setError("");
     try {
-      const response = await fetch(`${apiUrl}/ocr/preview`, {
+      const response = await fetch(`${apiUrl}/ocr/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
       });
       const result = (await response.json()) as {
         error?: string;
-        items?: Array<{ name: string; type: AssetType; amount: number; institution: string }>;
+        date?: string;
+        items?: Product[];
+        failures?: OcrFailure[];
       };
       if (response.status === 401) {
         onUnauthorized();
         return;
       }
-      if (!response.ok || !result.items?.length) throw new Error(result.error || "Не удалось распознать изображение");
-      const item = result.items[0];
-      setName(item.name);
-      setType(item.type);
-      setAmount(item.amount > 0 ? String(item.amount) : "");
-      setInstitution(item.institution);
-      setPreview(true);
+      if (!response.ok) throw new Error(result.error || "Не удалось распознать изображение");
+      onOcrComplete({
+        date: result.date || new Date().toISOString().slice(0, 10),
+        items: result.items || [],
+        failures: result.failures || [],
+      });
     } catch (recognitionError) {
       setError(recognitionError instanceof Error ? recognitionError.message : "Не удалось распознать изображение");
     } finally {
@@ -1287,7 +1398,7 @@ function ProductModal({
     }
   }
   return (
-    <Modal title="Добавить продукт" onClose={onClose}>
+    <Page title="Добавить продукт" subtitle="Ручной ввод или распознавание скриншота" back>
       <div className="mode-switch">
         <button
           className={mode === "manual" ? "selected" : ""}
@@ -1304,18 +1415,16 @@ function ProductModal({
           Скриншот
         </button>
       </div>
-      {mode === "screenshot" && !preview && (
+      {mode === "screenshot" && (
         <div className="upload-box">
           <span>▧</span>
           <strong>Загрузите скриншот</strong>
-          <small>PNG, JPG до 10 МБ</small>
+          <small>PNG, JPG до 10 МБ. Распознанные данные сохранятся сразу, без подтверждения — отредактировать их можно будет на экране-сводке.</small>
           <input
             type="file"
             accept="image/png,image/jpeg"
             onChange={(event) => {
-              const selected = event.target.files?.[0] || null;
-              setFile(selected);
-              setPreview(false);
+              setFile(event.target.files?.[0] || null);
               setError("");
             }}
           />
@@ -1328,36 +1437,14 @@ function ProductModal({
                 disabled={recognizing}
                 type="button"
               >
-                {recognizing ? "Распознаваем..." : "Распознать данные"}
+                {recognizing ? "Распознаём и сохраняем..." : "Распознать и сохранить"}
               </button>
             </>
           )}
           {error && <small className="form-error">{error}</small>}
         </div>
       )}
-      {mode === "screenshot" && preview && (
-        <div className="ocr-confirm">
-          <div className="ocr-status">
-            <span>✓</span>
-            <div>
-              <strong>Проверьте распознанные данные</strong>
-              <small>Результат нельзя сохранить без вашего подтверждения</small>
-            </div>
-          </div>
-          <label>
-            Тип продукта
-            <select
-              value={type}
-              onChange={(event) => setType(event.target.value as AssetType)}
-            >
-              {Object.keys(typeColors).map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-      {(mode === "manual" || preview) && (
+      {mode === "manual" && (
         <form className="modal-form" onSubmit={submit}>
           <label>
             Название
@@ -1380,6 +1467,16 @@ function ProductModal({
             />
           </label>
           <label>
+            Первичная цена
+            <input
+              value={invested}
+              onChange={(event) => setInvested(event.target.value)}
+              type="number"
+              min="1"
+              placeholder="100000"
+            />
+          </label>
+          <label>
             Банк или брокер
             <input
               value={institution}
@@ -1387,19 +1484,213 @@ function ProductModal({
               placeholder="Необязательно"
             />
           </label>
+          <label>
+            Тип продукта
+            <select
+              value={type}
+              onChange={(event) => setType(event.target.value as AssetType)}
+            >
+              {Object.keys(typeColors).map((item) => (
+                <option key={item}>{item}</option>
+              ))}
+            </select>
+          </label>
           <button className="primary-button" type="submit">
-            {preview ? "Подтвердить и сохранить" : "Сохранить продукт"}
+            Сохранить продукт
           </button>
         </form>
       )}
-    </Modal>
+    </Page>
   );
 }
-function PaymentModal({
-  onClose,
+function EditProductPage({
+  products,
   onSubmit,
 }: {
-  onClose: () => void;
+  products: Product[];
+  onSubmit: (product: Product) => void;
+}) {
+  const { id } = useParams();
+  const product = products.find((item) => item.id === id);
+  const [name, setName] = useState(product?.name || "");
+  const [type, setType] = useState<AssetType>(product?.type || "Облигации");
+  const [amount, setAmount] = useState(String(product?.amount || ""));
+  const [invested, setInvested] = useState(String(product?.invested || ""));
+  const [institution, setInstitution] = useState(product?.institution || "");
+  useEffect(() => {
+    if (!product) return;
+    setName(product.name);
+    setType(product.type);
+    setAmount(String(product.amount));
+    setInvested(String(product.invested));
+    setInstitution(product.institution);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  if (!product) return <Navigate to="/products" replace />;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onSubmit({
+      ...product,
+      name,
+      type,
+      amount: Number(amount),
+      invested: Number(invested || amount),
+      institution: institution || "Ручной ввод",
+    });
+  };
+  return (
+    <Page title="Редактировать инструмент" subtitle={product.name} back>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          Название
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            required
+          />
+        </label>
+        <label>
+          Текущая стоимость
+          <input
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            type="number"
+            min="1"
+            required
+          />
+        </label>
+        <label>
+          Первичная цена
+          <input
+            value={invested}
+            onChange={(event) => setInvested(event.target.value)}
+            type="number"
+            min="1"
+          />
+        </label>
+        <label>
+          Банк или брокер
+          <input
+            value={institution}
+            onChange={(event) => setInstitution(event.target.value)}
+          />
+        </label>
+        <label>
+          Тип продукта
+          <select
+            value={type}
+            onChange={(event) => setType(event.target.value as AssetType)}
+          >
+            {Object.keys(typeColors).map((item) => (
+              <option key={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <button className="primary-button" type="submit">
+          Сохранить изменения
+        </button>
+      </form>
+    </Page>
+  );
+}
+function DeleteProductPage({
+  products,
+  onConfirm,
+}: {
+  products: Product[];
+  onConfirm: (id: string) => void;
+}) {
+  const { id } = useParams();
+  const product = products.find((item) => item.id === id);
+  if (!product || !id) return <Navigate to="/products" replace />;
+  return (
+    <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
+      <div className="confirm-card">
+        <p>
+          Удалить <strong>{product.name}</strong> ({money(product.amount)})
+          из портфеля?
+        </p>
+        <div className="confirm-actions">
+          <Link className="outline-button" to="/products">
+            Отмена
+          </Link>
+          <button
+            className="delete-button primary"
+            onClick={() => onConfirm(id)}
+            type="button"
+          >
+            Удалить безвозвратно
+          </button>
+        </div>
+      </div>
+    </Page>
+  );
+}
+function OcrSummaryPage({ summary }: { summary: OcrUploadResult | null }) {
+  if (!summary) return <Navigate to="/products" replace />;
+  const formattedDate = new Date(`${summary.date}T12:00:00`).toLocaleDateString("ru-RU");
+  return (
+    <Page
+      title={`Добавлено со скриншота от ${formattedDate}`}
+      subtitle="Данные сохранены как распознаны. Проверьте каждую запись и поправьте при необходимости."
+    >
+      <div className="table-card">
+        {(summary.items.length > 0 || summary.failures.length > 0) && (
+          <div className="table-head">
+            <span>Название</span>
+            <span>Тип</span>
+            <span>Стоимость</span>
+            <span>Источник</span>
+            <span>Действия</span>
+          </div>
+        )}
+        {summary.items.map((item) => (
+          <div className="table-row" key={item.id}>
+            <div>
+              <strong>{item.name}</strong>
+              <small>
+                {item.institution} · {item.currency}
+              </small>
+            </div>
+            <span className={`type-tag ${typeColors[item.type]}`}>
+              {item.type}
+            </span>
+            <strong>{money(item.amount)}</strong>
+            <span className="teal-text">Со скриншота</span>
+            <Link className="outline-button" to={`/products/${item.id}/edit`}>
+              Редактировать
+            </Link>
+          </div>
+        ))}
+        {summary.failures.map((failure) => (
+          <div className="table-row" key={failure.filename}>
+            <div>
+              <strong>Не удалось распознать {failure.filename}</strong>
+              <small>{failure.reason}</small>
+            </div>
+            <span />
+            <span />
+            <span>Требует ввода</span>
+            <Link className="outline-button" to="/products/new">
+              Добавить вручную
+            </Link>
+          </div>
+        ))}
+        {!summary.items.length && !summary.failures.length && (
+          <p>На этом скриншоте не найдено ни одной записи.</p>
+        )}
+      </div>
+      <div style={{ marginTop: 24 }}>
+        <Link className="primary-button" to="/portfolio">
+          Перейти к портфелю
+        </Link>
+      </div>
+    </Page>
+  );
+}
+function PaymentFormPage({
+  onSubmit,
+}: {
   onSubmit: (payment: Payment) => void;
 }) {
   const [title, setTitle] = useState("");
@@ -1416,7 +1707,7 @@ function PaymentModal({
     });
   };
   return (
-    <Modal title="Добавить выплату" onClose={onClose}>
+    <Page title="Добавить выплату" subtitle="Купон, дивиденд или процент по вкладу" back>
       <form className="modal-form" onSubmit={submit}>
         <label>
           Название
@@ -1450,16 +1741,14 @@ function PaymentModal({
           Добавить в календарь
         </button>
       </form>
-    </Modal>
+    </Page>
   );
 }
-function TransactionModal({
+function TransactionFormPage({
   products,
-  onClose,
   onSubmit,
 }: {
   products: Product[];
-  onClose: () => void;
   onSubmit: (transaction: Transaction) => void;
 }) {
   const [kind, setKind] = useState<Transaction["kind"]>("Покупка");
@@ -1479,7 +1768,7 @@ function TransactionModal({
     });
   };
   return (
-    <Modal title="Новая операция" onClose={onClose}>
+    <Page title="Новая операция" subtitle="Покупка, продажа, пополнение или выплата" back>
       <form className="modal-form" onSubmit={submit}>
         <label>
           Тип операции
@@ -1534,33 +1823,7 @@ function TransactionModal({
           Провести операцию
         </button>
       </form>
-    </Modal>
-  );
-}
-function Modal({
-  title,
-  onClose,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <section
-        className="modal"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="modal-heading">
-          <h2>{title}</h2>
-          <button onClick={onClose} aria-label="Закрыть" type="button">
-            ×
-          </button>
-        </div>
-        {children}
-      </section>
-    </div>
+    </Page>
   );
 }
 

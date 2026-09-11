@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "api": "tsx server/index.ts",
+    "db:migrate": "tsx server/migrations.ts",
     "dev:full": "concurrently \"npm run api\" \"npm run dev\"",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
@@ -15,8 +16,10 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.3.0",
+    "pg": "^8.23.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
@@ -24,6 +27,7 @@
     "@types/express": "^5.0.6",
     "@types/multer": "^2.2.0",
     "@types/node": "^24.13.3",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
