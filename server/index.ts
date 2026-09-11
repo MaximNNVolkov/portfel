@@ -3,7 +3,7 @@ import express, { type Request, type Response } from 'express'
 import helmet from 'helmet'
 import { rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
-import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { unlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import multer from 'multer'
@@ -12,33 +12,21 @@ import { createWorker } from 'tesseract.js'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { aggregateByGroup, calculateReturns, type EngineContext, type PositionInput } from './portfolio-engine.ts'
+import {
+  deletePayment, deleteProduct, deleteTransaction, deleteUserData,
+  findCashProduct, findPayment, findProduct, findTransaction,
+  insertPayment, insertProduct, insertTransaction,
+  listPayments, listProducts, listSnapshots, listTransactions, loadStore,
+  updatePayment, updateProduct, updateProductPosition, updateTransaction,
+  upsertSnapshot, withTransaction,
+  type Db, type Payment, type Product, type Store, type Transaction,
+} from './repository.ts'
 
 // DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
 // JS Date (which JSON.stringify then turns into a full ISO datetime with a time/Z suffix,
 // breaking every frontend helper that expects a plain date string).
 types.setTypeParser(1082, (value) => value)
 
-type Product = {
-  id: string; name: string; type: string; amount: number; invested: number; ticker: string; date: string; institution: string; currency: string; source: string
-  isin?: string; quantity?: number; averagePrice?: number; currentPrice?: number
-  nominal?: number; accruedInterest?: number; couponRate?: number; couponDate?: string; maturityDate?: string; ofertaDate?: string; amortization?: boolean
-  rate?: number; effectiveRate?: number; capitalization?: boolean; termEndDate?: string; interestPayoutFrequency?: string; replenishable?: boolean; partialWithdrawal?: boolean; autoProlongation?: boolean
-}
-const PRODUCT_COLUMNS = [
-  'id', 'user_id', 'name', 'type', 'amount', 'invested', 'ticker', 'purchase_date', 'institution', 'currency', 'source',
-  'isin', 'quantity', 'average_price', 'current_price',
-  'nominal', 'accrued_interest', 'coupon_rate', 'coupon_date', 'maturity_date', 'oferta_date', 'amortization',
-  'rate', 'effective_rate', 'capitalization', 'term_end_date', 'interest_payout_frequency', 'replenishable', 'partial_withdrawal', 'auto_prolongation',
-] as const
-function productRowValues(product: Product, userId: string): unknown[] {
-  return [
-    product.id, userId, product.name, product.type, product.amount, product.invested,
-    product.ticker || null, product.date, product.institution || 'Ручной ввод', product.currency || 'RUB', product.source || 'manual',
-    product.isin || null, product.quantity ?? null, product.averagePrice ?? null, product.currentPrice ?? null,
-    product.nominal ?? null, product.accruedInterest ?? null, product.couponRate ?? null, product.couponDate || null, product.maturityDate || null, product.ofertaDate || null, product.amortization ?? null,
-    product.rate ?? null, product.effectiveRate ?? null, product.capitalization ?? null, product.termEndDate || null, product.interestPayoutFrequency || null, product.replenishable ?? null, product.partialWithdrawal ?? null, product.autoProlongation ?? null,
-  ]
-}
 function optionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined
   const result = Number(value)
@@ -51,17 +39,12 @@ function optionalBool(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
 }
 type AssetType = 'Облигации' | 'Акции' | 'Вклады' | 'Фонды' | 'Деньги' | 'Прочее'
-type Payment = { id: string; title: string; amount: number; date: string; type: string }
-type Transaction = { id: string; title: string; amount: number; date: string; kind: string; productId?: string }
-type Store = { products: Product[]; payments: Payment[]; transactions: Transaction[] }
 type Snapshot = { date: string; value: number }
 type User = { id: string; email: string; passwordHash: string; salt: string }
 type BrokerConnection = { provider: 'tinkoff'; connectedAt: string; maskedToken: string; status: 'connected' | 'pending' }
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
-const dataPath = resolve(process.cwd(), 'server/data.json')
-const usersPath = resolve(process.cwd(), 'server/users.json')
 const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel'
 const db = new Pool({ connectionString: databaseUrl, max: 10 })
 const users = new Map<string, User>()
@@ -77,58 +60,6 @@ app.use(express.json())
 app.use('/api', apiLimiter)
 app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
-function mapDbProduct(row: any): Product {
-  return {
-    id: row.id,
-    name: row.name,
-    type: row.type,
-    amount: Number(row.amount),
-    invested: Number(row.invested),
-    ticker: row.ticker || '',
-    date: row.purchase_date,
-    institution: row.institution || 'Ручной ввод',
-    currency: row.currency || 'RUB',
-    source: row.source || 'manual',
-    isin: row.isin || undefined,
-    quantity: row.quantity !== null ? Number(row.quantity) : undefined,
-    averagePrice: row.average_price !== null ? Number(row.average_price) : undefined,
-    currentPrice: row.current_price !== null ? Number(row.current_price) : undefined,
-    nominal: row.nominal !== null ? Number(row.nominal) : undefined,
-    accruedInterest: row.accrued_interest !== null ? Number(row.accrued_interest) : undefined,
-    couponRate: row.coupon_rate !== null ? Number(row.coupon_rate) : undefined,
-    couponDate: row.coupon_date || undefined,
-    maturityDate: row.maturity_date || undefined,
-    ofertaDate: row.oferta_date || undefined,
-    amortization: row.amortization ?? undefined,
-    rate: row.rate !== null ? Number(row.rate) : undefined,
-    effectiveRate: row.effective_rate !== null ? Number(row.effective_rate) : undefined,
-    capitalization: row.capitalization ?? undefined,
-    termEndDate: row.term_end_date || undefined,
-    interestPayoutFrequency: row.interest_payout_frequency || undefined,
-    replenishable: row.replenishable ?? undefined,
-    partialWithdrawal: row.partial_withdrawal ?? undefined,
-    autoProlongation: row.auto_prolongation ?? undefined,
-  }
-}
-function mapDbPayment(row: any): Payment {
-  return {
-    id: row.id,
-    title: row.title,
-    amount: Number(row.amount),
-    date: row.payment_date,
-    type: row.type,
-  }
-}
-function mapDbTransaction(row: any): Transaction {
-  return {
-    id: row.id,
-    title: row.title,
-    amount: Number(row.amount),
-    date: row.tx_date,
-    kind: row.kind,
-    productId: row.product_id || undefined,
-  }
-}
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
 // продукты в вход движка и отдаёт его результат наружу, ничего не считая сам.
 //
@@ -163,66 +94,18 @@ function evaluateStore(store: Store) {
   return { portfolio, returns, expected, paid }
 }
 
-async function readStore(userId: string): Promise<Store> {
-  const [productsResult, paymentsResult, transactionsResult] = await Promise.all([
-    db.query('SELECT * FROM products WHERE user_id = $1 ORDER BY purchase_date ASC, name ASC', [userId]),
-    db.query('SELECT * FROM payments WHERE user_id = $1 ORDER BY payment_date ASC, title ASC', [userId]),
-    db.query('SELECT * FROM transactions WHERE user_id = $1 ORDER BY tx_date ASC, title ASC', [userId]),
-  ])
-  return {
-    products: productsResult.rows.map(mapDbProduct),
-    payments: paymentsResult.rows.map(mapDbPayment),
-    transactions: transactionsResult.rows.map(mapDbTransaction),
-  }
-}
-async function recordSnapshot(store: Store, userId: string, date = new Date().toISOString().slice(0, 10)) {
-  if (!store.products.length) return
-  const value = aggregateByGroup(store.products.map(toPosition), ENGINE_CONTEXT).value
-  await db.query(
-    `INSERT INTO portfolio_snapshots (id, user_id, snapshot_date, total_value)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (user_id, snapshot_date) DO UPDATE SET total_value = EXCLUDED.total_value`,
-    [randomUUID(), userId, date, value],
-  )
+// Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается
+// уже после точечной записи и внутри той же транзакции, что и само изменение.
+async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {
+  const products = await listProducts(client, userId)
+  if (!products.length) return
+  const value = aggregateByGroup(products.map(toPosition), ENGINE_CONTEXT).value
+  await upsertSnapshot(client, userId, randomUUID(), date, value)
 }
 async function loadUsers() {
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users')
   for (const row of result.rows) {
     users.set(row.id, { id: row.id, email: row.email, passwordHash: row.passwordHash, salt: row.salt })
-  }
-}
-async function saveUsers() {
-  await Promise.resolve()
-}
-async function writeStore(userId: string, store: Store) {
-  const client = await db.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query('DELETE FROM products WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM payments WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM transactions WHERE user_id = $1', [userId])
-    if (store.products.length) {
-      const columnCount = PRODUCT_COLUMNS.length
-      const productValues = store.products.flatMap((product) => productRowValues(product, userId))
-      const productQuery = `INSERT INTO products (${PRODUCT_COLUMNS.join(', ')}) VALUES ${store.products.map((_, index) => `(${PRODUCT_COLUMNS.map((_column, column) => `$${index * columnCount + column + 1}`).join(', ')})`).join(', ')}`
-      await client.query(productQuery, productValues)
-    }
-    if (store.payments.length) {
-      const paymentValues = store.payments.flatMap((payment) => [payment.id, userId, payment.title, payment.amount, payment.date, payment.type])
-      const paymentQuery = `INSERT INTO payments (id, user_id, title, amount, payment_date, type) VALUES ${store.payments.map((_, index) => `($${index * 6 + 1}, $${index * 6 + 2}, $${index * 6 + 3}, $${index * 6 + 4}, $${index * 6 + 5}, $${index * 6 + 6})`).join(', ')}`
-      await client.query(paymentQuery, paymentValues)
-    }
-    if (store.transactions.length) {
-      const transactionValues = store.transactions.flatMap((transaction) => [transaction.id, userId, transaction.title, transaction.amount, transaction.kind, transaction.date, transaction.productId || null])
-      const transactionQuery = `INSERT INTO transactions (id, user_id, title, amount, kind, tx_date, product_id) VALUES ${store.transactions.map((_, index) => `($${index * 7 + 1}, $${index * 7 + 2}, $${index * 7 + 3}, $${index * 7 + 4}, $${index * 7 + 5}, $${index * 7 + 6}, $${index * 7 + 7})`).join(', ')}`
-      await client.query(transactionQuery, transactionValues)
-    }
-    await client.query('COMMIT')
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
   }
 }
 function requiredText(value: unknown, field: string): string {
@@ -381,23 +264,7 @@ app.post('/api/auth/logout', async (request, response) => {
 app.get('/api/auth/me', async (request, response) => { if (!(await currentUserId(request, response))) return; response.json({ authenticated: true }) })
 app.delete('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const client = await db.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query('DELETE FROM products WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM payments WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM transactions WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM portfolio_snapshots WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM broker_connections WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM sessions WHERE user_id = $1', [userId])
-    await client.query('DELETE FROM users WHERE id = $1', [userId])
-    await client.query('COMMIT')
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
-  }
+  await withTransaction(db, (client) => deleteUserData(client, userId))
   users.delete(userId)
   brokerConnections.delete(userId)
   response.status(204).send()
@@ -437,10 +304,10 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
       source: 'ocr',
     }))
     if (created.length) {
-      const store = await readStore(userId)
-      store.products.push(...created)
-      await recordSnapshot(store, userId)
-      await writeStore(userId, store)
+      await withTransaction(db, async (client) => {
+        for (const product of created) await insertProduct(client, userId, product)
+        await recordSnapshot(client, userId)
+      })
     }
     const unrecognizedCount = candidates.length - recognized.length
     const failures = unrecognizedCount > 0
@@ -459,7 +326,7 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
 })
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await readStore(userId)
+  const store = await loadStore(db, userId)
   const { portfolio, returns, expected, paid } = evaluateStore(store)
   response.json({
     total: portfolio.value,
@@ -481,14 +348,12 @@ app.get('/api/portfolio/summary', async (request, response) => {
 })
 app.get('/api/portfolio/history', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await readStore(userId)
-  await recordSnapshot(store, userId)
-  const result = await db.query('SELECT snapshot_date, total_value FROM portfolio_snapshots WHERE user_id = $1 ORDER BY snapshot_date ASC', [userId])
-  const snapshots: Snapshot[] = result.rows.map((row) => ({ date: row.snapshot_date, value: Number(row.total_value) }))
+  await withTransaction(db, (client) => recordSnapshot(client, userId))
+  const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
 })
 
-app.get('/api/products', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json((await readStore(userId)).products) })
+app.get('/api/products', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listProducts(db, userId)) })
 app.post('/api/products', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -506,17 +371,19 @@ app.post('/api/products', async (request, response) => {
       termEndDate: optionalText(body.termEndDate), interestPayoutFrequency: optionalText(body.interestPayoutFrequency),
       replenishable: optionalBool(body.replenishable), partialWithdrawal: optionalBool(body.partialWithdrawal), autoProlongation: optionalBool(body.autoProlongation),
     }
-    const store = await readStore(userId); store.products.push(product); await recordSnapshot(store, userId); await writeStore(userId, store); response.status(201).json(product)
+    await withTransaction(db, async (client) => {
+      await insertProduct(client, userId, product)
+      await recordSnapshot(client, userId)
+    })
+    response.status(201).json(product)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
 })
 app.patch('/api/products/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const store = await readStore(userId)
-    const index = store.products.findIndex((item) => item.id === request.params.id)
-    if (index === -1) return response.status(404).json({ error: 'Product not found' })
+    const existing = await findProduct(db, userId, request.params.id)
+    if (!existing) return response.status(404).json({ error: 'Product not found' })
     const body = request.body as Partial<Product>
-    const existing = store.products[index]
     const updated: Product = {
       ...existing,
       name: body.name !== undefined ? requiredText(body.name, 'name') : existing.name,
@@ -547,33 +414,38 @@ app.patch('/api/products/:id', async (request, response) => {
       partialWithdrawal: body.partialWithdrawal !== undefined ? optionalBool(body.partialWithdrawal) : existing.partialWithdrawal,
       autoProlongation: body.autoProlongation !== undefined ? optionalBool(body.autoProlongation) : existing.autoProlongation,
     }
-    store.products[index] = updated
-    await recordSnapshot(store, userId); await writeStore(userId, store); response.json(updated)
+    await withTransaction(db, async (client) => {
+      await updateProduct(client, userId, updated)
+      await recordSnapshot(client, userId)
+    })
+    response.json(updated)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
 })
 app.delete('/api/products/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await readStore(userId); const before = store.products.length; store.products = store.products.filter((item) => item.id !== request.params.id)
-  if (store.products.length === before) return response.status(404).json({ error: 'Product not found' })
-  await recordSnapshot(store, userId); await writeStore(userId, store); response.status(204).send()
+  const removed = await withTransaction(db, async (client) => {
+    if (!(await deleteProduct(client, userId, request.params.id))) return false
+    await recordSnapshot(client, userId)
+    return true
+  })
+  if (!removed) return response.status(404).json({ error: 'Product not found' })
+  response.status(204).send()
 })
 
-app.get('/api/payments', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json((await readStore(userId)).payments) })
+app.get('/api/payments', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listPayments(db, userId)) })
 app.post('/api/payments', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const body = request.body as Partial<Payment>
     const payment: Payment = { id: randomUUID(), title: requiredText(body.title, 'title'), amount: positiveNumber(body.amount, 'amount'), date: requiredText(body.date, 'date'), type: requiredText(body.type || 'Прочее', 'type') }
-    const store = await readStore(userId); store.payments.push(payment); await writeStore(userId, store); response.status(201).json(payment)
+    await insertPayment(db, userId, payment); response.status(201).json(payment)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
 })
 app.patch('/api/payments/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const store = await readStore(userId)
-    const index = store.payments.findIndex((item) => item.id === request.params.id)
-    if (index === -1) return response.status(404).json({ error: 'Payment not found' })
-    const existing = store.payments[index]
+    const existing = await findPayment(db, userId, request.params.id)
+    if (!existing) return response.status(404).json({ error: 'Payment not found' })
     const body = request.body as Partial<Payment>
     const updated: Payment = {
       ...existing,
@@ -582,30 +454,62 @@ app.patch('/api/payments/:id', async (request, response) => {
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
       type: body.type !== undefined ? requiredText(body.type, 'type') : existing.type,
     }
-    store.payments[index] = updated
-    await writeStore(userId, store); response.json(updated)
+    await updatePayment(db, userId, updated); response.json(updated)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
 })
 app.delete('/api/payments/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await readStore(userId); const before = store.payments.length
-  store.payments = store.payments.filter((item) => item.id !== request.params.id)
-  if (store.payments.length === before) return response.status(404).json({ error: 'Payment not found' })
-  await writeStore(userId, store); response.status(204).send()
+  if (!(await deletePayment(db, userId, request.params.id))) return response.status(404).json({ error: 'Payment not found' })
+  response.status(204).send()
 })
 
-function applyTransactionEffect(store: Store, transaction: Pick<Transaction, 'kind' | 'amount' | 'productId'>, direction: 1 | -1) {
+// Позиции, затронутые одной операцией. Откат старого эффекта и применение нового
+// обязаны попасть в один и тот же объект в памяти (иначе вторая запись затрёт первую),
+// поэтому продукты кэшируются по id, а в БД уходят одним UPDATE на позицию в flush().
+function createPositionCache(client: Db, userId: string) {
+  const loaded = new Map<string, Product>()
+  const touched = new Set<string>()
+  let cashId: string | null | undefined
+  return {
+    async byId(id: string): Promise<Product | undefined> {
+      const cached = loaded.get(id)
+      if (cached) return cached
+      const product = await findProduct(client, userId, id)
+      if (product) loaded.set(id, product)
+      return product
+    },
+    // Денежный счёт, на который ложатся пополнения и выплаты (§12).
+    async cash(): Promise<Product | undefined> {
+      if (cashId === undefined) {
+        const product = await findCashProduct(client, userId)
+        cashId = product ? product.id : null
+        if (product && !loaded.has(product.id)) loaded.set(product.id, product)
+      }
+      return cashId ? loaded.get(cashId) : undefined
+    },
+    mark(product: Product) { touched.add(product.id) },
+    async flush() {
+      for (const id of touched) {
+        const product = loaded.get(id)
+        if (product) await updateProductPosition(client, userId, product)
+      }
+    },
+  }
+}
+type PositionCache = ReturnType<typeof createPositionCache>
+
+async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'kind' | 'amount' | 'productId'>, direction: 1 | -1) {
   const amount = transaction.amount * direction
-  const product = transaction.productId ? store.products.find((item) => item.id === transaction.productId) : undefined
-  if (transaction.kind === 'Покупка' && product) { product.amount += amount; product.invested += amount }
-  if (transaction.kind === 'Продажа' && product) { product.amount -= amount; product.invested = Math.max(0, product.invested - amount) }
+  const product = transaction.productId ? await positions.byId(transaction.productId) : undefined
+  if (transaction.kind === 'Покупка' && product) { product.amount += amount; product.invested += amount; positions.mark(product) }
+  if (transaction.kind === 'Продажа' && product) { product.amount -= amount; product.invested = Math.max(0, product.invested - amount); positions.mark(product) }
   if (transaction.kind === 'Пополнение' || transaction.kind === 'Выплата') {
-    const cash = store.products.find((item) => item.type === 'Деньги')
-    if (cash) { cash.amount += amount; cash.invested += amount }
+    const cash = await positions.cash()
+    if (cash) { cash.amount += amount; cash.invested += amount; positions.mark(cash) }
   }
 }
 
-app.get('/api/transactions', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json((await readStore(userId)).transactions) })
+app.get('/api/transactions', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listTransactions(db, userId)) })
 app.post('/api/transactions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -613,22 +517,25 @@ app.post('/api/transactions', async (request, response) => {
     const kind = requiredText(body.kind, 'kind')
     if (!['Пополнение', 'Покупка', 'Продажа', 'Выплата'].includes(kind)) throw new Error('Unsupported transaction kind')
     const amount = positiveNumber(body.amount, 'amount')
-    const store = await readStore(userId)
-    const product = body.productId ? store.products.find((item) => item.id === body.productId) : undefined
-    if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('productId is required for buy or sell')
-    if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
     const transaction: Transaction = { id: randomUUID(), title: requiredText(body.title, 'title'), amount, date: requiredText(body.date, 'date'), kind, productId: body.productId }
-    applyTransactionEffect(store, transaction, 1)
-    store.transactions.push(transaction); await recordSnapshot(store, userId); await writeStore(userId, store); response.status(201).json(transaction)
+    await withTransaction(db, async (client) => {
+      const positions = createPositionCache(client, userId)
+      const product = transaction.productId ? await positions.byId(transaction.productId) : undefined
+      if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('productId is required for buy or sell')
+      if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
+      await applyTransactionEffect(positions, transaction, 1)
+      await positions.flush()
+      await insertTransaction(client, userId, transaction)
+      await recordSnapshot(client, userId)
+    })
+    response.status(201).json(transaction)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
 app.patch('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const store = await readStore(userId)
-    const index = store.transactions.findIndex((item) => item.id === request.params.id)
-    if (index === -1) return response.status(404).json({ error: 'Transaction not found' })
-    const existing = store.transactions[index]
+    const existing = await findTransaction(db, userId, request.params.id)
+    if (!existing) return response.status(404).json({ error: 'Transaction not found' })
     const body = request.body as Partial<Transaction>
     const kind = body.kind !== undefined ? requiredText(body.kind, 'kind') : existing.kind
     if (!['Пополнение', 'Покупка', 'Продажа', 'Выплата'].includes(kind)) throw new Error('Unsupported transaction kind')
@@ -637,14 +544,6 @@ app.patch('/api/transactions/:id', async (request, response) => {
       ? undefined
       : (body.productId !== undefined ? body.productId : existing.productId)
     if (['Покупка', 'Продажа'].includes(kind) && !productId) throw new Error('productId is required for buy or sell')
-    const product = productId ? store.products.find((item) => item.id === productId) : undefined
-    if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('Unknown productId')
-
-    applyTransactionEffect(store, existing, -1)
-    if (kind === 'Продажа' && product && product.amount < amount) {
-      applyTransactionEffect(store, existing, 1)
-      throw new Error('Sale exceeds current position')
-    }
     const updated: Transaction = {
       ...existing,
       title: body.title !== undefined ? requiredText(body.title, 'title') : existing.title,
@@ -653,19 +552,34 @@ app.patch('/api/transactions/:id', async (request, response) => {
       kind,
       productId,
     }
-    applyTransactionEffect(store, updated, 1)
-    store.transactions[index] = updated
-    await recordSnapshot(store, userId); await writeStore(userId, store); response.json(updated)
+    await withTransaction(db, async (client) => {
+      const positions = createPositionCache(client, userId)
+      const product = productId ? await positions.byId(productId) : undefined
+      if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('Unknown productId')
+      // Сначала снимаем эффект прежней версии операции, потом проверяем и накладываем новую;
+      // при ошибке транзакция откатывается, поэтому возвращать эффект вручную не нужно.
+      await applyTransactionEffect(positions, existing, -1)
+      if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
+      await applyTransactionEffect(positions, updated, 1)
+      await positions.flush()
+      await updateTransaction(client, userId, updated)
+      await recordSnapshot(client, userId)
+    })
+    response.json(updated)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
 app.delete('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await readStore(userId)
-  const index = store.transactions.findIndex((item) => item.id === request.params.id)
-  if (index === -1) return response.status(404).json({ error: 'Transaction not found' })
-  const [existing] = store.transactions.splice(index, 1)
-  applyTransactionEffect(store, existing, -1)
-  await recordSnapshot(store, userId); await writeStore(userId, store); response.status(204).send()
+  const existing = await findTransaction(db, userId, request.params.id)
+  if (!existing) return response.status(404).json({ error: 'Transaction not found' })
+  await withTransaction(db, async (client) => {
+    const positions = createPositionCache(client, userId)
+    await applyTransactionEffect(positions, existing, -1)
+    await positions.flush()
+    await deleteTransaction(client, userId, existing.id)
+    await recordSnapshot(client, userId)
+  })
+  response.status(204).send()
 })
 
 app.use((error: Error, request: Request, response: Response, _next: express.NextFunction) => {
