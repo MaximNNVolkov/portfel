@@ -11,6 +11,7 @@ import { Pool, types } from 'pg'
 import { createWorker } from 'tesseract.js'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
+import { aggregateByGroup, calculateReturns, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 
 // DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
 // JS Date (which JSON.stringify then turns into a full ISO datetime with a time/Z suffix,
@@ -128,6 +129,40 @@ function mapDbTransaction(row: any): Transaction {
     productId: row.product_id || undefined,
   }
 }
+// Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
+// продукты в вход движка и отдаёт его результат наружу, ничего не считая сам.
+//
+// Таблица курсов на MVP ещё не подключена (источник — ЦБ РФ, §13), поэтому позиции
+// в валютах, отличных от базовой, движок помечает как неоценённые (reason 'no-rate')
+// и не подмешивает их в итог нулями (§7.3). Как только появится загрузчик курсов,
+// его результат передаётся сюда через поле rates — остальной код не меняется.
+const ENGINE_CONTEXT: EngineContext = { baseCurrency: 'RUB' }
+
+function toPosition(product: Product): PositionInput {
+  return {
+    id: product.id,
+    name: product.name,
+    type: product.type,
+    currency: product.currency || ENGINE_CONTEXT.baseCurrency,
+    invested: product.invested,
+    value: product.amount,
+    quantity: product.quantity ?? null,
+    averagePrice: product.averagePrice ?? null,
+    currentPrice: product.currentPrice ?? null,
+    accruedInterest: product.accruedInterest ?? null,
+  }
+}
+
+function evaluateStore(store: Store) {
+  const portfolio = aggregateByGroup(store.products.map(toPosition), ENGINE_CONTEXT)
+  const expected = store.payments.reduce((sum, item) => sum + item.amount, 0)
+  const paid = store.transactions.filter((item) => item.kind === 'Выплата').reduce((sum, item) => sum + item.amount, 0)
+  // Комиссии и налоги (§10.4, §10.5) появятся вместе с соответствующими типами операций —
+  // движок их уже принимает, пока источника данных нет.
+  const returns = calculateReturns({ currentValue: portfolio.value, invested: portfolio.invested, payoutsReceived: paid })
+  return { portfolio, returns, expected, paid }
+}
+
 async function readStore(userId: string): Promise<Store> {
   const [productsResult, paymentsResult, transactionsResult] = await Promise.all([
     db.query('SELECT * FROM products WHERE user_id = $1 ORDER BY purchase_date ASC, name ASC', [userId]),
@@ -141,8 +176,8 @@ async function readStore(userId: string): Promise<Store> {
   }
 }
 async function recordSnapshot(store: Store, userId: string, date = new Date().toISOString().slice(0, 10)) {
-  const value = store.products.reduce((sum, item) => sum + item.amount, 0)
   if (!store.products.length) return
+  const value = aggregateByGroup(store.products.map(toPosition), ENGINE_CONTEXT).value
   await db.query(
     `INSERT INTO portfolio_snapshots (id, user_id, snapshot_date, total_value)
      VALUES ($1, $2, $3, $4)
@@ -425,11 +460,24 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const store = await readStore(userId)
-  const total = store.products.reduce((sum, item) => sum + item.amount, 0)
-  const invested = store.products.reduce((sum, item) => sum + item.invested, 0)
-  const expected = store.payments.reduce((sum, item) => sum + item.amount, 0)
-  const paid = store.transactions.filter((item) => item.kind === 'Выплата').reduce((sum, item) => sum + item.amount, 0)
-  response.json({ total, invested, profit: total - invested, expected, paid, products: store.products.length })
+  const { portfolio, returns, expected, paid } = evaluateStore(store)
+  response.json({
+    total: portfolio.value,
+    invested: portfolio.invested,
+    profit: portfolio.pnl,
+    profitPercent: portfolio.pnlPercent,
+    expected,
+    paid,
+    products: store.products.length,
+    baseCurrency: portfolio.baseCurrency,
+    // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
+    financialResult: returns.financialResult,
+    returnPercent: returns.returnPercent,
+    returnMethod: returns.method,
+    groups: portfolio.groups,
+    // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
+    valuation: { incomplete: portfolio.valuationIncomplete, unavailable: portfolio.unavailable },
+  })
 })
 app.get('/api/portfolio/history', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
