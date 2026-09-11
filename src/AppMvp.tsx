@@ -25,7 +25,114 @@ type Product = {
   institution: string;
   currency: string;
   source: string;
+  isin?: string;
+  quantity?: number;
+  averagePrice?: number;
+  currentPrice?: number;
+  nominal?: number;
+  accruedInterest?: number;
+  couponRate?: number;
+  couponDate?: string;
+  maturityDate?: string;
+  ofertaDate?: string;
+  amortization?: boolean;
+  rate?: number;
+  effectiveRate?: number;
+  capitalization?: boolean;
+  termEndDate?: string;
+  interestPayoutFrequency?: string;
+  replenishable?: boolean;
+  partialWithdrawal?: boolean;
+  autoProlongation?: boolean;
 };
+type ProductDetails = {
+  isin: string;
+  quantity: string;
+  averagePrice: string;
+  currentPrice: string;
+  nominal: string;
+  accruedInterest: string;
+  couponRate: string;
+  couponDate: string;
+  maturityDate: string;
+  ofertaDate: string;
+  amortization: boolean;
+  rate: string;
+  effectiveRate: string;
+  capitalization: boolean;
+  termEndDate: string;
+  interestPayoutFrequency: string;
+  replenishable: boolean;
+  partialWithdrawal: boolean;
+  autoProlongation: boolean;
+};
+const emptyProductDetails: ProductDetails = {
+  isin: "",
+  quantity: "",
+  averagePrice: "",
+  currentPrice: "",
+  nominal: "",
+  accruedInterest: "",
+  couponRate: "",
+  couponDate: "",
+  maturityDate: "",
+  ofertaDate: "",
+  amortization: false,
+  rate: "",
+  effectiveRate: "",
+  capitalization: false,
+  termEndDate: "",
+  interestPayoutFrequency: "",
+  replenishable: false,
+  partialWithdrawal: false,
+  autoProlongation: false,
+};
+function productToDetails(product?: Product): ProductDetails {
+  return {
+    isin: product?.isin || "",
+    quantity: product?.quantity !== undefined ? String(product.quantity) : "",
+    averagePrice: product?.averagePrice !== undefined ? String(product.averagePrice) : "",
+    currentPrice: product?.currentPrice !== undefined ? String(product.currentPrice) : "",
+    nominal: product?.nominal !== undefined ? String(product.nominal) : "",
+    accruedInterest: product?.accruedInterest !== undefined ? String(product.accruedInterest) : "",
+    couponRate: product?.couponRate !== undefined ? String(product.couponRate) : "",
+    couponDate: product?.couponDate || "",
+    maturityDate: product?.maturityDate || "",
+    ofertaDate: product?.ofertaDate || "",
+    amortization: product?.amortization || false,
+    rate: product?.rate !== undefined ? String(product.rate) : "",
+    effectiveRate: product?.effectiveRate !== undefined ? String(product.effectiveRate) : "",
+    capitalization: product?.capitalization || false,
+    termEndDate: product?.termEndDate || "",
+    interestPayoutFrequency: product?.interestPayoutFrequency || "",
+    replenishable: product?.replenishable || false,
+    partialWithdrawal: product?.partialWithdrawal || false,
+    autoProlongation: product?.autoProlongation || false,
+  };
+}
+function detailsToPayload(details: ProductDetails) {
+  return {
+    isin: details.isin.trim() || undefined,
+    quantity: details.quantity.trim() ? Number(details.quantity) : undefined,
+    averagePrice: details.averagePrice.trim() ? Number(details.averagePrice) : undefined,
+    currentPrice: details.currentPrice.trim() ? Number(details.currentPrice) : undefined,
+    nominal: details.nominal.trim() ? Number(details.nominal) : undefined,
+    accruedInterest: details.accruedInterest.trim() ? Number(details.accruedInterest) : undefined,
+    couponRate: details.couponRate.trim() ? Number(details.couponRate) : undefined,
+    couponDate: details.couponDate || undefined,
+    maturityDate: details.maturityDate || undefined,
+    ofertaDate: details.ofertaDate || undefined,
+    amortization: details.amortization || undefined,
+    rate: details.rate.trim() ? Number(details.rate) : undefined,
+    effectiveRate: details.effectiveRate.trim() ? Number(details.effectiveRate) : undefined,
+    capitalization: details.capitalization || undefined,
+    termEndDate: details.termEndDate || undefined,
+    interestPayoutFrequency: details.interestPayoutFrequency || undefined,
+    replenishable: details.replenishable || undefined,
+    partialWithdrawal: details.partialWithdrawal || undefined,
+    autoProlongation: details.autoProlongation || undefined,
+  };
+}
 type Payment = {
   id: string;
   title: string;
@@ -46,7 +153,7 @@ type OcrFailure = { filename: string; reason: string };
 type OcrUploadResult = { date: string; items: Product[]; failures: OcrFailure[] };
 
 const storageKey = "capital-mvp-state";
-const apiUrl = "http://localhost:3001/api";
+const apiUrl = "/api";
 const tokenKey = "capital-api-token";
 const initialProducts: Product[] = [
   {
@@ -182,6 +289,8 @@ const dateLabel = (date: string) =>
   new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" })
     .format(new Date(`${date}T12:00:00`))
     .replace(".", "");
+const fullDate = (date: string) =>
+  new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
 function chartPath(history: Snapshot[], close = false) {
   if (!history.length) return "";
   const max = Math.max(...history.map((point) => point.value), 1);
@@ -333,6 +442,40 @@ function AppMvp() {
     setToast("Выплата добавлена в календарь");
     navigate("/payments");
   }
+  async function updatePayment(payment: Payment) {
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/payments/${payment.id}`, {
+        method: "PATCH",
+        headers: authHeaders,
+        body: JSON.stringify(payment),
+      });
+      if (!response.ok) throw new Error("Не удалось сохранить изменения");
+      payment = (await response.json()) as Payment;
+    }
+    setPayments((current) =>
+      current.map((item) => (item.id === payment.id ? payment : item)),
+    );
+    setToast("Изменения сохранены");
+    navigate(-1);
+  }
+  async function removePayment(id: string) {
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/payments/${id}`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      if (!response.ok) throw new Error("Не удалось удалить выплату");
+    }
+    setPayments((current) => current.filter((payment) => payment.id !== id));
+    setToast("Выплата удалена");
+    navigate("/payments");
+  }
+  async function refreshProducts() {
+    const response = await fetch(`${apiUrl}/products`, {
+      headers: authHeaders,
+    });
+    if (response.ok) setProducts((await response.json()) as Product[]);
+  }
   async function removeProduct(id: string) {
     if (apiOnline) {
       const response = await fetch(`${apiUrl}/products/${id}`, {
@@ -400,6 +543,41 @@ function AppMvp() {
     setToast("Операция проведена");
     navigate("/transactions");
   }
+  async function updateTransaction(transaction: Transaction) {
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/transactions/${transaction.id}`, {
+        method: "PATCH",
+        headers: authHeaders,
+        body: JSON.stringify(transaction),
+      });
+      if (!response.ok) {
+        const result = (await response.json()) as { error?: string };
+        throw new Error(result.error || "Не удалось сохранить изменения");
+      }
+      transaction = (await response.json()) as Transaction;
+      await refreshProducts();
+    }
+    setTransactions((current) =>
+      current.map((item) => (item.id === transaction.id ? transaction : item)),
+    );
+    setToast("Изменения сохранены");
+    navigate(-1);
+  }
+  async function removeTransaction(id: string) {
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/transactions/${id}`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      if (!response.ok) throw new Error("Не удалось удалить операцию");
+      await refreshProducts();
+    }
+    setTransactions((current) =>
+      current.filter((transaction) => transaction.id !== id),
+    );
+    setToast("Операция удалена");
+    navigate("/transactions");
+  }
   async function signIn(
     event: FormEvent<HTMLFormElement>,
     mode: "login" | "register",
@@ -437,6 +615,24 @@ function AppMvp() {
     setToken("");
     setApiOnline(false);
     setOcrSummary(null);
+  }
+  async function deleteAccount() {
+    const response = await fetch(`${apiUrl}/auth/me`, {
+      method: "DELETE",
+      headers: authHeaders,
+    });
+    if (!response.ok) {
+      const result = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      setToast(result.error || "Не удалось удалить аккаунт");
+      return;
+    }
+    localStorage.removeItem(tokenKey);
+    setToken("");
+    setApiOnline(false);
+    setOcrSummary(null);
+    navigate("/portfolio");
   }
 
   if (!token) return <Login onSubmit={signIn} />;
@@ -575,12 +771,43 @@ function AppMvp() {
             }
           />
           <Route
+            path="/transactions/:id/edit"
+            element={
+              <EditTransactionPage
+                transactions={transactions}
+                products={products}
+                onSubmit={updateTransaction}
+              />
+            }
+          />
+          <Route
+            path="/transactions/:id/delete"
+            element={
+              <DeleteTransactionPage
+                transactions={transactions}
+                onConfirm={removeTransaction}
+              />
+            }
+          />
+          <Route
             path="/payments"
             element={<PaymentsPage payments={payments} />}
           />
           <Route
             path="/payments/new"
             element={<PaymentFormPage onSubmit={addPayment} />}
+          />
+          <Route
+            path="/payments/:id/edit"
+            element={
+              <EditPaymentPage payments={payments} onSubmit={updatePayment} />
+            }
+          />
+          <Route
+            path="/payments/:id/delete"
+            element={
+              <DeletePaymentPage payments={payments} onConfirm={removePayment} />
+            }
           />
           <Route
             path="/analytics"
@@ -612,6 +839,10 @@ function AppMvp() {
                 }}
               />
             }
+          />
+          <Route
+            path="/settings/delete-account"
+            element={<DeleteAccountPage onConfirm={deleteAccount} />}
           />
           <Route
             path="/ocr-summary"
@@ -930,6 +1161,25 @@ function ProductsPage({ products }: { products: Product[] }) {
               <small>
                 {product.ticker || product.institution} · {product.currency}
               </small>
+              {product.type === "Облигации" && (product.maturityDate || product.couponRate !== undefined) && (
+                <small>
+                  {product.maturityDate ? `Погашение ${fullDate(product.maturityDate)}` : ""}
+                  {product.maturityDate && product.couponRate !== undefined ? " · " : ""}
+                  {product.couponRate !== undefined ? `купон ${product.couponRate}%` : ""}
+                </small>
+              )}
+              {product.type === "Вклады" && product.rate !== undefined && (
+                <small>
+                  Ставка {product.rate}%
+                  {product.termEndDate ? ` · до ${fullDate(product.termEndDate)}` : ""}
+                </small>
+              )}
+              {(product.type === "Акции" || product.type === "Фонды") && product.quantity !== undefined && (
+                <small>
+                  {product.quantity} шт.
+                  {product.currentPrice !== undefined ? ` · тек. цена ${money(product.currentPrice)}` : " · текущая цена недоступна"}
+                </small>
+              )}
             </div>
             <span className={`type-tag ${typeColors[product.type]}`}>
               {product.type}
@@ -982,6 +1232,7 @@ function TransactionsPage({
           <span>Тип</span>
           <span>Сумма</span>
           <span>Дата</span>
+          <span>Действия</span>
         </div>
         {transactions.map((transaction) => (
           <div className="table-row" key={transaction.id}>
@@ -996,6 +1247,20 @@ function TransactionsPage({
             <span className="type-tag teal">{transaction.kind}</span>
             <strong>{money(transaction.amount)}</strong>
             <span>{dateLabel(transaction.date)}</span>
+            <div className="row-actions">
+              <Link
+                className="outline-button"
+                to={`/transactions/${transaction.id}/edit`}
+              >
+                Редактировать
+              </Link>
+              <Link
+                className="delete-button"
+                to={`/transactions/${transaction.id}/delete`}
+              >
+                Удалить
+              </Link>
+            </div>
           </div>
         ))}
       </div>
@@ -1026,6 +1291,14 @@ function PaymentsPage({ payments }: { payments: Payment[] }) {
               </p>
             </div>
             <b>+{money(payment.amount)}</b>
+            <div className="row-actions">
+              <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
+                Редактировать
+              </Link>
+              <Link className="delete-button" to={`/payments/${payment.id}/delete`}>
+                Удалить
+              </Link>
+            </div>
           </article>
         ))}
       </div>
@@ -1156,6 +1429,9 @@ function Settings({ onReset }: { onReset: () => void }) {
         <button className="outline-button" onClick={onReset} type="button">
           Восстановить демонстрационные данные
         </button>
+        <Link className="delete-button" to="/settings/delete-account">
+          Удалить аккаунт
+        </Link>
       </div>
     </Page>
   );
@@ -1327,6 +1603,205 @@ function Login({
     </div>
   );
 }
+function InstrumentDetailsFields({
+  type,
+  details,
+  onChange,
+}: {
+  type: AssetType;
+  details: ProductDetails;
+  onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
+}) {
+  if (type === "Деньги" || type === "Прочее") return null;
+  const showPosition = type === "Облигации" || type === "Акции" || type === "Фонды";
+  return (
+    <details className="details-block">
+      <summary>Добавить дополнительные детали</summary>
+      <div className="details-fields">
+        {showPosition && (
+          <>
+            <label>
+              ISIN
+              <input
+                value={details.isin}
+                onChange={(event) => onChange("isin", event.target.value)}
+                placeholder="Например, RU000A1038V6"
+              />
+            </label>
+            <label>
+              Количество
+              <input
+                value={details.quantity}
+                onChange={(event) => onChange("quantity", event.target.value)}
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              Средняя цена
+              <input
+                value={details.averagePrice}
+                onChange={(event) => onChange("averagePrice", event.target.value)}
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              Текущая цена
+              <input
+                value={details.currentPrice}
+                onChange={(event) => onChange("currentPrice", event.target.value)}
+                type="number"
+                min="0"
+                placeholder="Оставьте пустым, если неизвестна"
+              />
+            </label>
+          </>
+        )}
+        {type === "Облигации" && (
+          <>
+            <label>
+              Номинал
+              <input
+                value={details.nominal}
+                onChange={(event) => onChange("nominal", event.target.value)}
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              НКД
+              <input
+                value={details.accruedInterest}
+                onChange={(event) => onChange("accruedInterest", event.target.value)}
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              Купон, %
+              <input
+                value={details.couponRate}
+                onChange={(event) => onChange("couponRate", event.target.value)}
+                type="number"
+                min="0"
+                step="0.01"
+              />
+            </label>
+            <label>
+              Дата выплаты купона
+              <input
+                value={details.couponDate}
+                onChange={(event) => onChange("couponDate", event.target.value)}
+                type="date"
+              />
+            </label>
+            <label>
+              Дата погашения
+              <input
+                value={details.maturityDate}
+                onChange={(event) => onChange("maturityDate", event.target.value)}
+                type="date"
+              />
+            </label>
+            <label>
+              Оферта
+              <input
+                value={details.ofertaDate}
+                onChange={(event) => onChange("ofertaDate", event.target.value)}
+                type="date"
+              />
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={details.amortization}
+                onChange={(event) => onChange("amortization", event.target.checked)}
+              />
+              Амортизация номинала
+            </label>
+          </>
+        )}
+        {type === "Вклады" && (
+          <>
+            <label>
+              Ставка, %
+              <input
+                value={details.rate}
+                onChange={(event) => onChange("rate", event.target.value)}
+                type="number"
+                min="0"
+                step="0.01"
+              />
+            </label>
+            <label>
+              Эффективная ставка, %
+              <input
+                value={details.effectiveRate}
+                onChange={(event) => onChange("effectiveRate", event.target.value)}
+                type="number"
+                min="0"
+                step="0.01"
+              />
+            </label>
+            <label>
+              Дата окончания
+              <input
+                value={details.termEndDate}
+                onChange={(event) => onChange("termEndDate", event.target.value)}
+                type="date"
+              />
+            </label>
+            <label>
+              Периодичность выплаты процентов
+              <select
+                value={details.interestPayoutFrequency}
+                onChange={(event) => onChange("interestPayoutFrequency", event.target.value)}
+              >
+                <option value="">Не указано</option>
+                <option value="Ежемесячно">Ежемесячно</option>
+                <option value="Ежеквартально">Ежеквартально</option>
+                <option value="В конце срока">В конце срока</option>
+              </select>
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={details.capitalization}
+                onChange={(event) => onChange("capitalization", event.target.checked)}
+              />
+              Капитализация процентов
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={details.replenishable}
+                onChange={(event) => onChange("replenishable", event.target.checked)}
+              />
+              Можно пополнять
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={details.partialWithdrawal}
+                onChange={(event) => onChange("partialWithdrawal", event.target.checked)}
+              />
+              Частичное снятие без потери процентов
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={details.autoProlongation}
+                onChange={(event) => onChange("autoProlongation", event.target.checked)}
+              />
+              Автопродление
+            </label>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
 function ProductFormPage({
   token,
   onUnauthorized,
@@ -1347,9 +1822,12 @@ function ProductFormPage({
   const [amount, setAmount] = useState("");
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState("");
+  const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
   const [error, setError] = useState("");
+  const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
+    setDetails((current) => ({ ...current, [key]: value }));
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -1363,6 +1841,7 @@ function ProductFormPage({
       institution: institution || "Ручной ввод",
       currency: "RUB",
       source: "manual",
+      ...detailsToPayload(details),
     });
   };
   async function recognizeScreenshot() {
@@ -1495,6 +1974,7 @@ function ProductFormPage({
               ))}
             </select>
           </label>
+          <InstrumentDetailsFields type={type} details={details} onChange={updateDetail} />
           <button className="primary-button" type="submit">
             Сохранить продукт
           </button>
@@ -1517,6 +1997,7 @@ function EditProductPage({
   const [amount, setAmount] = useState(String(product?.amount || ""));
   const [invested, setInvested] = useState(String(product?.invested || ""));
   const [institution, setInstitution] = useState(product?.institution || "");
+  const [details, setDetails] = useState<ProductDetails>(productToDetails(product));
   useEffect(() => {
     if (!product) return;
     setName(product.name);
@@ -1524,9 +2005,12 @@ function EditProductPage({
     setAmount(String(product.amount));
     setInvested(String(product.invested));
     setInstitution(product.institution);
+    setDetails(productToDetails(product));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   if (!product) return <Navigate to="/products" replace />;
+  const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
+    setDetails((current) => ({ ...current, [key]: value }));
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -1536,6 +2020,7 @@ function EditProductPage({
       amount: Number(amount),
       invested: Number(invested || amount),
       institution: institution || "Ручной ввод",
+      ...detailsToPayload(details),
     });
   };
   return (
@@ -1586,6 +2071,7 @@ function EditProductPage({
             ))}
           </select>
         </label>
+        <InstrumentDetailsFields type={type} details={details} onChange={updateDetail} />
         <button className="primary-button" type="submit">
           Сохранить изменения
         </button>
@@ -1620,6 +2106,30 @@ function DeleteProductPage({
             type="button"
           >
             Удалить безвозвратно
+          </button>
+        </div>
+      </div>
+    </Page>
+  );
+}
+function DeleteAccountPage({ onConfirm }: { onConfirm: () => void }) {
+  return (
+    <Page title="Удалить аккаунт" subtitle="Это действие нельзя отменить" back>
+      <div className="confirm-card">
+        <p>
+          Аккаунт и все связанные с ним данные (инструменты, операции,
+          выплаты, история портфеля) будут удалены безвозвратно.
+        </p>
+        <div className="confirm-actions">
+          <Link className="outline-button" to="/settings">
+            Отмена
+          </Link>
+          <button
+            className="delete-button primary"
+            onClick={onConfirm}
+            type="button"
+          >
+            Удалить аккаунт безвозвратно
           </button>
         </div>
       </div>
@@ -1684,6 +2194,100 @@ function OcrSummaryPage({ summary }: { summary: OcrUploadResult | null }) {
         <Link className="primary-button" to="/portfolio">
           Перейти к портфелю
         </Link>
+      </div>
+    </Page>
+  );
+}
+function EditPaymentPage({
+  payments,
+  onSubmit,
+}: {
+  payments: Payment[];
+  onSubmit: (payment: Payment) => void;
+}) {
+  const { id } = useParams();
+  const payment = payments.find((item) => item.id === id);
+  const [title, setTitle] = useState(payment?.title || "");
+  const [amount, setAmount] = useState(String(payment?.amount || ""));
+  const [date, setDate] = useState(payment?.date || "");
+  useEffect(() => {
+    if (!payment) return;
+    setTitle(payment.title);
+    setAmount(String(payment.amount));
+    setDate(payment.date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  if (!payment) return <Navigate to="/payments" replace />;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onSubmit({ ...payment, title, amount: Number(amount), date });
+  };
+  return (
+    <Page title="Редактировать выплату" subtitle={payment.title} back>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          Название
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            required
+          />
+        </label>
+        <label>
+          Сумма
+          <input
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            type="number"
+            min="1"
+            required
+          />
+        </label>
+        <label>
+          Дата выплаты
+          <input
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            type="date"
+            required
+          />
+        </label>
+        <button className="primary-button" type="submit">
+          Сохранить изменения
+        </button>
+      </form>
+    </Page>
+  );
+}
+function DeletePaymentPage({
+  payments,
+  onConfirm,
+}: {
+  payments: Payment[];
+  onConfirm: (id: string) => void;
+}) {
+  const { id } = useParams();
+  const payment = payments.find((item) => item.id === id);
+  if (!payment || !id) return <Navigate to="/payments" replace />;
+  return (
+    <Page title="Удалить выплату" subtitle="Это действие нельзя отменить" back>
+      <div className="confirm-card">
+        <p>
+          Удалить <strong>{payment.title}</strong> ({money(payment.amount)}) из
+          календаря выплат?
+        </p>
+        <div className="confirm-actions">
+          <Link className="outline-button" to="/payments">
+            Отмена
+          </Link>
+          <button
+            className="delete-button primary"
+            onClick={() => onConfirm(id)}
+            type="button"
+          >
+            Удалить безвозвратно
+          </button>
+        </div>
       </div>
     </Page>
   );
@@ -1823,6 +2427,152 @@ function TransactionFormPage({
           Провести операцию
         </button>
       </form>
+    </Page>
+  );
+}
+function EditTransactionPage({
+  transactions,
+  products,
+  onSubmit,
+}: {
+  transactions: Transaction[];
+  products: Product[];
+  onSubmit: (transaction: Transaction) => void;
+}) {
+  const { id } = useParams();
+  const transaction = transactions.find((item) => item.id === id);
+  const [kind, setKind] = useState<Transaction["kind"]>(
+    transaction?.kind || "Покупка",
+  );
+  const [title, setTitle] = useState(transaction?.title || "");
+  const [amount, setAmount] = useState(String(transaction?.amount || ""));
+  const [date, setDate] = useState(transaction?.date || "");
+  const [productId, setProductId] = useState(
+    transaction?.productId || products[0]?.id || "",
+  );
+  useEffect(() => {
+    if (!transaction) return;
+    setKind(transaction.kind);
+    setTitle(transaction.title);
+    setAmount(String(transaction.amount));
+    setDate(transaction.date);
+    setProductId(transaction.productId || products[0]?.id || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  if (!transaction) return <Navigate to="/transactions" replace />;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onSubmit({
+      ...transaction,
+      title: title || kind,
+      amount: Number(amount),
+      date,
+      kind,
+      productId:
+        kind === "Пополнение" || kind === "Выплата" ? undefined : productId,
+    });
+  };
+  return (
+    <Page title="Редактировать операцию" subtitle={transaction.title} back>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          Тип операции
+          <select
+            value={kind}
+            onChange={(event) =>
+              setKind(event.target.value as Transaction["kind"])
+            }
+          >
+            <option>Покупка</option>
+            <option>Продажа</option>
+            <option>Пополнение</option>
+            <option>Выплата</option>
+          </select>
+        </label>
+        {(kind === "Покупка" || kind === "Продажа") && (
+          <label>
+            Инструмент
+            <select
+              value={productId}
+              onChange={(event) => setProductId(event.target.value)}
+            >
+              {products
+                .filter((product) => product.type !== "Деньги")
+                .map((product) => (
+                  <option value={product.id} key={product.id}>
+                    {product.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
+        <label>
+          Название
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Например, Покупка ОФЗ"
+          />
+        </label>
+        <label>
+          Сумма
+          <input
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            type="number"
+            min="1"
+            required
+          />
+        </label>
+        <label>
+          Дата
+          <input
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            type="date"
+            required
+          />
+        </label>
+        <button className="primary-button" type="submit">
+          Сохранить изменения
+        </button>
+      </form>
+    </Page>
+  );
+}
+function DeleteTransactionPage({
+  transactions,
+  onConfirm,
+}: {
+  transactions: Transaction[];
+  onConfirm: (id: string) => void;
+}) {
+  const { id } = useParams();
+  const transaction = transactions.find((item) => item.id === id);
+  if (!transaction || !id) return <Navigate to="/transactions" replace />;
+  return (
+    <Page title="Удалить операцию" subtitle="Это действие нельзя отменить" back>
+      <div className="confirm-card">
+        <p>
+          Удалить операцию <strong>{transaction.title}</strong> (
+          {money(transaction.amount)})?
+          {(transaction.kind === "Покупка" ||
+            transaction.kind === "Продажа") &&
+            " Позиция инструмента будет пересчитана."}
+        </p>
+        <div className="confirm-actions">
+          <Link className="outline-button" to="/transactions">
+            Отмена
+          </Link>
+          <button
+            className="delete-button primary"
+            onClick={() => onConfirm(id)}
+            type="button"
+          >
+            Удалить безвозвратно
+          </button>
+        </div>
+      </div>
     </Page>
   );
 }

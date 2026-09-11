@@ -1,15 +1,54 @@
-import cors from 'cors'
+import 'dotenv/config'
 import express, { type Request, type Response } from 'express'
+import helmet from 'helmet'
+import { rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import multer from 'multer'
-import { Pool } from 'pg'
+import { Pool, types } from 'pg'
 import { createWorker } from 'tesseract.js'
 import { runMigrations } from './migrations.ts'
+import { logError } from './logger.ts'
 
-type Product = { id: string; name: string; type: string; amount: number; invested: number; ticker: string; date: string; institution: string; currency: string; source: string }
+// DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
+// JS Date (which JSON.stringify then turns into a full ISO datetime with a time/Z suffix,
+// breaking every frontend helper that expects a plain date string).
+types.setTypeParser(1082, (value) => value)
+
+type Product = {
+  id: string; name: string; type: string; amount: number; invested: number; ticker: string; date: string; institution: string; currency: string; source: string
+  isin?: string; quantity?: number; averagePrice?: number; currentPrice?: number
+  nominal?: number; accruedInterest?: number; couponRate?: number; couponDate?: string; maturityDate?: string; ofertaDate?: string; amortization?: boolean
+  rate?: number; effectiveRate?: number; capitalization?: boolean; termEndDate?: string; interestPayoutFrequency?: string; replenishable?: boolean; partialWithdrawal?: boolean; autoProlongation?: boolean
+}
+const PRODUCT_COLUMNS = [
+  'id', 'user_id', 'name', 'type', 'amount', 'invested', 'ticker', 'purchase_date', 'institution', 'currency', 'source',
+  'isin', 'quantity', 'average_price', 'current_price',
+  'nominal', 'accrued_interest', 'coupon_rate', 'coupon_date', 'maturity_date', 'oferta_date', 'amortization',
+  'rate', 'effective_rate', 'capitalization', 'term_end_date', 'interest_payout_frequency', 'replenishable', 'partial_withdrawal', 'auto_prolongation',
+] as const
+function productRowValues(product: Product, userId: string): unknown[] {
+  return [
+    product.id, userId, product.name, product.type, product.amount, product.invested,
+    product.ticker || null, product.date, product.institution || 'Ручной ввод', product.currency || 'RUB', product.source || 'manual',
+    product.isin || null, product.quantity ?? null, product.averagePrice ?? null, product.currentPrice ?? null,
+    product.nominal ?? null, product.accruedInterest ?? null, product.couponRate ?? null, product.couponDate || null, product.maturityDate || null, product.ofertaDate || null, product.amortization ?? null,
+    product.rate ?? null, product.effectiveRate ?? null, product.capitalization ?? null, product.termEndDate || null, product.interestPayoutFrequency || null, product.replenishable ?? null, product.partialWithdrawal ?? null, product.autoProlongation ?? null,
+  ]
+}
+function optionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const result = Number(value)
+  return Number.isFinite(result) ? result : undefined
+}
+function optionalText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+function optionalBool(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
 type AssetType = 'Облигации' | 'Акции' | 'Вклады' | 'Фонды' | 'Деньги' | 'Прочее'
 type Payment = { id: string; title: string; amount: number; date: string; type: string }
 type Transaction = { id: string; title: string; amount: number; date: string; kind: string; productId?: string }
@@ -26,11 +65,15 @@ const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@lo
 const db = new Pool({ connectionString: databaseUrl, max: 10 })
 const users = new Map<string, User>()
 const brokerConnections = new Map<string, BrokerConnection>()
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000
 const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
 
-app.use(cors())
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false })
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Слишком много попыток, повторите позже' } })
+
+app.use(helmet())
 app.use(express.json())
+app.use('/api', apiLimiter)
 app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 function mapDbProduct(row: any): Product {
@@ -45,6 +88,25 @@ function mapDbProduct(row: any): Product {
     institution: row.institution || 'Ручной ввод',
     currency: row.currency || 'RUB',
     source: row.source || 'manual',
+    isin: row.isin || undefined,
+    quantity: row.quantity !== null ? Number(row.quantity) : undefined,
+    averagePrice: row.average_price !== null ? Number(row.average_price) : undefined,
+    currentPrice: row.current_price !== null ? Number(row.current_price) : undefined,
+    nominal: row.nominal !== null ? Number(row.nominal) : undefined,
+    accruedInterest: row.accrued_interest !== null ? Number(row.accrued_interest) : undefined,
+    couponRate: row.coupon_rate !== null ? Number(row.coupon_rate) : undefined,
+    couponDate: row.coupon_date || undefined,
+    maturityDate: row.maturity_date || undefined,
+    ofertaDate: row.oferta_date || undefined,
+    amortization: row.amortization ?? undefined,
+    rate: row.rate !== null ? Number(row.rate) : undefined,
+    effectiveRate: row.effective_rate !== null ? Number(row.effective_rate) : undefined,
+    capitalization: row.capitalization ?? undefined,
+    termEndDate: row.term_end_date || undefined,
+    interestPayoutFrequency: row.interest_payout_frequency || undefined,
+    replenishable: row.replenishable ?? undefined,
+    partialWithdrawal: row.partial_withdrawal ?? undefined,
+    autoProlongation: row.auto_prolongation ?? undefined,
   }
 }
 function mapDbPayment(row: any): Payment {
@@ -105,8 +167,9 @@ async function writeStore(userId: string, store: Store) {
     await client.query('DELETE FROM payments WHERE user_id = $1', [userId])
     await client.query('DELETE FROM transactions WHERE user_id = $1', [userId])
     if (store.products.length) {
-      const productValues = store.products.flatMap((product) => [product.id, userId, product.name, product.type, product.amount, product.invested, product.ticker || null, product.date, product.institution || 'Ручной ввод', product.currency || 'RUB', product.source || 'manual'])
-      const productQuery = `INSERT INTO products (id, user_id, name, type, amount, invested, ticker, purchase_date, institution, currency, source) VALUES ${store.products.map((_, index) => `($${index * 11 + 1}, $${index * 11 + 2}, $${index * 11 + 3}, $${index * 11 + 4}, $${index * 11 + 5}, $${index * 11 + 6}, $${index * 11 + 7}, $${index * 11 + 8}, $${index * 11 + 9}, $${index * 11 + 10}, $${index * 11 + 11})`).join(', ')}`
+      const columnCount = PRODUCT_COLUMNS.length
+      const productValues = store.products.flatMap((product) => productRowValues(product, userId))
+      const productQuery = `INSERT INTO products (${PRODUCT_COLUMNS.join(', ')}) VALUES ${store.products.map((_, index) => `(${PRODUCT_COLUMNS.map((_column, column) => `$${index * columnCount + column + 1}`).join(', ')})`).join(', ')}`
       await client.query(productQuery, productValues)
     }
     if (store.payments.length) {
@@ -254,7 +317,7 @@ async function currentUserId(request: Request, response: Response): Promise<stri
   return userId
 }
 
-app.post('/api/auth/register', async (request, response) => {
+app.post('/api/auth/register', authLimiter, async (request, response) => {
   try {
     const email = requiredText(request.body?.email, 'email').toLowerCase()
     const password = requiredText(request.body?.password, 'password')
@@ -267,7 +330,7 @@ app.post('/api/auth/register', async (request, response) => {
     response.status(201).json({ token, user: { id: user.id, email: user.email } })
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid credentials' }) }
 })
-app.post('/api/auth/login', async (request, response) => {
+app.post('/api/auth/login', authLimiter, async (request, response) => {
   const email = typeof request.body?.email === 'string' ? request.body.email.toLowerCase().trim() : ''
   const password = typeof request.body?.password === 'string' ? request.body.password : ''
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users WHERE email = $1', [email])
@@ -281,6 +344,29 @@ app.post('/api/auth/logout', async (request, response) => {
   response.status(204).send()
 })
 app.get('/api/auth/me', async (request, response) => { if (!(await currentUserId(request, response))) return; response.json({ authenticated: true }) })
+app.delete('/api/auth/me', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const client = await db.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('DELETE FROM products WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM payments WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM transactions WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM portfolio_snapshots WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM broker_connections WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM sessions WHERE user_id = $1', [userId])
+    await client.query('DELETE FROM users WHERE id = $1', [userId])
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+  users.delete(userId)
+  brokerConnections.delete(userId)
+  response.status(204).send()
+})
 app.get('/api/brokers/tinkoff', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(brokerConnections.get(userId) || { status: 'disconnected', provider: 'tinkoff' }) })
 app.post('/api/brokers/tinkoff/connect', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -365,6 +451,12 @@ app.post('/api/products', async (request, response) => {
       ticker: typeof body.ticker === 'string' ? body.ticker.trim() : '', date: requiredText(body.date, 'date'),
       institution: typeof body.institution === 'string' ? body.institution.trim() : 'Ручной ввод', currency: typeof body.currency === 'string' ? body.currency : 'RUB',
       source: 'manual',
+      isin: optionalText(body.isin), quantity: optionalNumber(body.quantity), averagePrice: optionalNumber(body.averagePrice), currentPrice: optionalNumber(body.currentPrice),
+      nominal: optionalNumber(body.nominal), accruedInterest: optionalNumber(body.accruedInterest), couponRate: optionalNumber(body.couponRate),
+      couponDate: optionalText(body.couponDate), maturityDate: optionalText(body.maturityDate), ofertaDate: optionalText(body.ofertaDate), amortization: optionalBool(body.amortization),
+      rate: optionalNumber(body.rate), effectiveRate: optionalNumber(body.effectiveRate), capitalization: optionalBool(body.capitalization),
+      termEndDate: optionalText(body.termEndDate), interestPayoutFrequency: optionalText(body.interestPayoutFrequency),
+      replenishable: optionalBool(body.replenishable), partialWithdrawal: optionalBool(body.partialWithdrawal), autoProlongation: optionalBool(body.autoProlongation),
     }
     const store = await readStore(userId); store.products.push(product); await recordSnapshot(store, userId); await writeStore(userId, store); response.status(201).json(product)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
@@ -387,6 +479,25 @@ app.patch('/api/products/:id', async (request, response) => {
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
       institution: body.institution !== undefined ? (String(body.institution).trim() || 'Ручной ввод') : existing.institution,
       currency: body.currency !== undefined ? String(body.currency) : existing.currency,
+      isin: body.isin !== undefined ? optionalText(body.isin) : existing.isin,
+      quantity: body.quantity !== undefined ? optionalNumber(body.quantity) : existing.quantity,
+      averagePrice: body.averagePrice !== undefined ? optionalNumber(body.averagePrice) : existing.averagePrice,
+      currentPrice: body.currentPrice !== undefined ? optionalNumber(body.currentPrice) : existing.currentPrice,
+      nominal: body.nominal !== undefined ? optionalNumber(body.nominal) : existing.nominal,
+      accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
+      couponRate: body.couponRate !== undefined ? optionalNumber(body.couponRate) : existing.couponRate,
+      couponDate: body.couponDate !== undefined ? optionalText(body.couponDate) : existing.couponDate,
+      maturityDate: body.maturityDate !== undefined ? optionalText(body.maturityDate) : existing.maturityDate,
+      ofertaDate: body.ofertaDate !== undefined ? optionalText(body.ofertaDate) : existing.ofertaDate,
+      amortization: body.amortization !== undefined ? optionalBool(body.amortization) : existing.amortization,
+      rate: body.rate !== undefined ? optionalNumber(body.rate) : existing.rate,
+      effectiveRate: body.effectiveRate !== undefined ? optionalNumber(body.effectiveRate) : existing.effectiveRate,
+      capitalization: body.capitalization !== undefined ? optionalBool(body.capitalization) : existing.capitalization,
+      termEndDate: body.termEndDate !== undefined ? optionalText(body.termEndDate) : existing.termEndDate,
+      interestPayoutFrequency: body.interestPayoutFrequency !== undefined ? optionalText(body.interestPayoutFrequency) : existing.interestPayoutFrequency,
+      replenishable: body.replenishable !== undefined ? optionalBool(body.replenishable) : existing.replenishable,
+      partialWithdrawal: body.partialWithdrawal !== undefined ? optionalBool(body.partialWithdrawal) : existing.partialWithdrawal,
+      autoProlongation: body.autoProlongation !== undefined ? optionalBool(body.autoProlongation) : existing.autoProlongation,
     }
     store.products[index] = updated
     await recordSnapshot(store, userId); await writeStore(userId, store); response.json(updated)
@@ -408,6 +519,44 @@ app.post('/api/payments', async (request, response) => {
     const store = await readStore(userId); store.payments.push(payment); await writeStore(userId, store); response.status(201).json(payment)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
 })
+app.patch('/api/payments/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const store = await readStore(userId)
+    const index = store.payments.findIndex((item) => item.id === request.params.id)
+    if (index === -1) return response.status(404).json({ error: 'Payment not found' })
+    const existing = store.payments[index]
+    const body = request.body as Partial<Payment>
+    const updated: Payment = {
+      ...existing,
+      title: body.title !== undefined ? requiredText(body.title, 'title') : existing.title,
+      amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
+      date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
+      type: body.type !== undefined ? requiredText(body.type, 'type') : existing.type,
+    }
+    store.payments[index] = updated
+    await writeStore(userId, store); response.json(updated)
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
+})
+app.delete('/api/payments/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const store = await readStore(userId); const before = store.payments.length
+  store.payments = store.payments.filter((item) => item.id !== request.params.id)
+  if (store.payments.length === before) return response.status(404).json({ error: 'Payment not found' })
+  await writeStore(userId, store); response.status(204).send()
+})
+
+function applyTransactionEffect(store: Store, transaction: Pick<Transaction, 'kind' | 'amount' | 'productId'>, direction: 1 | -1) {
+  const amount = transaction.amount * direction
+  const product = transaction.productId ? store.products.find((item) => item.id === transaction.productId) : undefined
+  if (transaction.kind === 'Покупка' && product) { product.amount += amount; product.invested += amount }
+  if (transaction.kind === 'Продажа' && product) { product.amount -= amount; product.invested = Math.max(0, product.invested - amount) }
+  if (transaction.kind === 'Пополнение' || transaction.kind === 'Выплата') {
+    const cash = store.products.find((item) => item.type === 'Деньги')
+    if (cash) { cash.amount += amount; cash.invested += amount }
+  }
+}
+
 app.get('/api/transactions', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json((await readStore(userId)).transactions) })
 app.post('/api/transactions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -419,18 +568,62 @@ app.post('/api/transactions', async (request, response) => {
     const store = await readStore(userId)
     const product = body.productId ? store.products.find((item) => item.id === body.productId) : undefined
     if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('productId is required for buy or sell')
-    if (kind === 'Покупка' && product) { product.amount += amount; product.invested += amount }
-    if (kind === 'Продажа' && product) { if (product.amount < amount) throw new Error('Sale exceeds current position'); product.amount -= amount; product.invested = Math.max(0, product.invested - amount) }
-    if (kind === 'Пополнение' || kind === 'Выплата') {
-      const cash = store.products.find((item) => item.type === 'Деньги')
-      if (cash) { cash.amount += amount; cash.invested += amount }
-    }
+    if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
     const transaction: Transaction = { id: randomUUID(), title: requiredText(body.title, 'title'), amount, date: requiredText(body.date, 'date'), kind, productId: body.productId }
+    applyTransactionEffect(store, transaction, 1)
     store.transactions.push(transaction); await recordSnapshot(store, userId); await writeStore(userId, store); response.status(201).json(transaction)
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
+app.patch('/api/transactions/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const store = await readStore(userId)
+    const index = store.transactions.findIndex((item) => item.id === request.params.id)
+    if (index === -1) return response.status(404).json({ error: 'Transaction not found' })
+    const existing = store.transactions[index]
+    const body = request.body as Partial<Transaction>
+    const kind = body.kind !== undefined ? requiredText(body.kind, 'kind') : existing.kind
+    if (!['Пополнение', 'Покупка', 'Продажа', 'Выплата'].includes(kind)) throw new Error('Unsupported transaction kind')
+    const amount = body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount
+    const productId = ['Пополнение', 'Выплата'].includes(kind)
+      ? undefined
+      : (body.productId !== undefined ? body.productId : existing.productId)
+    if (['Покупка', 'Продажа'].includes(kind) && !productId) throw new Error('productId is required for buy or sell')
+    const product = productId ? store.products.find((item) => item.id === productId) : undefined
+    if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('Unknown productId')
 
-app.use((error: Error, _request: Request, response: Response, _next: express.NextFunction) => response.status(500).json({ error: error.message }))
+    applyTransactionEffect(store, existing, -1)
+    if (kind === 'Продажа' && product && product.amount < amount) {
+      applyTransactionEffect(store, existing, 1)
+      throw new Error('Sale exceeds current position')
+    }
+    const updated: Transaction = {
+      ...existing,
+      title: body.title !== undefined ? requiredText(body.title, 'title') : existing.title,
+      amount,
+      date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
+      kind,
+      productId,
+    }
+    applyTransactionEffect(store, updated, 1)
+    store.transactions[index] = updated
+    await recordSnapshot(store, userId); await writeStore(userId, store); response.json(updated)
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
+})
+app.delete('/api/transactions/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const store = await readStore(userId)
+  const index = store.transactions.findIndex((item) => item.id === request.params.id)
+  if (index === -1) return response.status(404).json({ error: 'Transaction not found' })
+  const [existing] = store.transactions.splice(index, 1)
+  applyTransactionEffect(store, existing, -1)
+  await recordSnapshot(store, userId); await writeStore(userId, store); response.status(204).send()
+})
+
+app.use((error: Error, request: Request, response: Response, _next: express.NextFunction) => {
+  logError(`${request.method} ${request.path}`, error)
+  response.status(500).json({ error: 'Внутренняя ошибка сервера' })
+})
 async function bootstrap() {
   try {
     await db.query('SELECT 1')
@@ -438,7 +631,7 @@ async function bootstrap() {
     await loadUsers()
     app.listen(port, () => console.log(`Portfolio API listening on http://localhost:${port}`))
   } catch (error) {
-    console.error('Database connection failed:', error)
+    logError('bootstrap', error)
     process.exit(1)
   }
 }
