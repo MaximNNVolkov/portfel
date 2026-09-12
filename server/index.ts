@@ -27,10 +27,10 @@ import {
   insertInstrument, insertPayout, insertPosition, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
   sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
-  updatePosition, updatePositionMarketPrice, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
+  updatePortfolio, updatePosition, updatePositionMarketPrice, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
   withTransaction,
   type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument,
-  type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Position,
+  type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Portfolio, type Position,
   type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
 
@@ -77,13 +77,22 @@ app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
 // позиции в вход движка и отдаёт его результат наружу, ничего не считая сам.
-const BASE_CURRENCY = 'RUB'
+// Базовая валюта — настраиваемое поле портфеля (§13, §6.10), RUB — только дефолт для
+// только что созданного портфеля.
+const DEFAULT_BASE_CURRENCY = 'RUB'
+const SUPPORTED_BASE_CURRENCIES = ['RUB', 'USD', 'CNY']
 
 // Курсы ЦБ РФ (§13) подгружаются с кэшем в market-data.ts; без них позиции в валютах,
 // отличных от базовой, движок помечает как неоценённые (reason 'no-rate') и не подмешивает
 // их в итог нулями (§7.3) — это уже деградация, а не отсутствие функциональности.
-async function engineContext(): Promise<EngineContext> {
-  return { baseCurrency: BASE_CURRENCY, rates: await getCbrRateTable() }
+async function engineContext(baseCurrency: string): Promise<EngineContext> {
+  return { baseCurrency, rates: await getCbrRateTable() }
+}
+// Портфель заводится лениво (см. ensurePortfolio) — у аккаунта без единой сохранённой
+// записи его ещё может не быть, тогда используем дефолт, а не падаем.
+async function resolveBaseCurrency(client: Db, userId: string): Promise<string> {
+  const portfolio = await findPortfolio(client, userId)
+  return portfolio?.baseCurrency ?? DEFAULT_BASE_CURRENCY
 }
 
 // Машинный ключ группы активов (portfolio.asset_groups.type) ↔ подпись группы, которой
@@ -207,7 +216,7 @@ async function recordSnapshot(client: Db, userId: string, date = new Date().toIS
   if (!portfolio) return
   const positions = await listPositions(client, userId)
   if (!positions.length) return
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext())
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(portfolio.baseCurrency))
   await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
 }
 async function loadUsers() {
@@ -392,6 +401,31 @@ app.delete('/api/auth/me', async (request, response) => {
   await withTransaction(db, (client) => deleteUserData(client, userId))
   users.delete(userId)
   response.status(204).send()
+})
+
+// §13, §6 п.10: настройки портфеля — базовая валюта (используется Portfolio Engine для
+// всех расчётов, см. resolveBaseCurrency/engineContext выше) и название портфеля.
+// Портфель заводится лениво (ensurePortfolio) — сохранить настройки можно и до первой
+// сохранённой позиции, без ожидания, пока портфель появится сам собой.
+app.get('/api/settings', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const portfolio = await findPortfolio(db, userId)
+  response.json({
+    portfolioName: portfolio?.name ?? 'Основной портфель',
+    baseCurrency: portfolio?.baseCurrency ?? DEFAULT_BASE_CURRENCY,
+    availableCurrencies: SUPPORTED_BASE_CURRENCIES,
+  })
+})
+app.patch('/api/settings', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const name = optionalText(request.body?.portfolioName)
+  const baseCurrencyRaw = optionalText(request.body?.baseCurrency)?.toUpperCase()
+  if (baseCurrencyRaw && !SUPPORTED_BASE_CURRENCIES.includes(baseCurrencyRaw)) {
+    return response.status(400).json({ error: 'Неподдерживаемая базовая валюта' })
+  }
+  const portfolio = await ensurePortfolio(db, userId, randomUUID())
+  const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw })
+  response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES })
 })
 
 // §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе
@@ -833,33 +867,33 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const [payouts, costs, context] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId), engineContext()])
-  const portfolio = aggregateByGroup(positions.map(toEngineInput), context)
+  const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(baseCurrency))
   const returns = calculateReturns({
-    currentValue: portfolio.value,
-    invested: portfolio.invested,
+    currentValue: aggregate.value,
+    invested: aggregate.invested,
     payoutsReceived: payouts.received,
     commissions: costs.commissions,
     taxes: costs.taxes,
   })
   response.json({
-    total: portfolio.value,
-    invested: portfolio.invested,
-    profit: portfolio.pnl,
-    profitPercent: portfolio.pnlPercent,
+    total: aggregate.value,
+    invested: aggregate.invested,
+    profit: aggregate.pnl,
+    profitPercent: aggregate.pnlPercent,
     expected: payouts.expected,
     paid: payouts.received,
     positions: positions.length,
-    baseCurrency: portfolio.baseCurrency,
+    baseCurrency: aggregate.baseCurrency,
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
     financialResult: returns.financialResult,
     returnPercent: returns.returnPercent,
     returnMethod: returns.method,
     commissions: returns.commissions,
     taxes: returns.taxes,
-    groups: portfolio.groups,
+    groups: aggregate.groups,
     // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
-    valuation: { incomplete: portfolio.valuationIncomplete, unavailable: portfolio.unavailable },
+    valuation: { incomplete: aggregate.valuationIncomplete, unavailable: aggregate.unavailable },
   })
 })
 app.get('/api/portfolio/history', async (request, response) => {
@@ -875,7 +909,7 @@ app.get('/api/portfolio/history', async (request, response) => {
 app.get('/api/portfolio/structure', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const context = await engineContext()
+  const context = await engineContext(await resolveBaseCurrency(db, userId))
   const aggregate = aggregateByGroup(positions.map(toEngineInput), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   const keyed = (keyOf: (position: Position) => string | null): KeyedValuation[] =>
@@ -902,8 +936,8 @@ app.get('/api/portfolio/structure', async (request, response) => {
 // портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
 app.get('/api/recommendations', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const [positions, payouts, context] = await Promise.all([listPositions(db, userId), listPayouts(db, userId), engineContext()])
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), context)
+  const [positions, payouts, baseCurrency] = await Promise.all([listPositions(db, userId), listPayouts(db, userId), resolveBaseCurrency(db, userId)])
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(baseCurrency))
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   const positionSnapshots: PositionSnapshot[] = positions.map((position) => {
     const valuation = valuationById.get(position.id)

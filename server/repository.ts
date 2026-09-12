@@ -182,6 +182,18 @@ export async function ensurePortfolio(db: Db, userId: string, id: string, baseCu
   return mapPortfolio(result.rows[0])
 }
 
+// §13/§6.10: настройки портфеля (название, базовая валюта) — правит уже существующие
+// колонки Portfolio, а не отдельное JSONB-хранилище, чтобы не заводить второй источник
+// истины для полей, для которых схема §11 уже даёт первоклассные колонки.
+export async function updatePortfolio(db: Db, userId: string, portfolioId: string, patch: { name?: string; baseCurrency?: string }): Promise<Portfolio> {
+  const result = await db.query(
+    `UPDATE portfolio.portfolios SET name = COALESCE($3, name), base_currency = COALESCE($4, base_currency)
+     WHERE id = $1 AND user_id = $2 RETURNING id, name, base_currency`,
+    [portfolioId, userId, patch.name ?? null, patch.baseCurrency ?? null],
+  )
+  return mapPortfolio(result.rows[0])
+}
+
 function mapAccount(row: any): Account {
   return {
     id: row.id,

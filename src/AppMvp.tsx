@@ -1146,15 +1146,9 @@ function AppMvp() {
             path="/settings"
             element={
               <Settings
+                token={token}
                 themePreference={themePreference}
                 onThemeChange={setThemePreference}
-                onReset={() => {
-                  localStorage.removeItem(storageKey);
-                  setProducts(initialProducts);
-                  setPayments(initialPayments);
-                  setTransactions(initialTransactions);
-                  setToast("Демонстрационные данные восстановлены");
-                }}
               />
             }
           />
@@ -2478,32 +2472,103 @@ function Recommendations({ token }: { token: string }) {
     </Page>
   );
 }
+const currencyLabels: Record<string, string> = {
+  RUB: "RUB — российский рубль",
+  USD: "USD — доллар США",
+  CNY: "CNY — китайский юань",
+};
+
 function Settings({
+  token,
   themePreference,
   onThemeChange,
-  onReset,
 }: {
+  token: string;
   themePreference: ThemePreference;
   onThemeChange: (value: ThemePreference) => void;
-  onReset: () => void;
 }) {
+  const [portfolioName, setPortfolioName] = useState("");
+  const [baseCurrency, setBaseCurrency] = useState("RUB");
+  const [availableCurrencies, setAvailableCurrencies] = useState<string[]>([
+    "RUB",
+    "USD",
+    "CNY",
+  ]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const response = await fetch(`${apiUrl}/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) return;
+      const result = (await response.json()) as {
+        portfolioName?: string;
+        baseCurrency?: string;
+        availableCurrencies?: string[];
+      };
+      setPortfolioName(result.portfolioName || "");
+      setBaseCurrency(result.baseCurrency || "RUB");
+      if (result.availableCurrencies) {
+        setAvailableCurrencies(result.availableCurrencies);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch(`${apiUrl}/settings`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ portfolioName, baseCurrency }),
+      });
+      const result = (await response.json()) as {
+        portfolioName?: string;
+        baseCurrency?: string;
+        error?: string;
+      };
+      if (!response.ok) {
+        setMessage(result.error || "Не удалось сохранить настройки");
+        return;
+      }
+      setPortfolioName(result.portfolioName || "");
+      setBaseCurrency(result.baseCurrency || "RUB");
+      setMessage("Настройки сохранены");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <Page
-      title="Настройки"
-      subtitle="Параметры портфеля и демонстрационные данные"
-    >
-      <div className="settings-card">
+    <Page title="Настройки" subtitle="Параметры портфеля">
+      <form className="settings-card" onSubmit={save}>
         <label>
           Базовая валюта
-          <select defaultValue="RUB">
-            <option>RUB — российский рубль</option>
-            <option>USD — доллар США</option>
-            <option>CNY — китайский юань</option>
+          <select
+            value={baseCurrency}
+            onChange={(event) => setBaseCurrency(event.target.value)}
+          >
+            {availableCurrencies.map((code) => (
+              <option key={code} value={code}>
+                {currencyLabels[code] || code}
+              </option>
+            ))}
           </select>
         </label>
         <label>
           Название портфеля
-          <input defaultValue="Основной" />
+          <input
+            value={portfolioName}
+            onChange={(event) => setPortfolioName(event.target.value)}
+          />
         </label>
         <label>
           Тема оформления
@@ -2518,13 +2583,14 @@ function Settings({
             <option value="dark">Тёмная</option>
           </select>
         </label>
-        <button className="outline-button" onClick={onReset} type="button">
-          Восстановить демонстрационные данные
+        {message && <p className="form-error">{message}</p>}
+        <button className="primary-button" type="submit" disabled={saving}>
+          {saving ? "Сохранение…" : "Сохранить"}
         </button>
         <Link className="delete-button" to="/settings/delete-account">
           Удалить аккаунт
         </Link>
-      </div>
+      </form>
     </Page>
   );
 }
