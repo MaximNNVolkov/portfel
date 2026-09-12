@@ -11,15 +11,25 @@ import { Pool, types } from 'pg'
 import { createWorker } from 'tesseract.js'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
-import { aggregateByGroup, calculateReturns, type EngineContext, type PositionInput } from './portfolio-engine.ts'
+import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
+import { tinkoffConnector } from './brokers/tinkoff.ts'
 import {
-  deletePayment, deleteProduct, deleteTransaction, deleteUserData,
-  findCashProduct, findPayment, findProduct, findTransaction,
-  insertPayment, insertProduct, insertTransaction,
-  listPayments, listProducts, listSnapshots, listTransactions, loadStore,
-  updatePayment, updateProduct, updateProductPosition, updateTransaction,
-  upsertSnapshot, withTransaction,
-  type Db, type Payment, type Product, type Store, type Transaction,
+  aggregateByGroup, calculateReturns, resolveAssetGroup,
+  type AssetGroup, type EngineContext, type PositionInput,
+} from './portfolio-engine.ts'
+import {
+  deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
+  deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
+  findCashPosition, findInstrumentByKey, findPayout, findPortfolio, findPosition,
+  findPositionByAccountInstrument, findTransaction, findTransactionByExternalId,
+  insertInstrument, insertPayout, insertPosition, insertTransaction,
+  listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
+  sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
+  withTransaction,
+  type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument,
+  type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Position,
+  type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
 
 // DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
@@ -38,17 +48,14 @@ function optionalText(value: unknown): string | undefined {
 function optionalBool(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
 }
-type AssetType = 'Облигации' | 'Акции' | 'Вклады' | 'Фонды' | 'Деньги' | 'Прочее'
-type Snapshot = { date: string; value: number }
+type Snapshot = { date: string; value: number; invested: number | null }
 type User = { id: string; email: string; passwordHash: string; salt: string }
-type BrokerConnection = { provider: 'tinkoff'; connectedAt: string; maskedToken: string; status: 'connected' | 'pending' }
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
 const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel'
 const db = new Pool({ connectionString: databaseUrl, max: 10 })
 const users = new Map<string, User>()
-const brokerConnections = new Map<string, BrokerConnection>()
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000
 const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
 
@@ -61,7 +68,7 @@ app.use('/api', apiLimiter)
 app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
-// продукты в вход движка и отдаёт его результат наружу, ничего не считая сам.
+// позиции в вход движка и отдаёт его результат наружу, ничего не считая сам.
 //
 // Таблица курсов на MVP ещё не подключена (источник — ЦБ РФ, §13), поэтому позиции
 // в валютах, отличных от базовой, движок помечает как неоценённые (reason 'no-rate')
@@ -69,38 +76,129 @@ app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 // его результат передаётся сюда через поле rates — остальной код не меняется.
 const ENGINE_CONTEXT: EngineContext = { baseCurrency: 'RUB' }
 
-function toPosition(product: Product): PositionInput {
+// Машинный ключ группы активов (portfolio.asset_groups.type) ↔ подпись группы, которой
+// оперируют движок (§7.2) и интерфейс. В базе хранится ключ, наружу отдаётся подпись.
+const GROUP_LABELS: Record<AssetGroupType, AssetGroup> = {
+  deposit: 'Вклады', bond: 'Облигации', share: 'Акции', fund: 'Фонды', cash: 'Деньги', other: 'Прочее',
+}
+const GROUP_TYPES: Record<AssetGroup, AssetGroupType> = {
+  'Вклады': 'deposit', 'Облигации': 'bond', 'Акции': 'share', 'Фонды': 'fund', 'Деньги': 'cash', 'Прочее': 'other',
+}
+const MANUAL_PROVIDER = 'Ручной ввод'
+
+function toGroupType(value: unknown): AssetGroupType {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (raw in GROUP_LABELS) return raw as AssetGroupType
+  return GROUP_TYPES[resolveAssetGroup(typeof value === 'string' ? value : null)]
+}
+// Тип счёта выводится так же, как при бэкфилле: ручные записи — прочий счёт,
+// вклады — банковский, остальное — брокерский (§11 Account).
+function accountTypeFor(provider: string, groupType: AssetGroupType): AccountType {
+  if (provider === MANUAL_PROVIDER) return 'other'
+  if (groupType === 'deposit') return 'bank'
+  return 'broker'
+}
+
+// Позиция наружу — плоская запись: поля позиции (§11 Position) вместе с параметрами
+// её инструмента (§11 Instrument) и названием счёта, чтобы карточка инструмента (§9)
+// собиралась одним запросом.
+function positionToWire(position: Position) {
+  const instrument = position.instrument
   return {
-    id: product.id,
-    name: product.name,
-    type: product.type,
-    currency: product.currency || ENGINE_CONTEXT.baseCurrency,
-    invested: product.invested,
-    value: product.amount,
-    quantity: product.quantity ?? null,
-    averagePrice: product.averagePrice ?? null,
-    currentPrice: product.currentPrice ?? null,
-    accruedInterest: product.accruedInterest ?? null,
+    id: position.id,
+    accountId: position.accountId,
+    instrumentId: position.instrumentId,
+    name: instrument.name,
+    type: GROUP_LABELS[instrument.groupType] ?? 'Прочее',
+    instrumentType: instrument.instrumentType,
+    // Текущая стоимость. null = актуальной цены нет; ноль вместо неё не подставляется (§7.3).
+    amount: position.value ?? null,
+    invested: position.invested,
+    ticker: instrument.ticker ?? '',
+    date: position.openedOn ?? '',
+    institution: position.account.provider,
+    currency: instrument.currency,
+    source: position.source,
+    isin: instrument.isin,
+    issuer: instrument.issuer,
+    quantity: position.quantity,
+    averagePrice: position.averagePrice,
+    currentPrice: position.currentPrice,
+    accruedInterest: position.accruedInterest,
+    nominal: instrument.nominal,
+    couponRate: instrument.couponRate,
+    couponDate: instrument.couponDate,
+    maturityDate: instrument.maturityDate,
+    ofertaDate: instrument.ofertaDate,
+    amortization: instrument.amortization,
+    rate: instrument.rate,
+    effectiveRate: instrument.effectiveRate,
+    capitalization: instrument.capitalization,
+    termEndDate: instrument.termEndDate,
+    interestPayoutFrequency: instrument.interestPayoutFrequency,
+    replenishable: instrument.replenishable,
+    partialWithdrawal: instrument.partialWithdrawal,
+    autoProlongation: instrument.autoProlongation,
+  }
+}
+function instrumentToWire(instrument: Instrument) {
+  return { ...instrument, type: GROUP_LABELS[instrument.groupType] ?? 'Прочее' }
+}
+function transactionToWire(transaction: Transaction) {
+  return {
+    id: transaction.id,
+    type: transaction.type,
+    title: transaction.description ?? '',
+    amount: transaction.amount,
+    date: transaction.date,
+    currency: transaction.currency,
+    commission: transaction.commission,
+    tax: transaction.tax,
+    positionId: transaction.positionId,
+    instrumentId: transaction.instrumentId,
+    accountId: transaction.accountId,
+    source: transaction.source,
+  }
+}
+function payoutToWire(payout: Payout) {
+  return {
+    id: payout.id,
+    title: payout.description ?? '',
+    amount: payout.amount,
+    date: payout.date,
+    type: payout.type,
+    status: payout.status,
+    currency: payout.currency,
+    instrumentId: payout.instrumentId,
+    accountId: payout.accountId,
+    transactionId: payout.transactionId,
   }
 }
 
-function evaluateStore(store: Store) {
-  const portfolio = aggregateByGroup(store.products.map(toPosition), ENGINE_CONTEXT)
-  const expected = store.payments.reduce((sum, item) => sum + item.amount, 0)
-  const paid = store.transactions.filter((item) => item.kind === 'Выплата').reduce((sum, item) => sum + item.amount, 0)
-  // Комиссии и налоги (§10.4, §10.5) появятся вместе с соответствующими типами операций —
-  // движок их уже принимает, пока источника данных нет.
-  const returns = calculateReturns({ currentValue: portfolio.value, invested: portfolio.invested, payoutsReceived: paid })
-  return { portfolio, returns, expected, paid }
+function toEngineInput(position: Position): PositionInput {
+  return {
+    id: position.id,
+    name: position.instrument.name,
+    type: GROUP_LABELS[position.instrument.groupType],
+    currency: position.instrument.currency || ENGINE_CONTEXT.baseCurrency,
+    invested: position.invested,
+    value: position.value ?? null,
+    quantity: position.quantity ?? null,
+    averagePrice: position.averagePrice ?? null,
+    currentPrice: position.currentPrice ?? null,
+    accruedInterest: position.accruedInterest ?? null,
+  }
 }
 
 // Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается
 // уже после точечной записи и внутри той же транзакции, что и само изменение.
 async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {
-  const products = await listProducts(client, userId)
-  if (!products.length) return
-  const value = aggregateByGroup(products.map(toPosition), ENGINE_CONTEXT).value
-  await upsertSnapshot(client, userId, randomUUID(), date, value)
+  const portfolio = await findPortfolio(client, userId)
+  if (!portfolio) return
+  const positions = await listPositions(client, userId)
+  if (!positions.length) return
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
 }
 async function loadUsers() {
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users')
@@ -111,6 +209,15 @@ async function loadUsers() {
 function requiredText(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is required`)
   return value.trim()
+}
+function listOptions(request: Request): ListOptions | undefined {
+  const limit = optionalNumber(request.query.limit)
+  const offset = optionalNumber(request.query.offset)
+  if (limit === undefined && offset === undefined) return undefined
+  return {
+    limit: limit !== undefined ? Math.min(Math.max(Math.trunc(limit), 1), 500) : undefined,
+    offset: offset !== undefined ? Math.max(Math.trunc(offset), 0) : undefined,
+  }
 }
 function decodeUploadName(value: string) {
   try {
@@ -127,13 +234,13 @@ function normalizeCurrency(value: string): string {
   return 'RUB'
 }
 function parseNumber(value: string): number {
-  const sanitized = value.replace(/\s+/g, '').replace(/\u00A0/g, '').replace(/[^\d,.-]/g, '')
+  const sanitized = value.replace(/\s+/g, '').replace(/ /g, '').replace(/[^\d,.-]/g, '')
   if (!sanitized || sanitized === '-' || sanitized === '.') return 0
   const numeric = sanitized.replace(/,/g, '.')
   const result = Number(numeric)
   return Number.isFinite(result) ? result : 0
 }
-function inferAssetType(text: string): AssetType {
+function inferAssetType(text: string): AssetGroup {
   const haystack = text.toLowerCase()
   if (/(офз|облигац|bond|coupon|coupon)/.test(haystack)) return 'Облигации'
   if (/(акц|share|stock|sber|gazp|yandex|aapl|msft|nvda|tsla)/.test(haystack)) return 'Акции'
@@ -157,7 +264,7 @@ function buildOcrCandidates(text: string) {
     .map((line) => line.trim())
     .filter((line) => line.length > 4)
 
-  const candidates: Array<{ name: string; type: AssetType; amount: number; invested: number; currency: string; deltaPercent: number; confidence: number; missingFields: string[] }> = []
+  const candidates: Array<{ name: string; type: AssetGroup; amount: number; invested: number; currency: string; deltaPercent: number; confidence: number; missingFields: string[] }> = []
 
   for (const block of blocks) {
     const hasNumbers = /\d/.test(block)
@@ -266,20 +373,359 @@ app.delete('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   await withTransaction(db, (client) => deleteUserData(client, userId))
   users.delete(userId)
-  brokerConnections.delete(userId)
   response.status(204).send()
 })
-app.get('/api/brokers/tinkoff', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(brokerConnections.get(userId) || { status: 'disconnected', provider: 'tinkoff' }) })
+
+// §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе
+// перезапуск сервера «отключал» бы брокера. Токен хранится только зашифрованным (§28,
+// server/token-crypto.ts) — расшифровывается на секунду вызова коннектора и никогда не логируется.
+const TINKOFF_PROVIDER = 'Т-Инвестиции'
+const BROKER_GROUP_TYPE: Record<'bond' | 'share' | 'fund' | 'deposit' | 'other', AssetGroupType> = {
+  bond: 'bond', share: 'share', fund: 'fund', deposit: 'deposit', other: 'other',
+}
+
+// Синхронизация (§19): позиции ставятся из ответа брокера целиком (количество/цены/стоимость
+// перезаписываются как авторитетные), а не разносятся через applyTransactionEffect — тот
+// путь предназначен для ручного/OCR-ввода и задвоил бы результат поверх уже готового снимка
+// брокера. Операции добавляются с дедупликацией по external_id, чтобы повторный запуск
+// не плодил дубликаты; связанные выплаты заводятся тем же syncPayoutForTransaction,
+// что и для ручных операций — у него нет побочных эффектов на позиции.
+async function performTinkoffSync(client: Db, userId: string, token: string): Promise<void> {
+  const data = await tinkoffConnector.fetchSyncData(token)
+  const portfolio = await ensurePortfolio(client, userId, randomUUID())
+  const instrumentIdByExternal = new Map<string, string>()
+
+  for (const brokerPosition of data.positions) {
+    let instrument = await findInstrumentByKey(client, userId, {
+      isin: brokerPosition.instrument.isin, ticker: brokerPosition.instrument.ticker,
+    })
+    if (!instrument) {
+      instrument = {
+        id: randomUUID(),
+        groupType: BROKER_GROUP_TYPE[brokerPosition.instrument.assetType] ?? 'other',
+        instrumentType: brokerPosition.instrument.assetType,
+        name: brokerPosition.instrument.name,
+        currency: brokerPosition.instrument.currency,
+        source: 'broker',
+        ticker: brokerPosition.instrument.ticker,
+        isin: brokerPosition.instrument.isin,
+        nominal: brokerPosition.instrument.nominal,
+        maturityDate: brokerPosition.instrument.maturityDate,
+        couponRate: brokerPosition.instrument.couponRate,
+      }
+      await insertInstrument(client, userId, instrument)
+    }
+    instrumentIdByExternal.set(brokerPosition.instrument.externalId, instrument.id)
+
+    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
+      type: 'broker', provider: TINKOFF_PROVIDER, currency: instrument.currency,
+    })
+    const existing = await findPositionByAccountInstrument(client, userId, account.id, instrument.id)
+    const invested = brokerPosition.averagePrice !== null
+      ? brokerPosition.averagePrice * brokerPosition.quantity
+      : (existing?.invested ?? 0)
+    const record: PositionRecord = {
+      id: existing?.id ?? randomUUID(),
+      accountId: account.id,
+      instrumentId: instrument.id,
+      quantity: brokerPosition.quantity,
+      averagePrice: brokerPosition.averagePrice ?? undefined,
+      currentPrice: brokerPosition.currentPrice ?? undefined,
+      value: brokerPosition.currentValue ?? undefined,
+      invested,
+      source: 'broker',
+      openedOn: existing?.openedOn,
+    }
+    if (existing) await updatePosition(client, userId, record)
+    else await insertPosition(client, record)
+  }
+
+  for (const operation of data.operations) {
+    if (await findTransactionByExternalId(client, userId, operation.externalId)) continue
+    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
+      type: 'broker', provider: TINKOFF_PROVIDER, currency: operation.currency,
+    })
+    const transaction: Transaction = {
+      id: randomUUID(),
+      accountId: account.id,
+      type: operation.type,
+      date: operation.date.slice(0, 10),
+      amount: operation.amount,
+      currency: operation.currency,
+      commission: operation.commission ?? 0,
+      tax: 0,
+      source: 'broker',
+      instrumentId: operation.instrumentExternalId ? instrumentIdByExternal.get(operation.instrumentExternalId) : undefined,
+      quantity: operation.quantity,
+      price: operation.price,
+      description: operation.description,
+      externalId: operation.externalId,
+    }
+    await insertTransaction(client, transaction)
+    await syncPayoutForTransaction(client, transaction)
+  }
+
+  await recordSnapshot(client, userId)
+}
+
+app.get('/api/brokers/tinkoff', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const connection = await findBrokerConnection(db, userId, 'tinkoff')
+  if (!connection) return response.json({ provider: 'tinkoff', status: 'disconnected' })
+  response.json({
+    provider: connection.brokerType,
+    status: connection.status,
+    maskedToken: connection.tokenMasked,
+    connectedAt: connection.createdAt,
+    lastSyncAt: connection.lastSyncAt,
+    lastError: connection.lastError,
+  })
+})
 app.post('/api/brokers/tinkoff/connect', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const token = requiredText(request.body?.token, 'token')
-  const connection: BrokerConnection = { provider: 'tinkoff', connectedAt: new Date().toISOString(), maskedToken: `${token.slice(0, 4)}••••${token.slice(-4)}`, status: 'pending' }
-  brokerConnections.set(userId, connection)
-  response.status(202).json({ ...connection, message: 'Токен принят. Синхронизация будет запущена после настройки Tinkoff Invest API.' })
+  try {
+    const token = requiredText(request.body?.token, 'token')
+    const valid = await tinkoffConnector.validateToken(token)
+    if (!valid) {
+      return response.status(400).json({ error: 'Токен не подошёл. Проверьте, что он скопирован полностью и относится к боевому контуру Т-Инвестиций.' })
+    }
+    const connection = await upsertBrokerConnection(db, userId, randomUUID(), {
+      brokerType: 'tinkoff',
+      tokenMasked: maskToken(token),
+      encryptedToken: encryptToken(token),
+      status: 'connected',
+    })
+    response.status(200).json({
+      provider: connection.brokerType,
+      status: connection.status,
+      maskedToken: connection.tokenMasked,
+      connectedAt: connection.createdAt,
+      message: 'Токен подтверждён. Запустите синхронизацию, чтобы загрузить портфель.',
+    })
+  } catch (error) {
+    logError('brokers.tinkoff.connect', error)
+    response.status(400).json({ error: 'Не удалось подключить Т-Инвестиции. Проверьте токен и повторите попытку.' })
+  }
 })
-app.post('/api/brokers/tinkoff/sync', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; const connection = brokerConnections.get(userId); if (!connection) return response.status(409).json({ error: 'Broker is not connected' }); response.status(202).json({ status: 'pending', message: 'Синхронизация ожидает подключения провайдера рыночных данных.' }) })
+app.post('/api/brokers/tinkoff/sync', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const connection = await findBrokerConnection(db, userId, 'tinkoff')
+  if (!connection || !connection.encryptedToken) {
+    return response.status(409).json({ error: 'Брокер не подключён. Введите токен на странице интеграций.' })
+  }
+  try {
+    const token = decryptToken(connection.encryptedToken)
+    await withTransaction(db, (client) => performTinkoffSync(client, userId, token))
+    await updateBrokerConnectionSync(db, userId, 'tinkoff', {
+      status: 'connected', lastSyncAt: new Date().toISOString(), lastError: null,
+    })
+    response.json({ status: 'connected', message: 'Синхронизация завершена.' })
+  } catch (error) {
+    // §40.2 B/C: ошибка синхронизации не должна стирать ранее загруженные данные — здесь
+    // меняется только статус подключения, positions/transactions уже сохранённой части
+    // синхронизации из этого withTransaction не применяются целиком (транзакция откатилась),
+    // но всё, что было загружено предыдущими успешными запусками, остаётся нетронутым.
+    logError('brokers.tinkoff.sync', error)
+    await updateBrokerConnectionSync(db, userId, 'tinkoff', {
+      status: 'error', lastError: 'Не удалось получить данные от Т-Инвестиций',
+    })
+    response.status(502).json({ status: 'error', error: 'Не удалось синхронизироваться с Т-Инвестициями. Ранее загруженные данные сохранены.' })
+  }
+})
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'portfolio-api' }))
+
+// ---------------------------------------------------------------------------
+// Позиции и инструменты (§8, §9, §11)
+// ---------------------------------------------------------------------------
+
+type PositionBody = Record<string, unknown>
+
+function instrumentFromBody(body: PositionBody, id: string, source: DataSource): Instrument {
+  const groupType = toGroupType(body.type)
+  return {
+    id,
+    groupType,
+    instrumentType: optionalText(body.instrumentType) || groupType,
+    name: requiredText(body.name, 'name'),
+    currency: optionalText(body.currency) || 'RUB',
+    source,
+    ticker: optionalText(body.ticker),
+    isin: optionalText(body.isin),
+    issuer: optionalText(body.issuer),
+    nominal: optionalNumber(body.nominal),
+    maturityDate: optionalText(body.maturityDate),
+    couponRate: optionalNumber(body.couponRate),
+    couponDate: optionalText(body.couponDate),
+    ofertaDate: optionalText(body.ofertaDate),
+    amortization: optionalBool(body.amortization),
+    rate: optionalNumber(body.rate),
+    effectiveRate: optionalNumber(body.effectiveRate),
+    capitalization: optionalBool(body.capitalization),
+    termEndDate: optionalText(body.termEndDate),
+    interestPayoutFrequency: optionalText(body.interestPayoutFrequency),
+    replenishable: optionalBool(body.replenishable),
+    partialWithdrawal: optionalBool(body.partialWithdrawal),
+    autoProlongation: optionalBool(body.autoProlongation),
+  }
+}
+function mergeInstrument(existing: Instrument, body: PositionBody): Instrument {
+  const groupType = body.type !== undefined ? toGroupType(body.type) : existing.groupType
+  return {
+    ...existing,
+    groupType,
+    instrumentType: body.instrumentType !== undefined
+      ? (optionalText(body.instrumentType) || groupType)
+      : (body.type !== undefined ? groupType : existing.instrumentType),
+    name: body.name !== undefined ? requiredText(body.name, 'name') : existing.name,
+    currency: body.currency !== undefined ? (optionalText(body.currency) || 'RUB') : existing.currency,
+    ticker: body.ticker !== undefined ? optionalText(body.ticker) : existing.ticker,
+    isin: body.isin !== undefined ? optionalText(body.isin) : existing.isin,
+    issuer: body.issuer !== undefined ? optionalText(body.issuer) : existing.issuer,
+    nominal: body.nominal !== undefined ? optionalNumber(body.nominal) : existing.nominal,
+    maturityDate: body.maturityDate !== undefined ? optionalText(body.maturityDate) : existing.maturityDate,
+    couponRate: body.couponRate !== undefined ? optionalNumber(body.couponRate) : existing.couponRate,
+    couponDate: body.couponDate !== undefined ? optionalText(body.couponDate) : existing.couponDate,
+    ofertaDate: body.ofertaDate !== undefined ? optionalText(body.ofertaDate) : existing.ofertaDate,
+    amortization: body.amortization !== undefined ? optionalBool(body.amortization) : existing.amortization,
+    rate: body.rate !== undefined ? optionalNumber(body.rate) : existing.rate,
+    effectiveRate: body.effectiveRate !== undefined ? optionalNumber(body.effectiveRate) : existing.effectiveRate,
+    capitalization: body.capitalization !== undefined ? optionalBool(body.capitalization) : existing.capitalization,
+    termEndDate: body.termEndDate !== undefined ? optionalText(body.termEndDate) : existing.termEndDate,
+    interestPayoutFrequency: body.interestPayoutFrequency !== undefined ? optionalText(body.interestPayoutFrequency) : existing.interestPayoutFrequency,
+    replenishable: body.replenishable !== undefined ? optionalBool(body.replenishable) : existing.replenishable,
+    partialWithdrawal: body.partialWithdrawal !== undefined ? optionalBool(body.partialWithdrawal) : existing.partialWithdrawal,
+    autoProlongation: body.autoProlongation !== undefined ? optionalBool(body.autoProlongation) : existing.autoProlongation,
+  }
+}
+
+// Создание позиции — единая точка для ручного ввода (§17) и распознанных со скриншота
+// записей (§18): заводит портфель и счёт, если их ещё нет, затем инструмент и позицию.
+async function createPosition(client: Db, userId: string, body: PositionBody, source: DataSource): Promise<Position> {
+  const instrument = instrumentFromBody(body, randomUUID(), source)
+  const value = positiveNumber(body.amount, 'amount')
+  const invested = positiveNumber(body.invested ?? body.amount, 'invested')
+  const openedOn = requiredText(body.date, 'date')
+  const provider = optionalText(body.institution) || MANUAL_PROVIDER
+
+  const portfolio = await ensurePortfolio(client, userId, randomUUID())
+  const account = await ensureAccount(client, portfolio.id, randomUUID(), {
+    type: accountTypeFor(provider, instrument.groupType),
+    provider,
+    currency: instrument.currency,
+  })
+  await insertInstrument(client, userId, instrument)
+  const record = {
+    id: randomUUID(),
+    accountId: account.id,
+    instrumentId: instrument.id,
+    invested,
+    source,
+    value,
+    quantity: optionalNumber(body.quantity),
+    averagePrice: optionalNumber(body.averagePrice),
+    currentPrice: optionalNumber(body.currentPrice),
+    accruedInterest: optionalNumber(body.accruedInterest),
+    openedOn,
+  }
+  await insertPosition(client, record)
+  return {
+    ...record,
+    instrument,
+    account: { id: account.id, type: account.type, provider: account.provider, currency: account.currency },
+  }
+}
+
+app.get('/api/positions', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const positions = await listPositions(db, userId, listOptions(request))
+  response.json(positions.map(positionToWire))
+})
+app.get('/api/positions/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const position = await findPosition(db, userId, request.params.id)
+  if (!position) return response.status(404).json({ error: 'Position not found' })
+  response.json(positionToWire(position))
+})
+app.post('/api/positions', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const position = await withTransaction(db, async (client) => {
+      const created = await createPosition(client, userId, request.body ?? {}, 'manual')
+      await recordSnapshot(client, userId)
+      return created
+    })
+    response.status(201).json(positionToWire(position))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
+})
+app.patch('/api/positions/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const existing = await findPosition(db, userId, request.params.id)
+    if (!existing) return response.status(404).json({ error: 'Position not found' })
+    const body = (request.body ?? {}) as PositionBody
+    const instrument = mergeInstrument(existing.instrument, body)
+    const provider = body.institution !== undefined
+      ? (optionalText(body.institution) || MANUAL_PROVIDER)
+      : existing.account.provider
+
+    const updated = await withTransaction(db, async (client) => {
+      // Счёт определяется парой (учреждение, валюта): если изменилось любое из них,
+      // позиция переезжает на соответствующий счёт, заводя его при необходимости.
+      const portfolio = await ensurePortfolio(client, userId, randomUUID())
+      const account = await ensureAccount(client, portfolio.id, randomUUID(), {
+        type: accountTypeFor(provider, instrument.groupType),
+        provider,
+        currency: instrument.currency,
+      })
+      const record = {
+        id: existing.id,
+        accountId: account.id,
+        instrumentId: existing.instrumentId,
+        invested: body.invested !== undefined ? positiveNumber(body.invested, 'invested') : existing.invested,
+        source: existing.source,
+        value: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.value,
+        quantity: body.quantity !== undefined ? optionalNumber(body.quantity) : existing.quantity,
+        averagePrice: body.averagePrice !== undefined ? optionalNumber(body.averagePrice) : existing.averagePrice,
+        currentPrice: body.currentPrice !== undefined ? optionalNumber(body.currentPrice) : existing.currentPrice,
+        accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
+        openedOn: body.date !== undefined ? requiredText(body.date, 'date') : existing.openedOn,
+      }
+      await updateInstrument(client, userId, instrument)
+      await updatePosition(client, userId, record)
+      await recordSnapshot(client, userId)
+      return {
+        ...record,
+        instrument,
+        account: { id: account.id, type: account.type, provider: account.provider, currency: account.currency },
+      } satisfies Position
+    })
+    response.json(positionToWire(updated))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
+})
+app.delete('/api/positions/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const existing = await findPosition(db, userId, request.params.id)
+  if (!existing) return response.status(404).json({ error: 'Position not found' })
+  await withTransaction(db, async (client) => {
+    await deletePosition(client, userId, existing.id)
+    // Инструмент, заведённый вручную или со скриншота, без позиций и истории больше не нужен.
+    await deleteOrphanInstrument(client, userId, existing.instrumentId)
+    await recordSnapshot(client, userId)
+  })
+  response.status(204).send()
+})
+
+app.get('/api/accounts', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  response.json(await listAccounts(db, userId))
+})
+app.get('/api/instruments', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const instruments = await listInstruments(db, userId, listOptions(request))
+  response.json(instruments.map(instrumentToWire))
+})
+
 app.post('/api/ocr/upload', upload.single('image'), async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   if (!request.file) return response.status(400).json({ error: 'Изображение не загружено или имеет неподдерживаемый формат' })
@@ -291,24 +737,25 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
     const candidates = buildOcrCandidates(text)
     const recognized = candidates.filter((candidate) => candidate.amount > 0 && candidate.name && candidate.name !== 'Распознанный продукт')
     const date = new Date().toISOString().slice(0, 10)
-    const created: Product[] = recognized.map((candidate) => ({
-      id: randomUUID(),
-      name: candidate.name,
-      type: candidate.type,
-      amount: candidate.amount,
-      invested: candidate.invested > 0 ? candidate.invested : candidate.amount,
-      ticker: '',
-      date,
-      institution: 'Проверьте источник',
-      currency: candidate.currency,
-      source: 'ocr',
-    }))
-    if (created.length) {
-      await withTransaction(db, async (client) => {
-        for (const product of created) await insertProduct(client, userId, product)
-        await recordSnapshot(client, userId)
-      })
-    }
+    // §40.4: распознанное сохраняется как есть, без шага подтверждения полей.
+    const created = recognized.length
+      ? await withTransaction(db, async (client) => {
+          const positions: Position[] = []
+          for (const candidate of recognized) {
+            positions.push(await createPosition(client, userId, {
+              name: candidate.name,
+              type: candidate.type,
+              amount: candidate.amount,
+              invested: candidate.invested > 0 ? candidate.invested : candidate.amount,
+              date,
+              institution: 'Проверьте источник',
+              currency: candidate.currency,
+            }, 'ocr'))
+          }
+          await recordSnapshot(client, userId)
+          return positions
+        })
+      : []
     const unrecognizedCount = candidates.length - recognized.length
     const failures = unrecognizedCount > 0
       ? [{
@@ -318,29 +765,40 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
             : `Не удалось распознать ${unrecognizedCount} из ${candidates.length} позиций`,
         }]
       : []
-    response.status(created.length ? 201 : 200).json({ date, items: created, failures })
+    response.status(created.length ? 201 : 200).json({ date, items: created.map(positionToWire), failures })
   } finally {
     await worker.terminate()
     await unlink(request.file.path).catch(() => undefined)
   }
 })
+
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const store = await loadStore(db, userId)
-  const { portfolio, returns, expected, paid } = evaluateStore(store)
+  const positions = await listPositions(db, userId)
+  const [payouts, costs] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId)])
+  const portfolio = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  const returns = calculateReturns({
+    currentValue: portfolio.value,
+    invested: portfolio.invested,
+    payoutsReceived: payouts.received,
+    commissions: costs.commissions,
+    taxes: costs.taxes,
+  })
   response.json({
     total: portfolio.value,
     invested: portfolio.invested,
     profit: portfolio.pnl,
     profitPercent: portfolio.pnlPercent,
-    expected,
-    paid,
-    products: store.products.length,
+    expected: payouts.expected,
+    paid: payouts.received,
+    positions: positions.length,
     baseCurrency: portfolio.baseCurrency,
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
     financialResult: returns.financialResult,
     returnPercent: returns.returnPercent,
     returnMethod: returns.method,
+    commissions: returns.commissions,
+    taxes: returns.taxes,
     groups: portfolio.groups,
     // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
     valuation: { incomplete: portfolio.valuationIncomplete, unavailable: portfolio.unavailable },
@@ -353,182 +811,241 @@ app.get('/api/portfolio/history', async (request, response) => {
   response.json(snapshots)
 })
 
-app.get('/api/products', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listProducts(db, userId)) })
-app.post('/api/products', async (request, response) => {
+// ---------------------------------------------------------------------------
+// Выплаты (§22)
+// ---------------------------------------------------------------------------
+
+const PAYOUT_TYPES: PayoutType[] = ['COUPON', 'DIVIDEND', 'INTEREST', 'DEPOSIT_PRINCIPAL', 'REDEMPTION', 'OTHER']
+const PAYOUT_STATUSES: PayoutStatus[] = ['expected', 'received']
+
+function payoutType(value: unknown, fallback: PayoutType): PayoutType {
+  const raw = optionalText(value)?.toUpperCase()
+  if (!raw) return fallback
+  if (!PAYOUT_TYPES.includes(raw as PayoutType)) throw new Error('Unsupported payout type')
+  return raw as PayoutType
+}
+function payoutStatus(value: unknown, fallback: PayoutStatus): PayoutStatus {
+  const raw = optionalText(value)?.toLowerCase()
+  if (!raw) return fallback
+  if (!PAYOUT_STATUSES.includes(raw as PayoutStatus)) throw new Error('Unsupported payout status')
+  return raw as PayoutStatus
+}
+// Счёт для записей, не привязанных к конкретной позиции (выплата заведена вручную).
+async function defaultAccountId(client: Db, userId: string, currency = 'RUB'): Promise<string> {
+  const cash = await findCashPosition(client, userId)
+  if (cash) return cash.accountId
+  const portfolio = await ensurePortfolio(client, userId, randomUUID())
+  const account = await ensureAccount(client, portfolio.id, randomUUID(), { type: 'other', provider: MANUAL_PROVIDER, currency })
+  return account.id
+}
+
+app.get('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const body = request.body as Partial<Product>
-    const product: Product = {
-      id: randomUUID(), name: requiredText(body.name, 'name'), type: requiredText(body.type, 'type'),
-      amount: positiveNumber(body.amount, 'amount'), invested: positiveNumber(body.invested ?? body.amount, 'invested'),
-      ticker: typeof body.ticker === 'string' ? body.ticker.trim() : '', date: requiredText(body.date, 'date'),
-      institution: typeof body.institution === 'string' ? body.institution.trim() : 'Ручной ввод', currency: typeof body.currency === 'string' ? body.currency : 'RUB',
-      source: 'manual',
-      isin: optionalText(body.isin), quantity: optionalNumber(body.quantity), averagePrice: optionalNumber(body.averagePrice), currentPrice: optionalNumber(body.currentPrice),
-      nominal: optionalNumber(body.nominal), accruedInterest: optionalNumber(body.accruedInterest), couponRate: optionalNumber(body.couponRate),
-      couponDate: optionalText(body.couponDate), maturityDate: optionalText(body.maturityDate), ofertaDate: optionalText(body.ofertaDate), amortization: optionalBool(body.amortization),
-      rate: optionalNumber(body.rate), effectiveRate: optionalNumber(body.effectiveRate), capitalization: optionalBool(body.capitalization),
-      termEndDate: optionalText(body.termEndDate), interestPayoutFrequency: optionalText(body.interestPayoutFrequency),
-      replenishable: optionalBool(body.replenishable), partialWithdrawal: optionalBool(body.partialWithdrawal), autoProlongation: optionalBool(body.autoProlongation),
-    }
-    await withTransaction(db, async (client) => {
-      await insertProduct(client, userId, product)
-      await recordSnapshot(client, userId)
-    })
-    response.status(201).json(product)
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
+  const payouts = await listPayouts(db, userId, listOptions(request))
+  response.json(payouts.map(payoutToWire))
 })
-app.patch('/api/products/:id', async (request, response) => {
+app.post('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const existing = await findProduct(db, userId, request.params.id)
-    if (!existing) return response.status(404).json({ error: 'Product not found' })
-    const body = request.body as Partial<Product>
-    const updated: Product = {
+    const body = (request.body ?? {}) as PositionBody
+    const title = requiredText(body.title, 'title')
+    const amount = positiveNumber(body.amount, 'amount')
+    const date = requiredText(body.date, 'date')
+    const type = payoutType(body.type, 'OTHER')
+    const status = payoutStatus(body.status, 'expected')
+    const payout = await withTransaction(db, async (client) => {
+      const position = optionalText(body.positionId) ? await findPosition(client, userId, String(body.positionId)) : undefined
+      const record: Payout = {
+        id: randomUUID(),
+        accountId: position?.accountId ?? await defaultAccountId(client, userId),
+        instrumentId: position?.instrumentId,
+        date,
+        type,
+        amount,
+        currency: position?.instrument.currency ?? 'RUB',
+        status,
+        description: title,
+      }
+      await insertPayout(client, record)
+      return record
+    })
+    response.status(201).json(payoutToWire(payout))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
+})
+app.patch('/api/payouts/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const existing = await findPayout(db, userId, request.params.id)
+    if (!existing) return response.status(404).json({ error: 'Payout not found' })
+    const body = (request.body ?? {}) as PositionBody
+    const updated: Payout = {
       ...existing,
-      name: body.name !== undefined ? requiredText(body.name, 'name') : existing.name,
-      type: body.type !== undefined ? requiredText(body.type, 'type') : existing.type,
+      description: body.title !== undefined ? requiredText(body.title, 'title') : existing.description,
       amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
-      invested: body.invested !== undefined ? positiveNumber(body.invested, 'invested') : existing.invested,
-      ticker: body.ticker !== undefined ? String(body.ticker).trim() : existing.ticker,
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
-      institution: body.institution !== undefined ? (String(body.institution).trim() || 'Ручной ввод') : existing.institution,
-      currency: body.currency !== undefined ? String(body.currency) : existing.currency,
-      isin: body.isin !== undefined ? optionalText(body.isin) : existing.isin,
-      quantity: body.quantity !== undefined ? optionalNumber(body.quantity) : existing.quantity,
-      averagePrice: body.averagePrice !== undefined ? optionalNumber(body.averagePrice) : existing.averagePrice,
-      currentPrice: body.currentPrice !== undefined ? optionalNumber(body.currentPrice) : existing.currentPrice,
-      nominal: body.nominal !== undefined ? optionalNumber(body.nominal) : existing.nominal,
-      accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
-      couponRate: body.couponRate !== undefined ? optionalNumber(body.couponRate) : existing.couponRate,
-      couponDate: body.couponDate !== undefined ? optionalText(body.couponDate) : existing.couponDate,
-      maturityDate: body.maturityDate !== undefined ? optionalText(body.maturityDate) : existing.maturityDate,
-      ofertaDate: body.ofertaDate !== undefined ? optionalText(body.ofertaDate) : existing.ofertaDate,
-      amortization: body.amortization !== undefined ? optionalBool(body.amortization) : existing.amortization,
-      rate: body.rate !== undefined ? optionalNumber(body.rate) : existing.rate,
-      effectiveRate: body.effectiveRate !== undefined ? optionalNumber(body.effectiveRate) : existing.effectiveRate,
-      capitalization: body.capitalization !== undefined ? optionalBool(body.capitalization) : existing.capitalization,
-      termEndDate: body.termEndDate !== undefined ? optionalText(body.termEndDate) : existing.termEndDate,
-      interestPayoutFrequency: body.interestPayoutFrequency !== undefined ? optionalText(body.interestPayoutFrequency) : existing.interestPayoutFrequency,
-      replenishable: body.replenishable !== undefined ? optionalBool(body.replenishable) : existing.replenishable,
-      partialWithdrawal: body.partialWithdrawal !== undefined ? optionalBool(body.partialWithdrawal) : existing.partialWithdrawal,
-      autoProlongation: body.autoProlongation !== undefined ? optionalBool(body.autoProlongation) : existing.autoProlongation,
+      type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,
+      status: body.status !== undefined ? payoutStatus(body.status, existing.status) : existing.status,
     }
-    await withTransaction(db, async (client) => {
-      await updateProduct(client, userId, updated)
-      await recordSnapshot(client, userId)
-    })
-    response.json(updated)
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid product' }) }
+    await updatePayout(db, userId, updated)
+    response.json(payoutToWire(updated))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
 })
-app.delete('/api/products/:id', async (request, response) => {
+app.delete('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const removed = await withTransaction(db, async (client) => {
-    if (!(await deleteProduct(client, userId, request.params.id))) return false
-    await recordSnapshot(client, userId)
-    return true
-  })
-  if (!removed) return response.status(404).json({ error: 'Product not found' })
+  if (!(await deletePayout(db, userId, request.params.id))) return response.status(404).json({ error: 'Payout not found' })
   response.status(204).send()
 })
 
-app.get('/api/payments', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listPayments(db, userId)) })
-app.post('/api/payments', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const body = request.body as Partial<Payment>
-    const payment: Payment = { id: randomUUID(), title: requiredText(body.title, 'title'), amount: positiveNumber(body.amount, 'amount'), date: requiredText(body.date, 'date'), type: requiredText(body.type || 'Прочее', 'type') }
-    await insertPayment(db, userId, payment); response.status(201).json(payment)
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
-})
-app.patch('/api/payments/:id', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const existing = await findPayment(db, userId, request.params.id)
-    if (!existing) return response.status(404).json({ error: 'Payment not found' })
-    const body = request.body as Partial<Payment>
-    const updated: Payment = {
-      ...existing,
-      title: body.title !== undefined ? requiredText(body.title, 'title') : existing.title,
-      amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
-      date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
-      type: body.type !== undefined ? requiredText(body.type, 'type') : existing.type,
-    }
-    await updatePayment(db, userId, updated); response.json(updated)
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payment' }) }
-})
-app.delete('/api/payments/:id', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  if (!(await deletePayment(db, userId, request.params.id))) return response.status(404).json({ error: 'Payment not found' })
-  response.status(204).send()
-})
+// ---------------------------------------------------------------------------
+// Операции (§11 Transaction)
+// ---------------------------------------------------------------------------
+
+const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRAW', 'COUPON', 'DIVIDEND', 'INTEREST', 'FEE', 'TAX', 'REDEMPTION', 'OTHER']
+// Операции, деньги по которым зачисляются на денежную позицию или списываются с неё (§12).
+const CASH_CREDIT: TransactionType[] = ['DEPOSIT', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION']
+const CASH_DEBIT: TransactionType[] = ['WITHDRAW', 'FEE', 'TAX']
+const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
+// Операции, которые одновременно являются полученной выплатой и попадают в календарь (§22).
+const PAYOUT_BY_TRANSACTION: Partial<Record<TransactionType, PayoutType>> = {
+  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION',
+}
+
+function transactionType(value: unknown): TransactionType {
+  const raw = requiredText(value, 'type').toUpperCase()
+  if (!TRANSACTION_TYPES.includes(raw as TransactionType)) throw new Error('Unsupported transaction type')
+  return raw as TransactionType
+}
 
 // Позиции, затронутые одной операцией. Откат старого эффекта и применение нового
 // обязаны попасть в один и тот же объект в памяти (иначе вторая запись затрёт первую),
-// поэтому продукты кэшируются по id, а в БД уходят одним UPDATE на позицию в flush().
+// поэтому позиции кэшируются по id, а в БД уходят одним UPDATE на позицию в flush().
 function createPositionCache(client: Db, userId: string) {
-  const loaded = new Map<string, Product>()
+  const loaded = new Map<string, Position>()
   const touched = new Set<string>()
   let cashId: string | null | undefined
   return {
-    async byId(id: string): Promise<Product | undefined> {
+    async byId(id: string): Promise<Position | undefined> {
       const cached = loaded.get(id)
       if (cached) return cached
-      const product = await findProduct(client, userId, id)
-      if (product) loaded.set(id, product)
-      return product
+      const position = await findPosition(client, userId, id)
+      if (position) loaded.set(id, position)
+      return position
     },
-    // Денежный счёт, на который ложатся пополнения и выплаты (§12).
-    async cash(): Promise<Product | undefined> {
+    // Денежная позиция, на которую ложатся пополнения и выплаты (§12).
+    async cash(): Promise<Position | undefined> {
       if (cashId === undefined) {
-        const product = await findCashProduct(client, userId)
-        cashId = product ? product.id : null
-        if (product && !loaded.has(product.id)) loaded.set(product.id, product)
+        const position = await findCashPosition(client, userId)
+        cashId = position ? position.id : null
+        if (position && !loaded.has(position.id)) loaded.set(position.id, position)
       }
       return cashId ? loaded.get(cashId) : undefined
     },
-    mark(product: Product) { touched.add(product.id) },
+    mark(position: Position) { touched.add(position.id) },
     async flush() {
       for (const id of touched) {
-        const product = loaded.get(id)
-        if (product) await updateProductPosition(client, userId, product)
+        const position = loaded.get(id)
+        if (position) await updatePositionValue(client, userId, position)
       }
     },
   }
 }
 type PositionCache = ReturnType<typeof createPositionCache>
 
-async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'kind' | 'amount' | 'productId'>, direction: 1 | -1) {
+// Стоимость меняется только у позиции, у которой она вообще известна: позиция без цены
+// остаётся неоценённой, а не получает выдуманную сумму (§7.3).
+function shiftPosition(position: Position, delta: number) {
+  if (position.value !== undefined) position.value = position.value + delta
+  position.invested = Math.max(0, position.invested + delta)
+}
+
+async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'type' | 'amount' | 'positionId'>, direction: 1 | -1) {
   const amount = transaction.amount * direction
-  const product = transaction.productId ? await positions.byId(transaction.productId) : undefined
-  if (transaction.kind === 'Покупка' && product) { product.amount += amount; product.invested += amount; positions.mark(product) }
-  if (transaction.kind === 'Продажа' && product) { product.amount -= amount; product.invested = Math.max(0, product.invested - amount); positions.mark(product) }
-  if (transaction.kind === 'Пополнение' || transaction.kind === 'Выплата') {
+  const position = transaction.positionId ? await positions.byId(transaction.positionId) : undefined
+  if (transaction.type === 'BUY' && position) { shiftPosition(position, amount); positions.mark(position) }
+  if (transaction.type === 'SELL' && position) { shiftPosition(position, -amount); positions.mark(position) }
+  // Выплата зачисляется на денежную позицию вместе с вложенной суммой: сам доход уже
+  // учтён в финансовом результате как полученные выплаты (§10.3, §10.6), и рост остатка
+  // не должен посчитать его второй раз как прибыль денежной позиции.
+  if (CASH_CREDIT.includes(transaction.type)) {
     const cash = await positions.cash()
-    if (cash) { cash.amount += amount; cash.invested += amount; positions.mark(cash) }
+    if (cash) { shiftPosition(cash, amount); positions.mark(cash) }
+  }
+  if (CASH_DEBIT.includes(transaction.type)) {
+    const cash = await positions.cash()
+    if (cash) { shiftPosition(cash, -amount); positions.mark(cash) }
   }
 }
 
-app.get('/api/transactions', async (request, response) => { const userId = await currentUserId(request, response); if (!userId) return; response.json(await listTransactions(db, userId)) })
+// Полученная выплата (купон, дивиденд, проценты, погашение) попадает и в операции, и в
+// календарь выплат (§22): календарная запись создаётся вместе с операцией и живёт ровно
+// столько же, поэтому в сводке она считается один раз.
+async function syncPayoutForTransaction(client: Db, transaction: Transaction) {
+  await deletePayoutsForTransaction(client, transaction.id)
+  const type = PAYOUT_BY_TRANSACTION[transaction.type]
+  if (!type) return
+  await insertPayout(client, {
+    id: randomUUID(),
+    accountId: transaction.accountId,
+    instrumentId: transaction.instrumentId,
+    transactionId: transaction.id,
+    date: transaction.date,
+    type,
+    amount: transaction.amount,
+    currency: transaction.currency,
+    status: 'received',
+    description: transaction.description,
+  })
+}
+
+async function buildTransaction(client: Db, userId: string, id: string, body: PositionBody, existing?: Transaction): Promise<Transaction> {
+  const type = body.type !== undefined || !existing ? transactionType(body.type) : existing.type
+  const amount = body.amount !== undefined || !existing ? positiveNumber(body.amount, 'amount') : existing.amount
+  const date = body.date !== undefined || !existing ? requiredText(body.date, 'date') : existing.date
+  const description = body.title !== undefined ? optionalText(body.title) : existing?.description
+  // Операции с деньгами не привязаны к инструменту: они меняют денежную позицию (§12).
+  const positionId = POSITION_TYPES.includes(type)
+    ? (body.positionId !== undefined ? optionalText(body.positionId) : existing?.positionId)
+    : undefined
+  const position = positionId ? await findPosition(client, userId, positionId) : undefined
+  if (POSITION_TYPES.includes(type) && !position) throw new Error('positionId is required for BUY or SELL')
+
+  return {
+    id,
+    accountId: position?.accountId ?? existing?.accountId ?? await defaultAccountId(client, userId),
+    instrumentId: position?.instrumentId,
+    positionId: position?.id,
+    type,
+    date,
+    amount,
+    currency: position?.instrument.currency ?? existing?.currency ?? 'RUB',
+    commission: optionalNumber(body.commission) ?? existing?.commission ?? 0,
+    tax: optionalNumber(body.tax) ?? existing?.tax ?? 0,
+    description: description ?? type,
+    source: existing?.source ?? 'manual',
+  }
+}
+
+app.get('/api/transactions', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const transactions = await listTransactions(db, userId, listOptions(request))
+  response.json(transactions.map(transactionToWire))
+})
 app.post('/api/transactions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const body = request.body as Partial<Transaction>
-    const kind = requiredText(body.kind, 'kind')
-    if (!['Пополнение', 'Покупка', 'Продажа', 'Выплата'].includes(kind)) throw new Error('Unsupported transaction kind')
-    const amount = positiveNumber(body.amount, 'amount')
-    const transaction: Transaction = { id: randomUUID(), title: requiredText(body.title, 'title'), amount, date: requiredText(body.date, 'date'), kind, productId: body.productId }
-    await withTransaction(db, async (client) => {
+    const transaction = await withTransaction(db, async (client) => {
+      const created = await buildTransaction(client, userId, randomUUID(), (request.body ?? {}) as PositionBody)
       const positions = createPositionCache(client, userId)
-      const product = transaction.productId ? await positions.byId(transaction.productId) : undefined
-      if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('productId is required for buy or sell')
-      if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
-      await applyTransactionEffect(positions, transaction, 1)
+      const position = created.positionId ? await positions.byId(created.positionId) : undefined
+      if (created.type === 'SELL' && position && (position.value ?? 0) < created.amount) throw new Error('Sale exceeds current position')
+      await applyTransactionEffect(positions, created, 1)
       await positions.flush()
-      await insertTransaction(client, userId, transaction)
+      await insertTransaction(client, created)
+      await syncPayoutForTransaction(client, created)
       await recordSnapshot(client, userId)
+      return created
     })
-    response.status(201).json(transaction)
+    response.status(201).json(transactionToWire(transaction))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
 app.patch('/api/transactions/:id', async (request, response) => {
@@ -536,36 +1053,22 @@ app.patch('/api/transactions/:id', async (request, response) => {
   try {
     const existing = await findTransaction(db, userId, request.params.id)
     if (!existing) return response.status(404).json({ error: 'Transaction not found' })
-    const body = request.body as Partial<Transaction>
-    const kind = body.kind !== undefined ? requiredText(body.kind, 'kind') : existing.kind
-    if (!['Пополнение', 'Покупка', 'Продажа', 'Выплата'].includes(kind)) throw new Error('Unsupported transaction kind')
-    const amount = body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount
-    const productId = ['Пополнение', 'Выплата'].includes(kind)
-      ? undefined
-      : (body.productId !== undefined ? body.productId : existing.productId)
-    if (['Покупка', 'Продажа'].includes(kind) && !productId) throw new Error('productId is required for buy or sell')
-    const updated: Transaction = {
-      ...existing,
-      title: body.title !== undefined ? requiredText(body.title, 'title') : existing.title,
-      amount,
-      date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
-      kind,
-      productId,
-    }
-    await withTransaction(db, async (client) => {
+    const updated = await withTransaction(db, async (client) => {
+      const next = await buildTransaction(client, userId, existing.id, (request.body ?? {}) as PositionBody, existing)
       const positions = createPositionCache(client, userId)
-      const product = productId ? await positions.byId(productId) : undefined
-      if (['Покупка', 'Продажа'].includes(kind) && !product) throw new Error('Unknown productId')
       // Сначала снимаем эффект прежней версии операции, потом проверяем и накладываем новую;
       // при ошибке транзакция откатывается, поэтому возвращать эффект вручную не нужно.
       await applyTransactionEffect(positions, existing, -1)
-      if (kind === 'Продажа' && product && product.amount < amount) throw new Error('Sale exceeds current position')
-      await applyTransactionEffect(positions, updated, 1)
+      const position = next.positionId ? await positions.byId(next.positionId) : undefined
+      if (next.type === 'SELL' && position && (position.value ?? 0) < next.amount) throw new Error('Sale exceeds current position')
+      await applyTransactionEffect(positions, next, 1)
       await positions.flush()
-      await updateTransaction(client, userId, updated)
+      await updateTransaction(client, userId, next)
+      await syncPayoutForTransaction(client, next)
       await recordSnapshot(client, userId)
+      return next
     })
-    response.json(updated)
+    response.json(transactionToWire(updated))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
 })
 app.delete('/api/transactions/:id', async (request, response) => {
@@ -576,6 +1079,7 @@ app.delete('/api/transactions/:id', async (request, response) => {
     const positions = createPositionCache(client, userId)
     await applyTransactionEffect(positions, existing, -1)
     await positions.flush()
+    await deletePayoutsForTransaction(client, existing.id)
     await deleteTransaction(client, userId, existing.id)
     await recordSnapshot(client, userId)
   })

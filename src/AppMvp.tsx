@@ -44,6 +44,8 @@ type Product = {
   replenishable?: boolean;
   partialWithdrawal?: boolean;
   autoProlongation?: boolean;
+  accountId?: string;
+  instrumentId?: string;
 };
 type ProductDetails = {
   isin: string;
@@ -133,28 +135,61 @@ function detailsToPayload(details: ProductDetails) {
     autoProlongation: details.autoProlongation || undefined,
   };
 }
+type PayoutType =
+  | "COUPON"
+  | "DIVIDEND"
+  | "INTEREST"
+  | "DEPOSIT_PRINCIPAL"
+  | "REDEMPTION"
+  | "OTHER";
+type PayoutStatus = "expected" | "received";
 type Payment = {
   id: string;
   title: string;
   amount: number;
   date: string;
-  type: AssetType;
+  type: PayoutType;
+  status: PayoutStatus;
+  currency: string;
+  instrumentId?: string;
+  accountId?: string;
+  transactionId?: string;
 };
+type TransactionType =
+  | "BUY"
+  | "SELL"
+  | "DEPOSIT"
+  | "WITHDRAW"
+  | "COUPON"
+  | "DIVIDEND"
+  | "INTEREST"
+  | "FEE"
+  | "TAX"
+  | "REDEMPTION"
+  | "OTHER";
 type Transaction = {
   id: string;
   title: string;
   amount: number;
   date: string;
-  kind: "Пополнение" | "Покупка" | "Продажа" | "Выплата";
-  productId?: string;
+  type: TransactionType;
+  positionId?: string;
+  accountId?: string;
+  instrumentId?: string;
+  currency?: string;
+  commission?: number;
+  tax?: number;
+  source?: string;
 };
-type Snapshot = { date: string; value: number };
+type Snapshot = { date: string; value: number; invested: number | null };
 type OcrFailure = { filename: string; reason: string };
 type OcrUploadResult = { date: string; items: Product[]; failures: OcrFailure[] };
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "/api";
 const tokenKey = "capital-api-token";
+const themeKey = "capital-theme-preference";
+type ThemePreference = "light" | "dark" | "system";
 const initialProducts: Product[] = [
   {
     id: "ofz",
@@ -223,21 +258,27 @@ const initialPayments: Payment[] = [
     title: "Купон ОФЗ 26241",
     amount: 12480,
     date: "2026-09-20",
-    type: "Облигации",
+    type: "COUPON",
+    status: "expected",
+    currency: "RUB",
   },
   {
     id: "p2",
     title: "Дивиденд Сбера",
     amount: 8920,
     date: "2026-09-27",
-    type: "Акции",
+    type: "DIVIDEND",
+    status: "expected",
+    currency: "RUB",
   },
   {
     id: "p3",
     title: "Проценты по вкладу",
     amount: 17100,
     date: "2026-10-10",
-    type: "Вклады",
+    type: "INTEREST",
+    status: "expected",
+    currency: "RUB",
   },
 ];
 const initialTransactions: Transaction[] = [
@@ -246,21 +287,22 @@ const initialTransactions: Transaction[] = [
     title: "Покупка ОФЗ 26241",
     amount: 502000,
     date: "2026-02-12",
-    kind: "Покупка",
+    type: "BUY",
+    positionId: "ofz",
   },
   {
     id: "t2",
     title: "Пополнение брокерского счёта",
     amount: 250000,
     date: "2026-03-18",
-    kind: "Пополнение",
+    type: "DEPOSIT",
   },
   {
     id: "t3",
     title: "Купон ОФЗ 26241",
     amount: 12480,
     date: "2026-08-20",
-    kind: "Выплата",
+    type: "COUPON",
   },
 ];
 
@@ -281,6 +323,66 @@ const typeColors: Record<AssetType, string> = {
   Деньги: "slate",
   Прочее: "pink",
 };
+const payoutTypeLabels: Record<PayoutType, string> = {
+  COUPON: "Купон",
+  DIVIDEND: "Дивиденды",
+  INTEREST: "Проценты",
+  DEPOSIT_PRINCIPAL: "Возврат вклада",
+  REDEMPTION: "Погашение",
+  OTHER: "Прочее",
+};
+const payoutStatusLabels: Record<PayoutStatus, string> = {
+  expected: "Ожидается",
+  received: "Получено",
+};
+const transactionTypeLabels: Record<TransactionType, string> = {
+  BUY: "Покупка",
+  SELL: "Продажа",
+  DEPOSIT: "Пополнение",
+  WITHDRAW: "Вывод средств",
+  COUPON: "Купон",
+  DIVIDEND: "Дивиденды",
+  INTEREST: "Проценты по вкладу",
+  FEE: "Комиссия",
+  TAX: "Налог",
+  REDEMPTION: "Погашение",
+  OTHER: "Прочее",
+};
+const POSITION_TRANSACTION_TYPES: TransactionType[] = ["BUY", "SELL"];
+const CASH_CREDIT_TYPES: TransactionType[] = [
+  "DEPOSIT",
+  "COUPON",
+  "DIVIDEND",
+  "INTEREST",
+  "REDEMPTION",
+];
+const CASH_DEBIT_TYPES: TransactionType[] = ["WITHDRAW", "FEE", "TAX"];
+function applyLocalTransactionEffect(
+  products: Product[],
+  transaction: Transaction,
+  direction: 1 | -1,
+): Product[] {
+  const amount = transaction.amount * direction;
+  let next = products;
+  const shift = (id: string | undefined, delta: number) => {
+    if (!id) return;
+    next = next.map((product) =>
+      product.id === id
+        ? {
+            ...product,
+            amount: product.amount + delta,
+            invested: Math.max(0, product.invested + delta),
+          }
+        : product,
+    );
+  };
+  const cashId = next.find((product) => product.type === "Деньги")?.id;
+  if (transaction.type === "BUY") shift(transaction.positionId, amount);
+  if (transaction.type === "SELL") shift(transaction.positionId, -amount);
+  if (CASH_CREDIT_TYPES.includes(transaction.type)) shift(cashId, amount);
+  if (CASH_DEBIT_TYPES.includes(transaction.type)) shift(cashId, -amount);
+  return next;
+}
 const money = (value: number) =>
   `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
 const pct = (numerator: number, denominator: number) =>
@@ -318,6 +420,27 @@ function AppMvp() {
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(
+    () => (localStorage.getItem(themeKey) as ThemePreference | null) || "system",
+  );
+
+  useEffect(() => {
+    localStorage.setItem(themeKey, themePreference);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    function applyTheme() {
+      const resolved =
+        themePreference === "system"
+          ? media.matches
+            ? "dark"
+            : "light"
+          : themePreference;
+      document.documentElement.dataset.theme = resolved;
+    }
+    applyTheme();
+    if (themePreference !== "system") return;
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [themePreference]);
 
   function expireSession() {
     localStorage.removeItem(tokenKey);
@@ -338,8 +461,8 @@ function AppMvp() {
           transactionsResponse,
           historyResponse,
         ] = await Promise.all([
-          fetch(`${apiUrl}/products`, { headers }),
-          fetch(`${apiUrl}/payments`, { headers }),
+          fetch(`${apiUrl}/positions`, { headers }),
+          fetch(`${apiUrl}/payouts`, { headers }),
           fetch(`${apiUrl}/transactions`, { headers }),
           fetch(`${apiUrl}/portfolio/history`, { headers }),
         ]);
@@ -395,9 +518,11 @@ function AppMvp() {
   const total = products.reduce((sum, product) => sum + product.amount, 0);
   const invested = products.reduce((sum, product) => sum + product.invested, 0);
   const profit = total - invested;
-  const expected = payments.reduce((sum, payment) => sum + payment.amount, 0);
-  const paid = transactions
-    .filter((item) => item.kind === "Выплата")
+  const expected = payments
+    .filter((item) => item.status === "expected")
+    .reduce((sum, payment) => sum + payment.amount, 0);
+  const paid = payments
+    .filter((item) => item.status === "received")
     .reduce((sum, item) => sum + item.amount, 0);
   const groups = useMemo(
     () =>
@@ -416,7 +541,7 @@ function AppMvp() {
   };
   async function addProduct(product: Product) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/products`, {
+      const response = await fetch(`${apiUrl}/positions`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(product),
@@ -430,7 +555,7 @@ function AppMvp() {
   }
   async function addPayment(payment: Payment) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payments`, {
+      const response = await fetch(`${apiUrl}/payouts`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(payment),
@@ -444,7 +569,7 @@ function AppMvp() {
   }
   async function updatePayment(payment: Payment) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payments/${payment.id}`, {
+      const response = await fetch(`${apiUrl}/payouts/${payment.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify(payment),
@@ -460,7 +585,7 @@ function AppMvp() {
   }
   async function removePayment(id: string) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payments/${id}`, {
+      const response = await fetch(`${apiUrl}/payouts/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -471,14 +596,14 @@ function AppMvp() {
     navigate("/payments");
   }
   async function refreshProducts() {
-    const response = await fetch(`${apiUrl}/products`, {
+    const response = await fetch(`${apiUrl}/positions`, {
       headers: authHeaders,
     });
     if (response.ok) setProducts((await response.json()) as Product[]);
   }
   async function removeProduct(id: string) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/products/${id}`, {
+      const response = await fetch(`${apiUrl}/positions/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -490,7 +615,7 @@ function AppMvp() {
   }
   async function updateProduct(product: Product) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/products/${product.id}`, {
+      const response = await fetch(`${apiUrl}/positions/${product.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify(product),
@@ -523,23 +648,13 @@ function AppMvp() {
       transaction = (await response.json()) as Transaction;
     }
     setTransactions((current) => [...current, transaction]);
-    setProducts((current) =>
-      current.map((product) =>
-        product.id === transaction.productId
-          ? {
-              ...product,
-              amount:
-                transaction.kind === "Продажа"
-                  ? product.amount - transaction.amount
-                  : product.amount + transaction.amount,
-              invested:
-                transaction.kind === "Продажа"
-                  ? Math.max(0, product.invested - transaction.amount)
-                  : product.invested + transaction.amount,
-            }
-          : product,
-      ),
-    );
+    if (apiOnline) {
+      await refreshProducts();
+    } else {
+      setProducts((current) =>
+        applyLocalTransactionEffect(current, transaction, 1),
+      );
+    }
     setToast("Операция проведена");
     navigate("/transactions");
   }
@@ -830,6 +945,8 @@ function AppMvp() {
             path="/settings"
             element={
               <Settings
+                themePreference={themePreference}
+                onThemeChange={setThemePreference}
                 onReset={() => {
                   localStorage.removeItem(storageKey);
                   setProducts(initialProducts);
@@ -1109,7 +1226,7 @@ function Dashboard({
                 <div className="payment-info">
                   <strong>{payment.title}</strong>
                   <small>
-                    {payment.type} · {dateLabel(payment.date)}
+                    {payoutTypeLabels[payment.type]} · {dateLabel(payment.date)}
                   </small>
                 </div>
                 <strong className="payment-value">
@@ -1240,11 +1357,13 @@ function TransactionsPage({
               <strong>{transaction.title}</strong>
               <small>
                 {products.find(
-                  (product) => product.id === transaction.productId,
+                  (product) => product.id === transaction.positionId,
                 )?.name || "Портфель Основной"}
               </small>
             </div>
-            <span className="type-tag teal">{transaction.kind}</span>
+            <span className="type-tag teal">
+              {transactionTypeLabels[transaction.type]}
+            </span>
             <strong>{money(transaction.amount)}</strong>
             <span>{dateLabel(transaction.date)}</span>
             <div className="row-actions">
@@ -1287,7 +1406,7 @@ function PaymentsPage({ payments }: { payments: Payment[] }) {
             <div>
               <strong>{payment.title}</strong>
               <p>
-                {payment.type} · {dateLabel(payment.date)}
+                {payoutTypeLabels[payment.type]} · {dateLabel(payment.date)}
               </p>
             </div>
             <b>+{money(payment.amount)}</b>
@@ -1407,7 +1526,15 @@ function Recommendations({
     </Page>
   );
 }
-function Settings({ onReset }: { onReset: () => void }) {
+function Settings({
+  themePreference,
+  onThemeChange,
+  onReset,
+}: {
+  themePreference: ThemePreference;
+  onThemeChange: (value: ThemePreference) => void;
+  onReset: () => void;
+}) {
   return (
     <Page
       title="Настройки"
@@ -1426,6 +1553,19 @@ function Settings({ onReset }: { onReset: () => void }) {
           Название портфеля
           <input defaultValue="Основной" />
         </label>
+        <label>
+          Тема оформления
+          <select
+            value={themePreference}
+            onChange={(event) =>
+              onThemeChange(event.target.value as ThemePreference)
+            }
+          >
+            <option value="system">Как в системе</option>
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+          </select>
+        </label>
         <button className="outline-button" onClick={onReset} type="button">
           Восстановить демонстрационные данные
         </button>
@@ -1439,7 +1579,33 @@ function Settings({ onReset }: { onReset: () => void }) {
 function Integrations({ token }: { token: string }) {
   const [brokerToken, setBrokerToken] = useState("");
   const [status, setStatus] = useState("disconnected");
+  const [maskedToken, setMaskedToken] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState<string | undefined>();
+  const [lastError, setLastError] = useState<string | undefined>();
   const [message, setMessage] = useState("");
+  const [syncing, setSyncing] = useState(false);
+
+  const loadStatus = async () => {
+    const response = await fetch(`${apiUrl}/brokers/tinkoff`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const result = (await response.json()) as {
+      status?: string;
+      maskedToken?: string;
+      lastSyncAt?: string;
+      lastError?: string;
+    };
+    setStatus(result.status || "disconnected");
+    setMaskedToken(result.maskedToken || "");
+    setLastSyncAt(result.lastSyncAt);
+    setLastError(result.lastError);
+  };
+
+  useEffect(() => {
+    loadStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const connect = async (event: FormEvent) => {
     event.preventDefault();
     const response = await fetch(`${apiUrl}/brokers/tinkoff/connect`, {
@@ -1453,19 +1619,35 @@ function Integrations({ token }: { token: string }) {
     const result = (await response.json()) as {
       status?: string;
       message?: string;
+      error?: string;
     };
-    setStatus(result.status || "error");
-    setMessage(result.message || "");
     setBrokerToken("");
+    if (!response.ok) {
+      setMessage(result.error || "Не удалось подключить Т-Инвестиции");
+      return;
+    }
+    setMessage(result.message || "");
+    await loadStatus();
   };
+
   const sync = async () => {
-    const response = await fetch(`${apiUrl}/brokers/tinkoff/sync`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const result = (await response.json()) as { message?: string };
-    setMessage(result.message || "Синхронизация поставлена в очередь");
+    setSyncing(true);
+    try {
+      const response = await fetch(`${apiUrl}/brokers/tinkoff/sync`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = (await response.json()) as {
+        message?: string;
+        error?: string;
+      };
+      setMessage(result.message || result.error || "");
+      await loadStatus();
+    } finally {
+      setSyncing(false);
+    }
   };
+
   return (
     <Page title="Интеграции" subtitle="Источники портфеля и синхронизация">
       <div className="integration-card">
@@ -1478,14 +1660,30 @@ function Integrations({ token }: { token: string }) {
           <span className={`connection-state ${status}`}>
             {status === "connected"
               ? "Подключено"
-              : status === "pending"
-                ? "Ожидает настройки"
-                : "Не подключено"}
+              : status === "error"
+                ? "Ошибка синхронизации"
+                : status === "pending"
+                  ? "Ожидает настройки"
+                  : "Не подключено"}
           </span>
         </div>
+        {maskedToken && (
+          <p className="field-hint">Сохранённый токен: {maskedToken}</p>
+        )}
+        {lastSyncAt && (
+          <p className="field-hint">
+            Последняя синхронизация: {new Date(lastSyncAt).toLocaleString("ru-RU")}
+          </p>
+        )}
+        {status === "error" && (
+          <div className="demo-note">
+            ⚠ {lastError || "Не удалось загрузить данные от брокера «Т-Инвестиции»."}{" "}
+            Показана только доступная часть портфеля.
+          </div>
+        )}
         <form className="modal-form" onSubmit={connect}>
           <label>
-            Токен Tinkoff Invest API
+            Токен Т-Инвестиций
             <input
               value={brokerToken}
               onChange={(event) => setBrokerToken(event.target.value)}
@@ -1495,20 +1693,25 @@ function Integrations({ token }: { token: string }) {
             />
           </label>
           <small className="field-hint">
-            Токен передаётся только на backend и никогда не показывается в
-            интерфейсе.
+            Токен передаётся только на backend, хранится в зашифрованном виде
+            и никогда не показывается в интерфейсе.
           </small>
           <button className="primary-button" type="submit">
-            Подключить Т-Инвестиции
+            {status === "disconnected" ? "Подключить Т-Инвестиции" : "Обновить токен"}
           </button>
         </form>
-        {status === "pending" && (
+        {(status === "connected" || status === "error") && (
           <button
             className="outline-button sync-button"
             onClick={sync}
             type="button"
+            disabled={syncing}
           >
-            Запустить синхронизацию
+            {syncing
+              ? "Синхронизация…"
+              : status === "error"
+                ? "Повторить попытку"
+                : "Запустить синхронизацию"}
           </button>
         )}
         {message && <div className="demo-note">{message}</div>}
@@ -2210,17 +2413,23 @@ function EditPaymentPage({
   const [title, setTitle] = useState(payment?.title || "");
   const [amount, setAmount] = useState(String(payment?.amount || ""));
   const [date, setDate] = useState(payment?.date || "");
+  const [type, setType] = useState<PayoutType>(payment?.type || "OTHER");
+  const [status, setStatus] = useState<PayoutStatus>(
+    payment?.status || "expected",
+  );
   useEffect(() => {
     if (!payment) return;
     setTitle(payment.title);
     setAmount(String(payment.amount));
     setDate(payment.date);
+    setType(payment.type);
+    setStatus(payment.status);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   if (!payment) return <Navigate to="/payments" replace />;
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSubmit({ ...payment, title, amount: Number(amount), date });
+    onSubmit({ ...payment, title, amount: Number(amount), date, type, status });
   };
   return (
     <Page title="Редактировать выплату" subtitle={payment.title} back>
@@ -2251,6 +2460,32 @@ function EditPaymentPage({
             type="date"
             required
           />
+        </label>
+        <label>
+          Тип выплаты
+          <select
+            value={type}
+            onChange={(event) => setType(event.target.value as PayoutType)}
+          >
+            {Object.entries(payoutTypeLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Статус
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value as PayoutStatus)}
+          >
+            {Object.entries(payoutStatusLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
         </label>
         <button className="primary-button" type="submit">
           Сохранить изменения
@@ -2300,6 +2535,7 @@ function PaymentFormPage({
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
+  const [type, setType] = useState<PayoutType>("OTHER");
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -2307,7 +2543,9 @@ function PaymentFormPage({
       title,
       amount: Number(amount),
       date,
-      type: "Прочее",
+      type,
+      status: "expected",
+      currency: "RUB",
     });
   };
   return (
@@ -2341,6 +2579,19 @@ function PaymentFormPage({
             required
           />
         </label>
+        <label>
+          Тип выплаты
+          <select
+            value={type}
+            onChange={(event) => setType(event.target.value as PayoutType)}
+          >
+            {Object.entries(payoutTypeLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
         <button className="primary-button" type="submit">
           Добавить в календарь
         </button>
@@ -2355,20 +2606,21 @@ function TransactionFormPage({
   products: Product[];
   onSubmit: (transaction: Transaction) => void;
 }) {
-  const [kind, setKind] = useState<Transaction["kind"]>("Покупка");
+  const [type, setType] = useState<TransactionType>("BUY");
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
-  const [productId, setProductId] = useState(products[0]?.id || "");
+  const [positionId, setPositionId] = useState(products[0]?.id || "");
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
       id: crypto.randomUUID(),
-      title: title || kind,
+      title: title || transactionTypeLabels[type],
       amount: Number(amount),
       date: new Date().toISOString().slice(0, 10),
-      kind,
-      productId:
-        kind === "Пополнение" || kind === "Выплата" ? undefined : productId,
+      type,
+      positionId: POSITION_TRANSACTION_TYPES.includes(type)
+        ? positionId
+        : undefined,
     });
   };
   return (
@@ -2377,23 +2629,24 @@ function TransactionFormPage({
         <label>
           Тип операции
           <select
-            value={kind}
+            value={type}
             onChange={(event) =>
-              setKind(event.target.value as Transaction["kind"])
+              setType(event.target.value as TransactionType)
             }
           >
-            <option>Покупка</option>
-            <option>Продажа</option>
-            <option>Пополнение</option>
-            <option>Выплата</option>
+            {Object.entries(transactionTypeLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
           </select>
         </label>
-        {(kind === "Покупка" || kind === "Продажа") && (
+        {POSITION_TRANSACTION_TYPES.includes(type) && (
           <label>
             Инструмент
             <select
-              value={productId}
-              onChange={(event) => setProductId(event.target.value)}
+              value={positionId}
+              onChange={(event) => setPositionId(event.target.value)}
             >
               {products
                 .filter((product) => product.type !== "Деньги")
@@ -2441,22 +2694,22 @@ function EditTransactionPage({
 }) {
   const { id } = useParams();
   const transaction = transactions.find((item) => item.id === id);
-  const [kind, setKind] = useState<Transaction["kind"]>(
-    transaction?.kind || "Покупка",
+  const [type, setType] = useState<TransactionType>(
+    transaction?.type || "BUY",
   );
   const [title, setTitle] = useState(transaction?.title || "");
   const [amount, setAmount] = useState(String(transaction?.amount || ""));
   const [date, setDate] = useState(transaction?.date || "");
-  const [productId, setProductId] = useState(
-    transaction?.productId || products[0]?.id || "",
+  const [positionId, setPositionId] = useState(
+    transaction?.positionId || products[0]?.id || "",
   );
   useEffect(() => {
     if (!transaction) return;
-    setKind(transaction.kind);
+    setType(transaction.type);
     setTitle(transaction.title);
     setAmount(String(transaction.amount));
     setDate(transaction.date);
-    setProductId(transaction.productId || products[0]?.id || "");
+    setPositionId(transaction.positionId || products[0]?.id || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   if (!transaction) return <Navigate to="/transactions" replace />;
@@ -2464,12 +2717,13 @@ function EditTransactionPage({
     event.preventDefault();
     onSubmit({
       ...transaction,
-      title: title || kind,
+      title: title || transactionTypeLabels[type],
       amount: Number(amount),
       date,
-      kind,
-      productId:
-        kind === "Пополнение" || kind === "Выплата" ? undefined : productId,
+      type,
+      positionId: POSITION_TRANSACTION_TYPES.includes(type)
+        ? positionId
+        : undefined,
     });
   };
   return (
@@ -2478,23 +2732,24 @@ function EditTransactionPage({
         <label>
           Тип операции
           <select
-            value={kind}
+            value={type}
             onChange={(event) =>
-              setKind(event.target.value as Transaction["kind"])
+              setType(event.target.value as TransactionType)
             }
           >
-            <option>Покупка</option>
-            <option>Продажа</option>
-            <option>Пополнение</option>
-            <option>Выплата</option>
+            {Object.entries(transactionTypeLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
           </select>
         </label>
-        {(kind === "Покупка" || kind === "Продажа") && (
+        {POSITION_TRANSACTION_TYPES.includes(type) && (
           <label>
             Инструмент
             <select
-              value={productId}
-              onChange={(event) => setProductId(event.target.value)}
+              value={positionId}
+              onChange={(event) => setPositionId(event.target.value)}
             >
               {products
                 .filter((product) => product.type !== "Деньги")
@@ -2556,8 +2811,7 @@ function DeleteTransactionPage({
         <p>
           Удалить операцию <strong>{transaction.title}</strong> (
           {money(transaction.amount)})?
-          {(transaction.kind === "Покупка" ||
-            transaction.kind === "Продажа") &&
+          {POSITION_TRANSACTION_TYPES.includes(transaction.type) &&
             " Позиция инструмента будет пересчитана."}
         </p>
         <div className="confirm-actions">

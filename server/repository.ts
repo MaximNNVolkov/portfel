@@ -1,87 +1,132 @@
-// Репозиторий доступа к данным пользователя (§11).
+// Репозиторий доступа к данным пользователя — целевая схема §11 (схема БД `portfolio`).
 //
-// Ранее любое изменение переписывало весь портфель: DELETE всех строк пользователя
-// + массовый INSERT. При 10 000 инструментов и 100 000 операций (§34) это неприемлемо,
-// плюс каждая правка переписывала created_at и ломала любые внешние ссылки на строки.
-// Здесь — точечные INSERT/UPDATE/DELETE по одной записи, вызывающий код сам решает,
-// что именно изменилось.
+// Legacy-таблицы public.products/payments/transactions остаются в базе как исторический
+// архив: бэкфилл выполнен миграцией 003_new_schema.sql, но ни одна выборка отсюда их
+// больше не читает и не пишет. Всё API работает только с новой схемой.
+//
+// Изменения точечные (INSERT/UPDATE/DELETE по одной записи): полная перезапись портфеля
+// при каждой правке неприемлема на объёмах §34 (10 000 инструментов, 100 000 операций).
 import type { Pool, PoolClient } from 'pg'
 
 // Любой исполнитель запроса: пул (автокоммит) или клиент внутри транзакции.
 export type Db = Pool | PoolClient
 
-export type Product = {
-  id: string; name: string; type: string; amount: number; invested: number; ticker: string; date: string; institution: string; currency: string; source: string
-  isin?: string; quantity?: number; averagePrice?: number; currentPrice?: number
-  nominal?: number; accruedInterest?: number; couponRate?: number; couponDate?: string; maturityDate?: string; ofertaDate?: string; amortization?: boolean
-  rate?: number; effectiveRate?: number; capitalization?: boolean; termEndDate?: string; interestPayoutFrequency?: string; replenishable?: boolean; partialWithdrawal?: boolean; autoProlongation?: boolean
-}
-export type Payment = { id: string; title: string; amount: number; date: string; type: string }
-export type Transaction = { id: string; title: string; amount: number; date: string; kind: string; productId?: string }
-export type Store = { products: Product[]; payments: Payment[]; transactions: Transaction[] }
+export type DataSource = 'manual' | 'ocr' | 'broker'
+export type AssetGroupType = 'deposit' | 'bond' | 'share' | 'fund' | 'cash' | 'other'
+export type AccountType = 'broker' | 'bank' | 'cash' | 'other'
+export type TransactionType =
+  | 'BUY' | 'SELL' | 'DEPOSIT' | 'WITHDRAW' | 'COUPON' | 'DIVIDEND'
+  | 'INTEREST' | 'FEE' | 'TAX' | 'REDEMPTION' | 'OTHER'
+export type PayoutType = 'COUPON' | 'DIVIDEND' | 'INTEREST' | 'DEPOSIT_PRINCIPAL' | 'REDEMPTION' | 'OTHER'
+export type PayoutStatus = 'expected' | 'received'
+export type BrokerStatus = 'disconnected' | 'pending' | 'connected' | 'error'
 
-const PRODUCT_COLUMNS = [
-  'id', 'user_id', 'name', 'type', 'amount', 'invested', 'ticker', 'purchase_date', 'institution', 'currency', 'source',
-  'isin', 'quantity', 'average_price', 'current_price',
-  'nominal', 'accrued_interest', 'coupon_rate', 'coupon_date', 'maturity_date', 'oferta_date', 'amortization',
-  'rate', 'effective_rate', 'capitalization', 'term_end_date', 'interest_payout_frequency', 'replenishable', 'partial_withdrawal', 'auto_prolongation',
-] as const
-// Всё, кроме id и user_id: они попадают в WHERE, а не в SET.
-const PRODUCT_VALUE_COLUMNS = PRODUCT_COLUMNS.slice(2)
-
-function productRowValues(product: Product, userId: string): unknown[] {
-  return [
-    product.id, userId, product.name, product.type, product.amount, product.invested,
-    product.ticker || null, product.date, product.institution || 'Ручной ввод', product.currency || 'RUB', product.source || 'manual',
-    product.isin || null, product.quantity ?? null, product.averagePrice ?? null, product.currentPrice ?? null,
-    product.nominal ?? null, product.accruedInterest ?? null, product.couponRate ?? null, product.couponDate || null, product.maturityDate || null, product.ofertaDate || null, product.amortization ?? null,
-    product.rate ?? null, product.effectiveRate ?? null, product.capitalization ?? null, product.termEndDate || null, product.interestPayoutFrequency || null, product.replenishable ?? null, product.partialWithdrawal ?? null, product.autoProlongation ?? null,
-  ]
+export type Portfolio = { id: string; name: string; baseCurrency: string }
+export type Account = {
+  id: string; portfolioId: string; type: AccountType; provider: string
+  accountNumberMasked?: string; currency: string; status: string
 }
 
-function mapProduct(row: any): Product {
-  return {
-    id: row.id,
-    name: row.name,
-    type: row.type,
-    amount: Number(row.amount),
-    invested: Number(row.invested),
-    ticker: row.ticker || '',
-    date: row.purchase_date,
-    institution: row.institution || 'Ручной ввод',
-    currency: row.currency || 'RUB',
-    source: row.source || 'manual',
-    isin: row.isin || undefined,
-    quantity: row.quantity !== null ? Number(row.quantity) : undefined,
-    averagePrice: row.average_price !== null ? Number(row.average_price) : undefined,
-    currentPrice: row.current_price !== null ? Number(row.current_price) : undefined,
-    nominal: row.nominal !== null ? Number(row.nominal) : undefined,
-    accruedInterest: row.accrued_interest !== null ? Number(row.accrued_interest) : undefined,
-    couponRate: row.coupon_rate !== null ? Number(row.coupon_rate) : undefined,
-    couponDate: row.coupon_date || undefined,
-    maturityDate: row.maturity_date || undefined,
-    ofertaDate: row.oferta_date || undefined,
-    amortization: row.amortization ?? undefined,
-    rate: row.rate !== null ? Number(row.rate) : undefined,
-    effectiveRate: row.effective_rate !== null ? Number(row.effective_rate) : undefined,
-    capitalization: row.capitalization ?? undefined,
-    termEndDate: row.term_end_date || undefined,
-    interestPayoutFrequency: row.interest_payout_frequency || undefined,
-    replenishable: row.replenishable ?? undefined,
-    partialWithdrawal: row.partial_withdrawal ?? undefined,
-    autoProlongation: row.auto_prolongation ?? undefined,
-  }
-}
-function mapPayment(row: any): Payment {
-  return { id: row.id, title: row.title, amount: Number(row.amount), date: row.payment_date, type: row.type }
-}
-function mapTransaction(row: any): Transaction {
-  return { id: row.id, title: row.title, amount: Number(row.amount), date: row.tx_date, kind: row.kind, productId: row.product_id || undefined }
+// §11 Instrument + параметры облигаций (§14) и вкладов (§15).
+export type Instrument = {
+  id: string
+  groupType: AssetGroupType
+  instrumentType: string
+  name: string
+  currency: string
+  source: DataSource
+  ticker?: string
+  isin?: string
+  issuer?: string
+  nominal?: number
+  maturityDate?: string
+  couponRate?: number
+  couponDate?: string
+  ofertaDate?: string
+  amortization?: boolean
+  rate?: number
+  effectiveRate?: number
+  capitalization?: boolean
+  termEndDate?: string
+  interestPayoutFrequency?: string
+  replenishable?: boolean
+  partialWithdrawal?: boolean
+  autoProlongation?: boolean
 }
 
-// Порядок строк общий для всех выборок: он же определяет, какой продукт считается
-// «первым денежным счётом» при разноске пополнений и выплат.
-const PRODUCT_ORDER = 'ORDER BY purchase_date ASC, name ASC'
+// §11 Position. value (current_value) необязателен: отсутствие цены не подменяется нулём (§7.3).
+export type PositionRecord = {
+  id: string
+  accountId: string
+  instrumentId: string
+  invested: number
+  source: DataSource
+  value?: number
+  quantity?: number
+  averagePrice?: number
+  currentPrice?: number
+  accruedInterest?: number
+  openedOn?: string
+}
+export type Position = PositionRecord & {
+  instrument: Instrument
+  account: { id: string; type: AccountType; provider: string; currency: string }
+}
+
+export type Transaction = {
+  id: string
+  accountId: string
+  type: TransactionType
+  date: string
+  amount: number
+  currency: string
+  commission: number
+  tax: number
+  source: DataSource
+  instrumentId?: string
+  /** Позиция (счёт + инструмент), которой касается операция. В таблице не хранится — выводится джойном. */
+  positionId?: string
+  quantity?: number
+  price?: number
+  description?: string
+  /** Идентификатор операции у брокера — ключ идемпотентности повторной синхронизации. */
+  externalId?: string
+}
+
+export type Payout = {
+  id: string
+  accountId: string
+  date: string
+  type: PayoutType
+  amount: number
+  currency: string
+  status: PayoutStatus
+  instrumentId?: string
+  transactionId?: string
+  description?: string
+}
+
+export type BrokerConnection = {
+  id: string
+  brokerType: string
+  tokenMasked?: string
+  /** Токен в зашифрованном виде (§28) — расшифровывается только на момент вызова коннектора. */
+  encryptedToken?: string
+  status: BrokerStatus
+  lastSyncAt?: string
+  lastError?: string
+  createdAt: string
+}
+
+function num(value: unknown): number | undefined {
+  return value === null || value === undefined ? undefined : Number(value)
+}
+function text(value: unknown): string | undefined {
+  return value === null || value === undefined || value === '' ? undefined : String(value)
+}
+function flag(value: unknown): boolean | undefined {
+  return value === null || value === undefined ? undefined : Boolean(value)
+}
 
 export async function withTransaction<T>(pool: Pool, run: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect()
@@ -98,114 +143,676 @@ export async function withTransaction<T>(pool: Pool, run: (client: PoolClient) =
   }
 }
 
-export async function listProducts(db: Db, userId: string): Promise<Product[]> {
-  const result = await db.query(`SELECT * FROM products WHERE user_id = $1 ${PRODUCT_ORDER}`, [userId])
-  return result.rows.map(mapProduct)
-}
-export async function listPayments(db: Db, userId: string): Promise<Payment[]> {
-  const result = await db.query('SELECT * FROM payments WHERE user_id = $1 ORDER BY payment_date ASC, title ASC', [userId])
-  return result.rows.map(mapPayment)
-}
-export async function listTransactions(db: Db, userId: string): Promise<Transaction[]> {
-  const result = await db.query('SELECT * FROM transactions WHERE user_id = $1 ORDER BY tx_date ASC, title ASC', [userId])
-  return result.rows.map(mapTransaction)
-}
-export async function loadStore(db: Db, userId: string): Promise<Store> {
-  const [products, payments, transactions] = await Promise.all([
-    listProducts(db, userId),
-    listPayments(db, userId),
-    listTransactions(db, userId),
-  ])
-  return { products, payments, transactions }
+// Пагинация списков (§33). Ограничение применяется к выборке, а не к уже полученным строкам.
+export type ListOptions = { limit?: number; offset?: number }
+function paginate(options: ListOptions | undefined, nextParam: number): { clause: string; values: number[] } {
+  const values: number[] = []
+  let clause = ''
+  if (options?.limit !== undefined) { clause += ` LIMIT $${nextParam + values.length}`; values.push(options.limit) }
+  if (options?.offset !== undefined) { clause += ` OFFSET $${nextParam + values.length}`; values.push(options.offset) }
+  return { clause, values }
 }
 
-export async function findProduct(db: Db, userId: string, id: string): Promise<Product | undefined> {
-  const result = await db.query('SELECT * FROM products WHERE id = $1 AND user_id = $2', [id, userId])
-  return result.rows[0] ? mapProduct(result.rows[0]) : undefined
-}
-// Денежный счёт, на который ложатся пополнения и выплаты (§12).
-export async function findCashProduct(db: Db, userId: string): Promise<Product | undefined> {
-  const result = await db.query(`SELECT * FROM products WHERE user_id = $1 AND type = 'Деньги' ${PRODUCT_ORDER} LIMIT 1`, [userId])
-  return result.rows[0] ? mapProduct(result.rows[0]) : undefined
-}
-export async function insertProduct(db: Db, userId: string, product: Product): Promise<void> {
-  const placeholders = PRODUCT_COLUMNS.map((_column, index) => `$${index + 1}`).join(', ')
-  await db.query(`INSERT INTO products (${PRODUCT_COLUMNS.join(', ')}) VALUES (${placeholders})`, productRowValues(product, userId))
-}
-export async function updateProduct(db: Db, userId: string, product: Product): Promise<boolean> {
-  // Значения идут в том же порядке, что и при вставке: $1 = id, $2 = user_id уходят в WHERE.
-  const assignments = PRODUCT_VALUE_COLUMNS.map((column, index) => `${column} = $${index + 3}`).join(', ')
-  const result = await db.query(`UPDATE products SET ${assignments} WHERE id = $1 AND user_id = $2`, productRowValues(product, userId))
-  return (result.rowCount ?? 0) > 0
-}
-// Точечная разноска операции по позиции: трогаем только стоимость и вложенную сумму.
-export async function updateProductPosition(db: Db, userId: string, product: Product): Promise<void> {
-  await db.query('UPDATE products SET amount = $3, invested = $4 WHERE id = $1 AND user_id = $2', [product.id, userId, product.amount, product.invested])
-}
-export async function deleteProduct(db: Db, userId: string, id: string): Promise<boolean> {
-  const result = await db.query('DELETE FROM products WHERE id = $1 AND user_id = $2', [id, userId])
-  return (result.rowCount ?? 0) > 0
+// ---------------------------------------------------------------------------
+// Портфель и счета (§11 Portfolio, Account)
+// ---------------------------------------------------------------------------
+
+function mapPortfolio(row: any): Portfolio {
+  return { id: row.id, name: row.name, baseCurrency: row.base_currency }
 }
 
-export async function findPayment(db: Db, userId: string, id: string): Promise<Payment | undefined> {
-  const result = await db.query('SELECT * FROM payments WHERE id = $1 AND user_id = $2', [id, userId])
-  return result.rows[0] ? mapPayment(result.rows[0]) : undefined
-}
-export async function insertPayment(db: Db, userId: string, payment: Payment): Promise<void> {
-  await db.query(
-    'INSERT INTO payments (id, user_id, title, amount, payment_date, type) VALUES ($1, $2, $3, $4, $5, $6)',
-    [payment.id, userId, payment.title, payment.amount, payment.date, payment.type],
-  )
-}
-export async function updatePayment(db: Db, userId: string, payment: Payment): Promise<boolean> {
+export async function findPortfolio(db: Db, userId: string): Promise<Portfolio | undefined> {
   const result = await db.query(
-    'UPDATE payments SET title = $3, amount = $4, payment_date = $5, type = $6 WHERE id = $1 AND user_id = $2',
-    [payment.id, userId, payment.title, payment.amount, payment.date, payment.type],
+    'SELECT id, name, base_currency FROM portfolio.portfolios WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
+    [userId],
+  )
+  return result.rows[0] ? mapPortfolio(result.rows[0]) : undefined
+}
+
+// Портфель заводится лениво, при первом сохранении данных: у пустого аккаунта строки нет.
+// Мультипортфельность (§4, §13) схема поддерживает, UI на MVP работает с первым портфелем.
+export async function ensurePortfolio(db: Db, userId: string, id: string, baseCurrency = 'RUB'): Promise<Portfolio> {
+  const existing = await findPortfolio(db, userId)
+  if (existing) return existing
+  const result = await db.query(
+    `INSERT INTO portfolio.portfolios (id, user_id, name, base_currency) VALUES ($1, $2, 'Основной портфель', $3)
+     RETURNING id, name, base_currency`,
+    [id, userId, baseCurrency],
+  )
+  return mapPortfolio(result.rows[0])
+}
+
+function mapAccount(row: any): Account {
+  return {
+    id: row.id,
+    portfolioId: row.portfolio_id,
+    type: row.type,
+    provider: row.provider || 'Ручной ввод',
+    accountNumberMasked: text(row.account_number_masked),
+    currency: row.currency,
+    status: row.status,
+  }
+}
+
+export async function listAccounts(db: Db, userId: string): Promise<Account[]> {
+  const result = await db.query(
+    `SELECT a.id, a.portfolio_id, a.type, a.provider, a.account_number_masked, a.currency, a.status
+       FROM portfolio.accounts a
+       JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+      WHERE f.user_id = $1
+      ORDER BY a.provider ASC, a.currency ASC`,
+    [userId],
+  )
+  return result.rows.map(mapAccount)
+}
+
+// Счёт определяется парой (учреждение, валюта) — тем же ключом, которым пользовался бэкфилл,
+// поэтому повторное сохранение в тот же банк/брокер не плодит счета-дубликаты.
+export async function ensureAccount(
+  db: Db,
+  portfolioId: string,
+  id: string,
+  account: { type: AccountType; provider: string; currency: string },
+): Promise<Account> {
+  const existing = await db.query(
+    `SELECT id, portfolio_id, type, provider, account_number_masked, currency, status
+       FROM portfolio.accounts WHERE portfolio_id = $1 AND provider = $2 AND currency = $3
+       ORDER BY created_at ASC LIMIT 1`,
+    [portfolioId, account.provider, account.currency],
+  )
+  if (existing.rows[0]) return mapAccount(existing.rows[0])
+  const result = await db.query(
+    `INSERT INTO portfolio.accounts (id, portfolio_id, type, provider, currency) VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, portfolio_id, type, provider, account_number_masked, currency, status`,
+    [id, portfolioId, account.type, account.provider, account.currency],
+  )
+  return mapAccount(result.rows[0])
+}
+
+// ---------------------------------------------------------------------------
+// Инструменты (§11 Instrument)
+// ---------------------------------------------------------------------------
+
+const INSTRUMENT_FIELDS = `
+  i.id AS instrument_id, g.type AS group_type, i.instrument_type, i.name, i.ticker, i.isin,
+  i.currency AS instrument_currency, i.issuer, i.nominal, i.maturity_date, i.coupon_rate,
+  i.coupon_date, i.oferta_date, i.amortization, i.rate, i.effective_rate, i.capitalization,
+  i.term_end_date, i.interest_payout_frequency, i.replenishable, i.partial_withdrawal,
+  i.auto_prolongation, i.source AS instrument_source`
+
+const INSTRUMENT_FROM = `
+  FROM portfolio.instruments i
+  JOIN portfolio.asset_groups g ON g.id = i.asset_group_id`
+
+function mapInstrument(row: any): Instrument {
+  return {
+    id: row.instrument_id,
+    groupType: row.group_type,
+    instrumentType: row.instrument_type,
+    name: row.name,
+    currency: row.instrument_currency || 'RUB',
+    source: row.instrument_source || 'manual',
+    ticker: text(row.ticker),
+    isin: text(row.isin),
+    issuer: text(row.issuer),
+    nominal: num(row.nominal),
+    maturityDate: text(row.maturity_date),
+    couponRate: num(row.coupon_rate),
+    couponDate: text(row.coupon_date),
+    ofertaDate: text(row.oferta_date),
+    amortization: flag(row.amortization),
+    rate: num(row.rate),
+    effectiveRate: num(row.effective_rate),
+    capitalization: flag(row.capitalization),
+    termEndDate: text(row.term_end_date),
+    interestPayoutFrequency: text(row.interest_payout_frequency),
+    replenishable: flag(row.replenishable),
+    partialWithdrawal: flag(row.partial_withdrawal),
+    autoProlongation: flag(row.auto_prolongation),
+  }
+}
+
+function instrumentValues(instrument: Instrument): unknown[] {
+  return [
+    instrument.instrumentType, instrument.name, instrument.ticker ?? null, instrument.isin ?? null,
+    instrument.currency || 'RUB', instrument.issuer ?? null, instrument.nominal ?? null,
+    instrument.maturityDate ?? null, instrument.couponRate ?? null, instrument.couponDate ?? null,
+    instrument.ofertaDate ?? null, instrument.amortization ?? null, instrument.rate ?? null,
+    instrument.effectiveRate ?? null, instrument.capitalization ?? null, instrument.termEndDate ?? null,
+    instrument.interestPayoutFrequency ?? null, instrument.replenishable ?? null,
+    instrument.partialWithdrawal ?? null, instrument.autoProlongation ?? null,
+  ]
+}
+
+export async function listInstruments(db: Db, userId: string, options?: ListOptions): Promise<Instrument[]> {
+  const page = paginate(options, 2)
+  const result = await db.query(
+    `SELECT ${INSTRUMENT_FIELDS} ${INSTRUMENT_FROM} WHERE i.owner_user_id = $1 ORDER BY i.name ASC${page.clause}`,
+    [userId, ...page.values],
+  )
+  return result.rows.map(mapInstrument)
+}
+
+export async function findInstrument(db: Db, userId: string, id: string): Promise<Instrument | undefined> {
+  const result = await db.query(
+    `SELECT ${INSTRUMENT_FIELDS} ${INSTRUMENT_FROM} WHERE i.id = $1 AND i.owner_user_id = $2`,
+    [id, userId],
+  )
+  return result.rows[0] ? mapInstrument(result.rows[0]) : undefined
+}
+
+// Сопоставление инструмента брокера с уже существующим у пользователя — по ISIN, затем
+// по тикеру (ISIN однозначнее и не пересекается между инструментами разных типов).
+export async function findInstrumentByKey(
+  db: Db, userId: string, key: { isin?: string; ticker?: string },
+): Promise<Instrument | undefined> {
+  if (!key.isin && !key.ticker) return undefined
+  const result = await db.query(
+    `SELECT ${INSTRUMENT_FIELDS} ${INSTRUMENT_FROM}
+      WHERE i.owner_user_id = $1 AND ((i.isin = $2 AND $2 IS NOT NULL) OR (i.ticker = $3 AND $3 IS NOT NULL))
+      LIMIT 1`,
+    [userId, key.isin ?? null, key.ticker ?? null],
+  )
+  return result.rows[0] ? mapInstrument(result.rows[0]) : undefined
+}
+
+export async function insertInstrument(db: Db, userId: string, instrument: Instrument): Promise<void> {
+  await db.query(
+    `INSERT INTO portfolio.instruments (
+       id, asset_group_id, owner_user_id, source,
+       instrument_type, name, ticker, isin, currency, issuer, nominal, maturity_date, coupon_rate,
+       coupon_date, oferta_date, amortization, rate, effective_rate, capitalization, term_end_date,
+       interest_payout_frequency, replenishable, partial_withdrawal, auto_prolongation
+     ) VALUES (
+       $1, (SELECT id FROM portfolio.asset_groups WHERE type = $2), $3, $4,
+       $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+     )`,
+    [instrument.id, instrument.groupType, userId, instrument.source, ...instrumentValues(instrument)],
+  )
+}
+
+// source не меняется при правке: запись, добавленная со скриншота, остаётся помеченной
+// как распознанная и после ручного редактирования (§40.4).
+export async function updateInstrument(db: Db, userId: string, instrument: Instrument): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE portfolio.instruments SET
+       asset_group_id = (SELECT id FROM portfolio.asset_groups WHERE type = $3),
+       instrument_type = $4, name = $5, ticker = $6, isin = $7, currency = $8, issuer = $9,
+       nominal = $10, maturity_date = $11, coupon_rate = $12, coupon_date = $13, oferta_date = $14,
+       amortization = $15, rate = $16, effective_rate = $17, capitalization = $18, term_end_date = $19,
+       interest_payout_frequency = $20, replenishable = $21, partial_withdrawal = $22, auto_prolongation = $23
+     WHERE id = $1 AND owner_user_id = $2`,
+    [instrument.id, userId, instrument.groupType, ...instrumentValues(instrument)],
   )
   return (result.rowCount ?? 0) > 0
 }
-export async function deletePayment(db: Db, userId: string, id: string): Promise<boolean> {
-  const result = await db.query('DELETE FROM payments WHERE id = $1 AND user_id = $2', [id, userId])
+
+// Инструмент пользователя удаляется вместе с последней ссылающейся на него строкой.
+// Инструменты общего справочника (owner_user_id IS NULL) и те, на которые ещё ссылаются
+// операции или выплаты, остаются на месте.
+export async function deleteOrphanInstrument(db: Db, userId: string, id: string): Promise<void> {
+  await db.query(
+    `DELETE FROM portfolio.instruments i
+      WHERE i.id = $1 AND i.owner_user_id = $2
+        AND NOT EXISTS (SELECT 1 FROM portfolio.positions p WHERE p.instrument_id = i.id)
+        AND NOT EXISTS (SELECT 1 FROM portfolio.transactions t WHERE t.instrument_id = i.id)
+        AND NOT EXISTS (SELECT 1 FROM portfolio.payouts o WHERE o.instrument_id = i.id)`,
+    [id, userId],
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Позиции (§11 Position)
+// ---------------------------------------------------------------------------
+
+const POSITION_FIELDS = `
+  p.id, p.account_id, p.quantity, p.average_price, p.current_price, p.current_value,
+  p.invested, p.accrued_interest, p.opened_on, p.source,
+  a.type AS account_type, a.provider AS account_provider, a.currency AS account_currency,
+  ${INSTRUMENT_FIELDS}`
+
+const POSITION_FROM = `
+  FROM portfolio.positions p
+  JOIN portfolio.accounts a ON a.id = p.account_id
+  JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+  JOIN portfolio.instruments i ON i.id = p.instrument_id
+  JOIN portfolio.asset_groups g ON g.id = i.asset_group_id`
+
+// Порядок общий для всех выборок позиций: он же определяет, какая позиция считается
+// «первым денежным счётом» при разноске пополнений и выплат (§12).
+const POSITION_ORDER = 'ORDER BY p.opened_on ASC NULLS LAST, i.name ASC, p.id ASC'
+
+function mapPosition(row: any): Position {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    instrumentId: row.instrument_id,
+    invested: Number(row.invested),
+    source: row.source || 'manual',
+    value: num(row.current_value),
+    quantity: num(row.quantity),
+    averagePrice: num(row.average_price),
+    currentPrice: num(row.current_price),
+    accruedInterest: num(row.accrued_interest),
+    openedOn: text(row.opened_on),
+    instrument: mapInstrument(row),
+    account: {
+      id: row.account_id,
+      type: row.account_type,
+      provider: row.account_provider || 'Ручной ввод',
+      currency: row.account_currency,
+    },
+  }
+}
+
+export async function listPositions(db: Db, userId: string, options?: ListOptions): Promise<Position[]> {
+  const page = paginate(options, 2)
+  const result = await db.query(
+    `SELECT ${POSITION_FIELDS} ${POSITION_FROM} WHERE f.user_id = $1 ${POSITION_ORDER}${page.clause}`,
+    [userId, ...page.values],
+  )
+  return result.rows.map(mapPosition)
+}
+
+export async function findPosition(db: Db, userId: string, id: string): Promise<Position | undefined> {
+  const result = await db.query(
+    `SELECT ${POSITION_FIELDS} ${POSITION_FROM} WHERE p.id = $1 AND f.user_id = $2`,
+    [id, userId],
+  )
+  return result.rows[0] ? mapPosition(result.rows[0]) : undefined
+}
+
+// Позиция по паре (счёт, инструмент) — естественный ключ (UNIQUE в БД), используется для
+// upsert позиций, синхронизированных из брокера напрямую (без разноски операций).
+export async function findPositionByAccountInstrument(db: Db, userId: string, accountId: string, instrumentId: string): Promise<Position | undefined> {
+  const result = await db.query(
+    `SELECT ${POSITION_FIELDS} ${POSITION_FROM} WHERE p.account_id = $1 AND p.instrument_id = $2 AND f.user_id = $3`,
+    [accountId, instrumentId, userId],
+  )
+  return result.rows[0] ? mapPosition(result.rows[0]) : undefined
+}
+
+// Денежная позиция, на которую ложатся пополнения, выводы и полученные выплаты (§12).
+export async function findCashPosition(db: Db, userId: string): Promise<Position | undefined> {
+  const result = await db.query(
+    `SELECT ${POSITION_FIELDS} ${POSITION_FROM} WHERE f.user_id = $1 AND g.type = 'cash' ${POSITION_ORDER} LIMIT 1`,
+    [userId],
+  )
+  return result.rows[0] ? mapPosition(result.rows[0]) : undefined
+}
+
+export async function insertPosition(db: Db, position: PositionRecord): Promise<void> {
+  await db.query(
+    `INSERT INTO portfolio.positions (
+       id, account_id, instrument_id, quantity, average_price, current_price, current_value,
+       invested, accrued_interest, opened_on, source
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [
+      position.id, position.accountId, position.instrumentId, position.quantity ?? null,
+      position.averagePrice ?? null, position.currentPrice ?? null, position.value ?? null,
+      position.invested, position.accruedInterest ?? null, position.openedOn ?? null, position.source,
+    ],
+  )
+}
+
+const OWNED_POSITION = `p.account_id IN (
+  SELECT a.id FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $2
+)`
+
+export async function updatePosition(db: Db, userId: string, position: PositionRecord): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE portfolio.positions p SET
+       account_id = $3, quantity = $4, average_price = $5, current_price = $6, current_value = $7,
+       invested = $8, accrued_interest = $9, opened_on = $10, updated_at = NOW()
+     WHERE p.id = $1 AND ${OWNED_POSITION}`,
+    [
+      position.id, userId, position.accountId, position.quantity ?? null, position.averagePrice ?? null,
+      position.currentPrice ?? null, position.value ?? null, position.invested,
+      position.accruedInterest ?? null, position.openedOn ?? null,
+    ],
+  )
   return (result.rowCount ?? 0) > 0
+}
+
+// Точечная разноска операции по позиции: трогаем только стоимость и вложенную сумму.
+export async function updatePositionValue(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'value' | 'invested'>): Promise<void> {
+  await db.query(
+    `UPDATE portfolio.positions p SET current_value = $3, invested = $4, updated_at = NOW()
+      WHERE p.id = $1 AND ${OWNED_POSITION}`,
+    [position.id, userId, position.value ?? null, position.invested],
+  )
+}
+
+export async function deletePosition(db: Db, userId: string, id: string): Promise<boolean> {
+  const result = await db.query(
+    `DELETE FROM portfolio.positions p
+      WHERE p.id = $1 AND ${OWNED_POSITION}`,
+    [id, userId],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+// ---------------------------------------------------------------------------
+// Операции (§11 Transaction)
+// ---------------------------------------------------------------------------
+
+const TRANSACTION_FIELDS = `
+  t.id, t.account_id, t.instrument_id, t.type, t.tx_date, t.quantity, t.price, t.amount,
+  t.currency, t.commission, t.tax, t.description, t.source, t.external_id, p.id AS position_id`
+
+const TRANSACTION_FROM = `
+  FROM portfolio.transactions t
+  JOIN portfolio.accounts a ON a.id = t.account_id
+  JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+  LEFT JOIN portfolio.positions p ON p.account_id = t.account_id AND p.instrument_id = t.instrument_id`
+
+function mapTransaction(row: any): Transaction {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    type: row.type,
+    date: row.tx_date,
+    amount: Number(row.amount),
+    currency: row.currency,
+    commission: Number(row.commission),
+    tax: Number(row.tax),
+    source: row.source || 'manual',
+    instrumentId: text(row.instrument_id),
+    positionId: text(row.position_id),
+    quantity: num(row.quantity),
+    price: num(row.price),
+    description: text(row.description),
+    externalId: text(row.external_id),
+  }
+}
+
+export async function listTransactions(db: Db, userId: string, options?: ListOptions): Promise<Transaction[]> {
+  const page = paginate(options, 2)
+  const result = await db.query(
+    `SELECT ${TRANSACTION_FIELDS} ${TRANSACTION_FROM}
+      WHERE f.user_id = $1 ORDER BY t.tx_date ASC, t.created_at ASC${page.clause}`,
+    [userId, ...page.values],
+  )
+  return result.rows.map(mapTransaction)
 }
 
 export async function findTransaction(db: Db, userId: string, id: string): Promise<Transaction | undefined> {
-  const result = await db.query('SELECT * FROM transactions WHERE id = $1 AND user_id = $2', [id, userId])
+  const result = await db.query(
+    `SELECT ${TRANSACTION_FIELDS} ${TRANSACTION_FROM} WHERE t.id = $1 AND f.user_id = $2`,
+    [id, userId],
+  )
   return result.rows[0] ? mapTransaction(result.rows[0]) : undefined
 }
-export async function insertTransaction(db: Db, userId: string, transaction: Transaction): Promise<void> {
+
+// Идемпотентность синхронизации с брокером: перед вставкой операции проверяем, не заведена
+// ли она уже по её внешнему id (§19 — повторная синхронизация не должна плодить дубликаты).
+export async function findTransactionByExternalId(db: Db, userId: string, externalId: string): Promise<Transaction | undefined> {
+  const result = await db.query(
+    `SELECT ${TRANSACTION_FIELDS} ${TRANSACTION_FROM} WHERE t.external_id = $1 AND f.user_id = $2`,
+    [externalId, userId],
+  )
+  return result.rows[0] ? mapTransaction(result.rows[0]) : undefined
+}
+
+function transactionValues(transaction: Transaction): unknown[] {
+  return [
+    transaction.accountId, transaction.instrumentId ?? null, transaction.type, transaction.date,
+    transaction.quantity ?? null, transaction.price ?? null, transaction.amount, transaction.currency,
+    transaction.commission, transaction.tax, transaction.description ?? null,
+  ]
+}
+
+export async function insertTransaction(db: Db, transaction: Transaction): Promise<void> {
   await db.query(
-    'INSERT INTO transactions (id, user_id, title, amount, kind, tx_date, product_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-    [transaction.id, userId, transaction.title, transaction.amount, transaction.kind, transaction.date, transaction.productId || null],
+    `INSERT INTO portfolio.transactions (
+       id, account_id, instrument_id, type, tx_date, quantity, price, amount, currency,
+       commission, tax, description, source, external_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+    [transaction.id, ...transactionValues(transaction), transaction.source, transaction.externalId ?? null],
   )
 }
+
+const OWNED_TRANSACTION = `t.account_id IN (
+  SELECT a.id FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $2
+)`
+
 export async function updateTransaction(db: Db, userId: string, transaction: Transaction): Promise<boolean> {
   const result = await db.query(
-    'UPDATE transactions SET title = $3, amount = $4, kind = $5, tx_date = $6, product_id = $7 WHERE id = $1 AND user_id = $2',
-    [transaction.id, userId, transaction.title, transaction.amount, transaction.kind, transaction.date, transaction.productId || null],
+    `UPDATE portfolio.transactions t SET
+       account_id = $3, instrument_id = $4, type = $5, tx_date = $6, quantity = $7, price = $8,
+       amount = $9, currency = $10, commission = $11, tax = $12, description = $13
+     WHERE t.id = $1 AND ${OWNED_TRANSACTION}`,
+    [transaction.id, userId, ...transactionValues(transaction)],
   )
   return (result.rowCount ?? 0) > 0
 }
+
 export async function deleteTransaction(db: Db, userId: string, id: string): Promise<boolean> {
-  const result = await db.query('DELETE FROM transactions WHERE id = $1 AND user_id = $2', [id, userId])
+  const result = await db.query(
+    `DELETE FROM portfolio.transactions t WHERE t.id = $1 AND ${OWNED_TRANSACTION}`,
+    [id, userId],
+  )
   return (result.rowCount ?? 0) > 0
 }
 
-export async function upsertSnapshot(db: Db, userId: string, id: string, date: string, value: number): Promise<void> {
-  await db.query(
-    `INSERT INTO portfolio_snapshots (id, user_id, snapshot_date, total_value)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (user_id, snapshot_date) DO UPDATE SET total_value = EXCLUDED.total_value`,
-    [id, userId, date, value],
+// Комиссии (§10.4) и налоги (§10.5) портфеля: и отдельные операции FEE/TAX, и поля
+// commission/tax внутри обычных операций. Считаются в базе, а не переносом всех строк в Node.
+export async function sumTransactionCosts(db: Db, userId: string): Promise<{ commissions: number; taxes: number }> {
+  const result = await db.query(
+    `SELECT
+       COALESCE(SUM(t.commission), 0) + COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'FEE'), 0) AS commissions,
+       COALESCE(SUM(t.tax), 0) + COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'TAX'), 0) AS taxes
+     FROM portfolio.transactions t
+     JOIN portfolio.accounts a ON a.id = t.account_id
+     JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+     WHERE f.user_id = $1`,
+    [userId],
   )
-}
-export async function listSnapshots(db: Db, userId: string): Promise<Array<{ date: string; value: number }>> {
-  const result = await db.query('SELECT snapshot_date, total_value FROM portfolio_snapshots WHERE user_id = $1 ORDER BY snapshot_date ASC', [userId])
-  return result.rows.map((row) => ({ date: row.snapshot_date, value: Number(row.total_value) }))
+  return { commissions: Number(result.rows[0]?.commissions ?? 0), taxes: Number(result.rows[0]?.taxes ?? 0) }
 }
 
-// Полное удаление аккаунта (§28): пользователь должен иметь возможность стереть себя целиком.
+// ---------------------------------------------------------------------------
+// Выплаты (§11 Payout, §22 календарь выплат)
+// ---------------------------------------------------------------------------
+
+const PAYOUT_FIELDS = `
+  o.id, o.account_id, o.instrument_id, o.transaction_id, o.payout_date, o.type,
+  o.amount, o.currency, o.status, o.description`
+
+const PAYOUT_FROM = `
+  FROM portfolio.payouts o
+  JOIN portfolio.accounts a ON a.id = o.account_id
+  JOIN portfolio.portfolios f ON f.id = a.portfolio_id`
+
+function mapPayout(row: any): Payout {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    date: row.payout_date,
+    type: row.type,
+    amount: Number(row.amount),
+    currency: row.currency,
+    status: row.status,
+    instrumentId: text(row.instrument_id),
+    transactionId: text(row.transaction_id),
+    description: text(row.description),
+  }
+}
+
+export async function listPayouts(db: Db, userId: string, options?: ListOptions): Promise<Payout[]> {
+  const page = paginate(options, 2)
+  const result = await db.query(
+    `SELECT ${PAYOUT_FIELDS} ${PAYOUT_FROM}
+      WHERE f.user_id = $1 ORDER BY o.payout_date ASC, o.created_at ASC${page.clause}`,
+    [userId, ...page.values],
+  )
+  return result.rows.map(mapPayout)
+}
+
+export async function findPayout(db: Db, userId: string, id: string): Promise<Payout | undefined> {
+  const result = await db.query(
+    `SELECT ${PAYOUT_FIELDS} ${PAYOUT_FROM} WHERE o.id = $1 AND f.user_id = $2`,
+    [id, userId],
+  )
+  return result.rows[0] ? mapPayout(result.rows[0]) : undefined
+}
+
+function payoutValues(payout: Payout): unknown[] {
+  return [
+    payout.accountId, payout.instrumentId ?? null, payout.transactionId ?? null, payout.date,
+    payout.type, payout.amount, payout.currency, payout.status, payout.description ?? null,
+  ]
+}
+
+export async function insertPayout(db: Db, payout: Payout): Promise<void> {
+  await db.query(
+    `INSERT INTO portfolio.payouts (
+       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, description
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [payout.id, ...payoutValues(payout)],
+  )
+}
+
+const OWNED_PAYOUT = `o.account_id IN (
+  SELECT a.id FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $2
+)`
+
+export async function updatePayout(db: Db, userId: string, payout: Payout): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE portfolio.payouts o SET
+       account_id = $3, instrument_id = $4, transaction_id = $5, payout_date = $6, type = $7,
+       amount = $8, currency = $9, status = $10, description = $11
+     WHERE o.id = $1 AND ${OWNED_PAYOUT}`,
+    [payout.id, userId, ...payoutValues(payout)],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+export async function deletePayout(db: Db, userId: string, id: string): Promise<boolean> {
+  const result = await db.query(
+    `DELETE FROM portfolio.payouts o WHERE o.id = $1 AND ${OWNED_PAYOUT}`,
+    [id, userId],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+// Выплата, созданная вместе с операцией (купон, дивиденд, проценты), живёт ровно столько,
+// сколько живёт сама операция: иначе после удаления операции в календаре остался бы
+// «полученный» доход без движения денег.
+export async function deletePayoutsForTransaction(db: Db, transactionId: string): Promise<void> {
+  await db.query('DELETE FROM portfolio.payouts WHERE transaction_id = $1', [transactionId])
+}
+
+// Полученные и ожидаемые выплаты (§7.1). Мультивалютные выплаты суммируются как есть —
+// конверсия появится вместе с таблицей курсов ЦБ РФ (§13).
+export async function sumPayouts(db: Db, userId: string): Promise<{ expected: number; received: number }> {
+  const result = await db.query(
+    `SELECT
+       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected'), 0) AS expected,
+       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received'), 0) AS received
+     ${PAYOUT_FROM} WHERE f.user_id = $1`,
+    [userId],
+  )
+  return { expected: Number(result.rows[0]?.expected ?? 0), received: Number(result.rows[0]?.received ?? 0) }
+}
+
+// ---------------------------------------------------------------------------
+// История портфеля (§21) и подключения брокеров (§11 BrokerConnection)
+// ---------------------------------------------------------------------------
+
+export async function upsertSnapshot(
+  db: Db, portfolioId: string, id: string, date: string, value: number, invested: number | null,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO portfolio.portfolio_snapshots (id, portfolio_id, snapshot_date, total_value, invested)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (portfolio_id, snapshot_date)
+     DO UPDATE SET total_value = EXCLUDED.total_value, invested = EXCLUDED.invested`,
+    [id, portfolioId, date, value, invested],
+  )
+}
+
+export async function listSnapshots(db: Db, userId: string): Promise<Array<{ date: string; value: number; invested: number | null }>> {
+  const result = await db.query(
+    `SELECT s.snapshot_date, s.total_value, s.invested
+       FROM portfolio.portfolio_snapshots s
+       JOIN portfolio.portfolios f ON f.id = s.portfolio_id
+      WHERE f.user_id = $1 ORDER BY s.snapshot_date ASC`,
+    [userId],
+  )
+  return result.rows.map((row) => ({
+    date: row.snapshot_date,
+    value: Number(row.total_value),
+    invested: row.invested === null ? null : Number(row.invested),
+  }))
+}
+
+function mapBrokerConnection(row: any): BrokerConnection {
+  return {
+    id: row.id,
+    brokerType: row.broker_type,
+    tokenMasked: text(row.token_masked),
+    encryptedToken: text(row.encrypted_token),
+    status: row.status,
+    lastSyncAt: row.last_sync_at ? new Date(row.last_sync_at).toISOString() : undefined,
+    lastError: text(row.last_error),
+    createdAt: new Date(row.created_at).toISOString(),
+  }
+}
+
+const BROKER_CONNECTION_FIELDS = 'id, broker_type, token_masked, encrypted_token, status, last_sync_at, last_error, created_at'
+
+export async function findBrokerConnection(db: Db, userId: string, brokerType: string): Promise<BrokerConnection | undefined> {
+  const result = await db.query(
+    `SELECT ${BROKER_CONNECTION_FIELDS}
+       FROM portfolio.broker_connections WHERE user_id = $1 AND broker_type = $2`,
+    [userId, brokerType],
+  )
+  return result.rows[0] ? mapBrokerConnection(result.rows[0]) : undefined
+}
+
+// Токен хранится только в зашифрованном виде (§28) — encryptedToken шифрует вызывающий код
+// (server/token-crypto.ts) до попадания сюда; в базе никогда не оказывается открытый текст.
+export async function upsertBrokerConnection(
+  db: Db, userId: string, id: string,
+  connection: { brokerType: string; tokenMasked: string; encryptedToken: string; status: BrokerStatus },
+): Promise<BrokerConnection> {
+  const result = await db.query(
+    `INSERT INTO portfolio.broker_connections (id, user_id, broker_type, token_masked, encrypted_token, status)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, broker_type)
+     DO UPDATE SET token_masked = EXCLUDED.token_masked, encrypted_token = EXCLUDED.encrypted_token,
+       status = EXCLUDED.status, last_error = NULL
+     RETURNING ${BROKER_CONNECTION_FIELDS}`,
+    [id, userId, connection.brokerType, connection.tokenMasked, connection.encryptedToken, connection.status],
+  )
+  return mapBrokerConnection(result.rows[0])
+}
+
+// Обновление результата синхронизации (§30): статус/дата/ошибка — без прикосновения к токену.
+// Деградация (§40.2 B/C) требует не стирать раннее сохранённые данные при ошибке — этот вызов
+// не трогает ни positions, ни transactions, только состояние самого подключения.
+export async function updateBrokerConnectionSync(
+  db: Db, userId: string, brokerType: string,
+  update: { status: BrokerStatus; lastSyncAt?: string; lastError?: string | null },
+): Promise<void> {
+  await db.query(
+    `UPDATE portfolio.broker_connections SET
+       status = $3, last_sync_at = COALESCE($4, last_sync_at), last_error = $5
+     WHERE user_id = $1 AND broker_type = $2`,
+    [userId, brokerType, update.status, update.lastSyncAt ?? null, update.lastError ?? null],
+  )
+}
+
+// Полное удаление аккаунта (§28): пользователь должен иметь возможность стереть себя целиком,
+// включая legacy-архив, который остался от старой схемы.
 export async function deleteUserData(db: Db, userId: string): Promise<void> {
+  // Каскад по portfolios снимает счета, позиции, операции, выплаты и снимки портфеля.
+  await db.query('DELETE FROM portfolio.portfolios WHERE user_id = $1', [userId])
+  await db.query('DELETE FROM portfolio.instruments WHERE owner_user_id = $1', [userId])
+  await db.query('DELETE FROM portfolio.broker_connections WHERE user_id = $1', [userId])
+  await db.query('DELETE FROM portfolio.uploaded_documents WHERE user_id = $1', [userId])
+  await db.query('DELETE FROM portfolio.recommendations WHERE user_id = $1', [userId])
   await db.query('DELETE FROM products WHERE user_id = $1', [userId])
   await db.query('DELETE FROM payments WHERE user_id = $1', [userId])
   await db.query('DELETE FROM transactions WHERE user_id = $1', [userId])
