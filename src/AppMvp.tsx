@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -184,6 +184,67 @@ type Transaction = {
 type Snapshot = { date: string; value: number; invested: number | null };
 type OcrFailure = { filename: string; reason: string };
 type OcrUploadResult = { date: string; items: Product[]; failures: OcrFailure[] };
+// Зеркалит GroupAggregate/PortfolioAggregate из server/portfolio-engine.ts — расчёт
+// (§10) целиком на бэкенде, фронт только отображает уже готовый результат.
+type GroupSummary = {
+  group: string;
+  invested: number;
+  value: number;
+  pnl: number;
+  pnlPercent: number | null;
+  share: number | null;
+  positions: number;
+  priceUnavailable: number;
+};
+type PortfolioSummary = {
+  total: number;
+  invested: number;
+  profit: number;
+  profitPercent: number | null;
+  expected: number;
+  paid: number;
+  groups: GroupSummary[];
+  valuation: {
+    incomplete: boolean;
+    unavailable: { id: string; name: string; group: string; reason: string }[];
+  };
+};
+// Офлайн-фолбэк (нет сети/бэкенда недоступен) — единственное место, где допустимо
+// пересчитывать эти показатели на фронте, поскольку Portfolio Engine недоступен вовсе.
+function localSummary(products: Product[], payments: Payment[]): PortfolioSummary {
+  const total = products.reduce((sum, product) => sum + product.amount, 0);
+  const invested = products.reduce((sum, product) => sum + product.invested, 0);
+  const profit = total - invested;
+  const groupTotals = products.reduce<Record<string, number>>((result, product) => {
+    result[product.type] = (result[product.type] || 0) + product.amount;
+    return result;
+  }, {});
+  return {
+    total,
+    invested,
+    profit,
+    profitPercent: invested > 0 ? (profit / invested) * 100 : null,
+    expected: payments
+      .filter((item) => item.status === "expected")
+      .reduce((sum, payment) => sum + payment.amount, 0),
+    paid: payments
+      .filter((item) => item.status === "received")
+      .reduce((sum, item) => sum + item.amount, 0),
+    groups: Object.entries(groupTotals)
+      .sort((a, b) => b[1] - a[1])
+      .map(([group, value]) => ({
+        group,
+        invested: 0,
+        value,
+        pnl: 0,
+        pnlPercent: null,
+        share: total > 0 ? (value / total) * 100 : null,
+        positions: products.filter((product) => product.type === group).length,
+        priceUnavailable: 0,
+      })),
+    valuation: { incomplete: false, unavailable: [] },
+  };
+}
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "/api";
@@ -419,6 +480,7 @@ function AppMvp() {
   );
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
+  const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
     () => (localStorage.getItem(themeKey) as ThemePreference | null) || "system",
@@ -460,17 +522,20 @@ function AppMvp() {
           paymentsResponse,
           transactionsResponse,
           historyResponse,
+          summaryResponse,
         ] = await Promise.all([
           fetch(`${apiUrl}/positions`, { headers }),
           fetch(`${apiUrl}/payouts`, { headers }),
           fetch(`${apiUrl}/transactions`, { headers }),
           fetch(`${apiUrl}/portfolio/history`, { headers }),
+          fetch(`${apiUrl}/portfolio/summary`, { headers }),
         ]);
         if (
           productsResponse.status === 401 ||
           paymentsResponse.status === 401 ||
           transactionsResponse.status === 401 ||
-          historyResponse.status === 401
+          historyResponse.status === 401 ||
+          summaryResponse.status === 401
         ) {
           expireSession();
           return;
@@ -479,13 +544,15 @@ function AppMvp() {
           !productsResponse.ok ||
           !paymentsResponse.ok ||
           !transactionsResponse.ok ||
-          !historyResponse.ok
+          !historyResponse.ok ||
+          !summaryResponse.ok
         )
           throw new Error("API unavailable");
         setProducts((await productsResponse.json()) as Product[]);
         setPayments((await paymentsResponse.json()) as Payment[]);
         setTransactions((await transactionsResponse.json()) as Transaction[]);
         setHistory((await historyResponse.json()) as Snapshot[]);
+        setSummary((await summaryResponse.json()) as PortfolioSummary);
         setApiOnline(true);
       } catch {
         const saved = localStorage.getItem(storageKey);
@@ -514,31 +581,23 @@ function AppMvp() {
     const timer = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
-
-  const total = products.reduce((sum, product) => sum + product.amount, 0);
-  const invested = products.reduce((sum, product) => sum + product.invested, 0);
-  const profit = total - invested;
-  const expected = payments
-    .filter((item) => item.status === "expected")
-    .reduce((sum, payment) => sum + payment.amount, 0);
-  const paid = payments
-    .filter((item) => item.status === "received")
-    .reduce((sum, item) => sum + item.amount, 0);
-  const groups = useMemo(
-    () =>
-      Object.entries(
-        products.reduce<Record<string, number>>((result, product) => {
-          result[product.type] = (result[product.type] || 0) + product.amount;
-          return result;
-        }, {}),
-      ).sort((a, b) => b[1] - a[1]),
-    [products],
-  );
+  // Офлайн-режим не имеет доступа к Portfolio Engine на бэкенде — единственный случай,
+  // когда сводные показатели допустимо пересчитывать на фронте (см. localSummary выше).
+  useEffect(() => {
+    if (apiOnline) return;
+    setSummary(localSummary(products, payments));
+  }, [apiOnline, products, payments]);
 
   const authHeaders = {
     "content-type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+  async function refreshSummary() {
+    const response = await fetch(`${apiUrl}/portfolio/summary`, {
+      headers: authHeaders,
+    });
+    if (response.ok) setSummary((await response.json()) as PortfolioSummary);
+  }
   async function addProduct(product: Product) {
     if (apiOnline) {
       const response = await fetch(`${apiUrl}/positions`, {
@@ -548,6 +607,7 @@ function AppMvp() {
       });
       if (!response.ok) throw new Error("Не удалось сохранить продукт");
       product = (await response.json()) as Product;
+      await refreshSummary();
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
@@ -562,6 +622,7 @@ function AppMvp() {
       });
       if (!response.ok) throw new Error("Не удалось сохранить выплату");
       payment = (await response.json()) as Payment;
+      await refreshSummary();
     }
     setPayments((current) => [...current, payment]);
     setToast("Выплата добавлена в календарь");
@@ -576,6 +637,7 @@ function AppMvp() {
       });
       if (!response.ok) throw new Error("Не удалось сохранить изменения");
       payment = (await response.json()) as Payment;
+      await refreshSummary();
     }
     setPayments((current) =>
       current.map((item) => (item.id === payment.id ? payment : item)),
@@ -590,6 +652,7 @@ function AppMvp() {
         headers: authHeaders,
       });
       if (!response.ok) throw new Error("Не удалось удалить выплату");
+      await refreshSummary();
     }
     setPayments((current) => current.filter((payment) => payment.id !== id));
     setToast("Выплата удалена");
@@ -608,6 +671,7 @@ function AppMvp() {
         headers: authHeaders,
       });
       if (!response.ok) throw new Error("Не удалось удалить продукт");
+      await refreshSummary();
     }
     setProducts((current) => current.filter((product) => product.id !== id));
     setToast("Продукт удалён");
@@ -622,6 +686,7 @@ function AppMvp() {
       });
       if (!response.ok) throw new Error("Не удалось сохранить изменения");
       product = (await response.json()) as Product;
+      await refreshSummary();
     }
     setProducts((current) =>
       current.map((item) => (item.id === product.id ? product : item)),
@@ -632,6 +697,7 @@ function AppMvp() {
   function applyOcrResult(result: OcrUploadResult) {
     setProducts((current) => [...current, ...result.items]);
     setOcrSummary(result);
+    if (result.items.length > 0) void refreshSummary();
     navigate("/ocr-summary");
   }
   async function addTransaction(transaction: Transaction) {
@@ -650,6 +716,7 @@ function AppMvp() {
     setTransactions((current) => [...current, transaction]);
     if (apiOnline) {
       await refreshProducts();
+      await refreshSummary();
     } else {
       setProducts((current) =>
         applyLocalTransactionEffect(current, transaction, 1),
@@ -671,6 +738,7 @@ function AppMvp() {
       }
       transaction = (await response.json()) as Transaction;
       await refreshProducts();
+      await refreshSummary();
     }
     setTransactions((current) =>
       current.map((item) => (item.id === transaction.id ? transaction : item)),
@@ -686,6 +754,7 @@ function AppMvp() {
       });
       if (!response.ok) throw new Error("Не удалось удалить операцию");
       await refreshProducts();
+      await refreshSummary();
     }
     setTransactions((current) =>
       current.filter((transaction) => transaction.id !== id),
@@ -834,12 +903,7 @@ function AppMvp() {
             path="/portfolio"
             element={
               <Dashboard
-                total={total}
-                invested={invested}
-                profit={profit}
-                paid={paid}
-                expected={expected}
-                groups={groups}
+                summary={summary}
                 products={products}
                 payments={payments}
                 history={history}
@@ -927,7 +991,7 @@ function AppMvp() {
           <Route
             path="/analytics"
             element={
-              <AnalyticsPage total={total} groups={groups} profit={profit} />
+              <AnalyticsPage summary={summary} />
             }
           />
           <Route
@@ -968,24 +1032,14 @@ function AppMvp() {
 }
 
 function Dashboard({
-  total,
-  invested,
-  profit,
-  paid,
-  expected,
-  groups,
+  summary,
   products,
   payments,
   history,
   hideAmounts,
   onHide,
 }: {
-  total: number;
-  invested: number;
-  profit: number;
-  paid: number;
-  expected: number;
-  groups: [string, number][];
+  summary: PortfolioSummary | null;
   products: Product[];
   payments: Payment[];
   history: Snapshot[];
@@ -997,6 +1051,10 @@ function Dashboard({
   const linePath = chartPath(history);
   const areaPath = chartPath(history, true);
   const lastSnapshot = history.at(-1);
+  // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
+  // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
+  const { total, invested, profit, profitPercent, paid, expected, groups, valuation } =
+    summary ?? localSummary(products, payments);
   if (products.length === 0) {
     return (
       <div className="content-wrap">
@@ -1065,11 +1123,15 @@ function Dashboard({
           </div>
           <div className="profit-line">
             <span className="positive-pill">↗ {display(profit)}</span>
-            <strong>
-              +{pct(profit, invested).toFixed(2).replace(".", ",")}%
-            </strong>
+            <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
             <span className="muted">за всё время</span>
           </div>
+          {valuation.incomplete && (
+            <div className="demo-note">
+              ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
+              инструмент(ов) — их стоимость не включена в общую сумму.
+            </div>
+          )}
           <div className="chart">
             {history.length ? (
               <>
@@ -1170,25 +1232,22 @@ function Dashboard({
             </div>
           </div>
           <div className="holding-list">
-            {groups.map(([name, value]) => (
-              <div className="holding-row" key={name}>
-                <span className={`legend ${typeColors[name as AssetType]}`} />
+            {groups.map((groupSummary) => (
+              <div className="holding-row" key={groupSummary.group}>
+                <span
+                  className={`legend ${typeColors[groupSummary.group as AssetType]}`}
+                />
                 <div className="holding-name">
-                  <strong>{name}</strong>
-                  <small>
-                    {products.filter((product) => product.type === name).length}{" "}
-                    продукт(а)
-                  </small>
+                  <strong>{groupSummary.group}</strong>
+                  <small>{groupSummary.positions} продукт(а)</small>
                 </div>
                 <div className="holding-value">
-                  <strong>{display(value)}</strong>
+                  <strong>{display(groupSummary.value)}</strong>
                   <small className="teal-text">
-                    {pct(value, total).toFixed(1).replace(".", ",")}%
+                    {(groupSummary.share ?? 0).toFixed(1).replace(".", ",")}%
                   </small>
                 </div>
-                <span className="share">
-                  {Math.round(pct(value, total))}%
-                </span>
+                <span className="share">{Math.round(groupSummary.share ?? 0)}%</span>
               </div>
             ))}
           </div>
@@ -1418,23 +1477,15 @@ function PaymentsPage({ payments }: { payments: Payment[] }) {
     </Page>
   );
 }
-function AnalyticsPage({
-  total,
-  groups,
-  profit,
-}: {
-  total: number;
-  groups: [string, number][];
-  profit: number;
-}) {
+function AnalyticsPage({ summary }: { summary: PortfolioSummary | null }) {
+  const { total, profitPercent, groups } = summary ?? localSummary([], []);
+  const bonds = groups.find((groupSummary) => groupSummary.group === "Облигации");
   return (
     <Page title="Аналитика" subtitle="Базовые показатели портфеля">
       <div className="analytics-grid">
         <article className="stat-card">
           <span>Доходность</span>
-          <strong>
-            +{pct(profit, total - profit).toFixed(2).replace(".", ",")}%
-          </strong>
+          <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
           <small>простая доходность</small>
         </article>
         <article className="stat-card">
@@ -1444,12 +1495,7 @@ function AnalyticsPage({
         </article>
         <article className="stat-card">
           <span>Доля облигаций</span>
-          <strong>
-            {Math.round(
-              pct(groups.find(([name]) => name === "Облигации")?.[1] || 0, total),
-            )}
-            %
-          </strong>
+          <strong>{Math.round(bonds?.share ?? pct(bonds?.value ?? 0, total))}%</strong>
           <small>от общей стоимости</small>
         </article>
       </div>
