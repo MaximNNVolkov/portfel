@@ -765,6 +765,24 @@ function AppMvp() {
     });
     if (response.ok) setProducts((await response.json()) as Product[]);
   }
+  async function refreshMarketPrices() {
+    const response = await fetch(`${apiUrl}/market-data/refresh`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    if (!response.ok) {
+      setToast("Не удалось обновить цены");
+      return;
+    }
+    const result = (await response.json()) as { checked: number; updated: number };
+    await refreshProducts();
+    await refreshSummary();
+    setToast(
+      result.checked === 0
+        ? "Нет инструментов с тикером для обновления цены"
+        : `Обновлено цен: ${result.updated} из ${result.checked}`,
+    );
+  }
   async function removeProduct(id: string) {
     if (apiOnline) {
       const response = await fetch(`${apiUrl}/positions/${id}`, {
@@ -1020,7 +1038,7 @@ function AppMvp() {
           />
           <Route
             path="/products"
-            element={<ProductsPage products={products} />}
+            element={<ProductsPage products={products} onRefreshPrices={refreshMarketPrices} />}
           />
           <Route
             path="/products/:id"
@@ -1498,7 +1516,16 @@ function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
   return withIndex.map((entry) => entry.product);
 }
 
-function ProductsPage({ products }: { products: Product[] }) {
+function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRefreshPrices: () => Promise<void> }) {
+  const [refreshing, setRefreshing] = useState(false);
+  async function handleRefreshPrices() {
+    setRefreshing(true);
+    try {
+      await onRefreshPrices();
+    } finally {
+      setRefreshing(false);
+    }
+  }
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<AssetType | "all">("all");
   const [sortBy, setSortBy] = useState<ProductSortKey>("value");
@@ -1514,6 +1541,14 @@ function ProductsPage({ products }: { products: Product[] }) {
         <Link className="primary-button" to="/products/new">
           ＋ Добавить продукт
         </Link>
+        <button
+          type="button"
+          className="outline-button"
+          onClick={handleRefreshPrices}
+          disabled={refreshing}
+        >
+          {refreshing ? "Обновляем…" : "↻ Обновить цены (MOEX)"}
+        </button>
         <label className="inline-select">
           <span>Фильтр</span>
           <select

@@ -13,7 +13,7 @@ import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
-import { getCbrRateTable } from './market-data.ts'
+import { getCbrRateTable, getMoexLastPrice } from './market-data.ts'
 import {
   aggregateByGroup, calculateReturns, resolveAssetGroup,
   type AssetGroup, type EngineContext, type PositionInput,
@@ -27,7 +27,7 @@ import {
   insertInstrument, insertPayout, insertPosition, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
   sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
-  updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
+  updatePosition, updatePositionMarketPrice, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
   withTransaction,
   type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument,
   type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Position,
@@ -543,6 +543,32 @@ app.post('/api/brokers/tinkoff/sync', async (request, response) => {
     })
     response.status(502).json({ status: 'error', error: 'Не удалось синхронизироваться с Т-Инвестициями. Ранее загруженные данные сохранены.' })
   }
+})
+
+// §20: обновление текущей цены акций/фондов по данным MOEX ISS — явное действие
+// пользователя (кнопка «Обновить цены»), а не фоновая задача (в проекте нет Celery/Redis,
+// см. решение по стеку в начале плана) и не побочный эффект каждого GET (непредсказуемые
+// записи в БД на чтении — хуже, чем явная кнопка с понятным результатом).
+app.post('/api/market-data/refresh', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const positions = await listPositions(db, userId)
+  const eligible = positions.filter((position) =>
+    position.source !== 'broker'
+    && Boolean(position.quantity)
+    && Boolean(position.instrument.ticker)
+    && (position.instrument.groupType === 'share' || position.instrument.groupType === 'fund'),
+  )
+  let updated = 0
+  await withTransaction(db, async (client) => {
+    for (const position of eligible) {
+      const price = await getMoexLastPrice(position.instrument.ticker!)
+      if (price === null) continue
+      await updatePositionMarketPrice(client, userId, { id: position.id, currentPrice: price, value: price * position.quantity! })
+      updated += 1
+    }
+    if (updated > 0) await recordSnapshot(client, userId)
+  })
+  response.json({ checked: eligible.length, updated })
 })
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'portfolio-api' }))

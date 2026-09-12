@@ -483,6 +483,16 @@ export async function updatePositionValue(db: Db, userId: string, position: Pick
   )
 }
 
+// Обновление котировки (§20): трогает только цену и пересчитанную от неё стоимость —
+// не задевает invested/quantity/остальные поля, которые сюда не относятся.
+export async function updatePositionMarketPrice(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'currentPrice' | 'value'>): Promise<void> {
+  await db.query(
+    `UPDATE portfolio.positions p SET current_price = $3, current_value = $4, updated_at = NOW()
+      WHERE p.id = $1 AND ${OWNED_POSITION}`,
+    [position.id, userId, position.currentPrice ?? null, position.value ?? null],
+  )
+}
+
 export async function deletePosition(db: Db, userId: string, id: string): Promise<boolean> {
   const result = await db.query(
     `DELETE FROM portfolio.positions p

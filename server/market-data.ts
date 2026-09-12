@@ -66,3 +66,76 @@ export async function getCbrRateTable(): Promise<RateTable> {
     return cache ? cache.table : { base: 'RUB', rates: {} }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Котировки MOEX ISS (§20) — только текущая цена акций/фондов по тикеру.
+//
+// Решено автономно (см. план, «MOEX ISS — коммерческие ограничения»): открытый вопрос
+// CLAUDE.md о лицензионных условиях MOEX ISS при публичном/многопользовательском сценарии
+// не блокирует MVP — SPEC §4 явно фиксирует однопользовательский режим для MVP (то же
+// рассуждение уже применялось к лимитам Tinkoff Invest API, см. Пункт 5); переиспользуются
+// только публичные бесплатные JSON-эндпоинты ISS, без служебных/платных продуктов вроде
+// Algopack. Вопрос переоткрывается перед любым переходом к многопользовательскому v2.
+//
+// Решено автономно: цена — только для «Акции»/«Фонды», не для облигаций → обоснование:
+// у облигаций MOEX отдаёт цену в процентах от номинала, а не в валюте позиции напрямую —
+// корректный пересчёт требует отдельной, более сложной логики (номинал + НКД, §14),
+// которую нецелесообразно смешивать с этим более простым и самодостаточным пунктом;
+// зафиксировано как известное ограничение, а не потерянный без объяснения кейс.
+const MOEX_PRICE_CACHE_TTL_MS = 15 * 60 * 1000
+const moexPriceCache = new Map<string, { price: number | null; fetchedAt: number }>()
+
+type MoexBoardRef = { engine: string; market: string; boardid: string }
+
+async function findPrimaryBoard(ticker: string): Promise<MoexBoardRef | null> {
+  const url = `https://iss.moex.com/iss/securities/${encodeURIComponent(ticker)}.json?iss.only=boards&boards.columns=secid,boardid,market,engine,is_primary`
+  const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+  if (!response.ok) throw new Error(`MOEX ISS (securities) ответил ${response.status}`)
+  const body = await response.json() as { boards?: { columns: string[]; data: unknown[][] } }
+  const rows = body.boards?.data ?? []
+  const columns = body.boards?.columns ?? []
+  const idx = (name: string) => columns.indexOf(name)
+  for (const row of rows) {
+    if (row[idx('is_primary')] === 1) {
+      return { engine: String(row[idx('engine')]), market: String(row[idx('market')]), boardid: String(row[idx('boardid')]) }
+    }
+  }
+  return null
+}
+
+async function fetchMoexLastPrice(ticker: string): Promise<number | null> {
+  const board = await findPrimaryBoard(ticker)
+  if (!board) return null
+  const url = `https://iss.moex.com/iss/engines/${board.engine}/markets/${board.market}/boards/${board.boardid}/securities/${encodeURIComponent(ticker)}.json?iss.only=marketdata&marketdata.columns=SECID,LAST,MARKETPRICE`
+  const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+  if (!response.ok) throw new Error(`MOEX ISS (marketdata) ответил ${response.status}`)
+  const body = await response.json() as { marketdata?: { columns: string[]; data: unknown[][] } }
+  const columns = body.marketdata?.columns ?? []
+  const row = body.marketdata?.data?.[0]
+  if (!row) return null
+  const idx = (name: string) => columns.indexOf(name)
+  const last = Number(row[idx('LAST')])
+  if (Number.isFinite(last) && last > 0) return last
+  const marketPrice = Number(row[idx('MARKETPRICE')])
+  return Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : null
+}
+
+/**
+ * Текущая цена акции/фонда по тикеру (§20), с кэшем 15 минут в памяти процесса.
+ * Возвращает null, если тикер не найден или источник недоступен — вызывающий код
+ * обязан просто пропустить обновление этой позиции, а не превращать это в ошибку (§7.3/§40.2).
+ */
+export async function getMoexLastPrice(ticker: string): Promise<number | null> {
+  const key = ticker.trim().toUpperCase()
+  if (!key) return null
+  const cached = moexPriceCache.get(key)
+  if (cached && Date.now() - cached.fetchedAt < MOEX_PRICE_CACHE_TTL_MS) return cached.price
+  try {
+    const price = await fetchMoexLastPrice(key)
+    moexPriceCache.set(key, { price, fetchedAt: Date.now() })
+    return price
+  } catch (error) {
+    logError('moex-price', error)
+    return cached ? cached.price : null
+  }
+}
