@@ -49,6 +49,7 @@ type Product = {
 };
 type ProductDetails = {
   isin: string;
+  ticker: string;
   quantity: string;
   averagePrice: string;
   currentPrice: string;
@@ -70,6 +71,7 @@ type ProductDetails = {
 };
 const emptyProductDetails: ProductDetails = {
   isin: "",
+  ticker: "",
   quantity: "",
   averagePrice: "",
   currentPrice: "",
@@ -92,6 +94,7 @@ const emptyProductDetails: ProductDetails = {
 function productToDetails(product?: Product): ProductDetails {
   return {
     isin: product?.isin || "",
+    ticker: product?.ticker || "",
     quantity: product?.quantity !== undefined ? String(product.quantity) : "",
     averagePrice: product?.averagePrice !== undefined ? String(product.averagePrice) : "",
     currentPrice: product?.currentPrice !== undefined ? String(product.currentPrice) : "",
@@ -115,6 +118,7 @@ function productToDetails(product?: Product): ProductDetails {
 function detailsToPayload(details: ProductDetails) {
   return {
     isin: details.isin.trim() || undefined,
+    ticker: details.ticker.trim(),
     quantity: details.quantity.trim() ? Number(details.quantity) : undefined,
     averagePrice: details.averagePrice.trim() ? Number(details.averagePrice) : undefined,
     currentPrice: details.currentPrice.trim() ? Number(details.currentPrice) : undefined,
@@ -2676,6 +2680,14 @@ function InstrumentDetailsFieldset({
               />
             </label>
             <label>
+              Тикер
+              <input
+                value={details.ticker}
+                onChange={(event) => onChange("ticker", event.target.value.toUpperCase())}
+                placeholder="Например, SBER"
+              />
+            </label>
+            <label>
               Количество
               <input
                 value={details.quantity}
@@ -2883,6 +2895,7 @@ function ProductFormPage({
   const [date, setDate] = useState(todayIsoDate);
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState("");
+  const [currency, setCurrency] = useState("RUB");
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
@@ -2899,6 +2912,7 @@ function ProductFormPage({
     setDate(todayIsoDate());
     setInvested("");
     setInstitution("");
+    setCurrency("RUB");
     setDetails(emptyProductDetails);
     setError("");
     setSaved(false);
@@ -2923,10 +2937,9 @@ function ProductFormPage({
         type,
         amount: Number(amount),
         invested: Number(invested || amount),
-        ticker: "",
         date,
         institution: institution || "Ручной ввод",
-        currency: "RUB",
+        currency,
         source: "manual",
         ...detailsToPayload(details),
       });
@@ -3100,6 +3113,14 @@ function ProductFormPage({
                     />
                   </label>
                   <label>
+                    Валюта
+                    <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
+                      <option value="RUB">RUB</option>
+                      <option value="USD">USD</option>
+                      <option value="CNY">CNY</option>
+                    </select>
+                  </label>
+                  <label>
                     Первичная цена
                     <input
                       value={invested}
@@ -3167,6 +3188,7 @@ function EditProductPage({
   const [amount, setAmount] = useState(String(product?.amount || ""));
   const [invested, setInvested] = useState(String(product?.invested || ""));
   const [institution, setInstitution] = useState(product?.institution || "");
+  const [currency, setCurrency] = useState(product?.currency || "RUB");
   const [details, setDetails] = useState<ProductDetails>(productToDetails(product));
   useEffect(() => {
     if (!product) return;
@@ -3175,6 +3197,7 @@ function EditProductPage({
     setAmount(String(product.amount));
     setInvested(String(product.invested));
     setInstitution(product.institution);
+    setCurrency(product.currency);
     setDetails(productToDetails(product));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -3190,6 +3213,7 @@ function EditProductPage({
       amount: Number(amount),
       invested: Number(invested || amount),
       institution: institution || "Ручной ввод",
+      currency,
       ...detailsToPayload(details),
     });
   };
@@ -3229,6 +3253,14 @@ function EditProductPage({
             value={institution}
             onChange={(event) => setInstitution(event.target.value)}
           />
+        </label>
+        <label>
+          Валюта
+          <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
+            <option value="RUB">RUB</option>
+            <option value="USD">USD</option>
+            <option value="CNY">CNY</option>
+          </select>
         </label>
         <label>
           Тип продукта
