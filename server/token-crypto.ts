@@ -4,9 +4,24 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
 
 const rawKey = process.env.TOKEN_ENCRYPTION_KEY
-if (!rawKey) {
-  console.warn('[token-crypto] TOKEN_ENCRYPTION_KEY не задан — используется небезопасный ключ для разработки. Не использовать в production.')
+const isProduction = process.env.NODE_ENV === 'production'
+const MIN_KEY_LENGTH = 32
+
+// В production подстановка dev-ключа недопустима: токены брокеров лежали бы в базе
+// зашифрованными общеизвестной строкой из репозитория, то есть фактически открыто (§28).
+// Поэтому процесс падает на старте — это заметно сразу, в отличие от предупреждения
+// в логе, которое легко пропустить при деплое.
+if (isProduction) {
+  if (!rawKey) {
+    throw new Error('TOKEN_ENCRYPTION_KEY не задан. В production запуск без ключа шифрования токенов брокеров запрещён (§28). Сгенерировать: openssl rand -hex 32')
+  }
+  if (rawKey.length < MIN_KEY_LENGTH) {
+    throw new Error(`TOKEN_ENCRYPTION_KEY короче ${MIN_KEY_LENGTH} символов. Сгенерировать полноценный ключ: openssl rand -hex 32`)
+  }
+} else if (!rawKey) {
+  console.warn('[token-crypto] TOKEN_ENCRYPTION_KEY не задан — используется небезопасный ключ для разработки. В production такой запуск завершится ошибкой.')
 }
+
 const KEY = scryptSync(rawKey || 'dev-only-insecure-key-change-me', 'portfel-broker-token', 32)
 
 export function encryptToken(token: string): string {

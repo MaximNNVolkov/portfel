@@ -5,16 +5,16 @@ services:
     image: postgres:16-alpine
     container_name: portfel-postgres
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    # Порт наружу намеренно не публикуется (§28): база доступна только сервисам внутри
+    # compose-сети. Для ручного доступа — `docker compose exec postgres psql -U $POSTGRES_USER`.
     environment:
-      POSTGRES_DB: portfel
-      POSTGRES_USER: portfel
-      POSTGRES_PASSWORD: portfel
+      POSTGRES_DB: ${POSTGRES_DB:-portfel}
+      POSTGRES_USER: ${POSTGRES_USER:-portfel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD не задан в .env — пароль базы не должен браться из репозитория}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U portfel -d portfel"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -28,6 +28,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Включает строгие проверки секретов при старте (server/token-crypto.ts, server/index.ts).
+      NODE_ENV: production
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,9 +73,9 @@ services:
         condition: service_healthy
     environment:
       PGHOST: postgres
-      PGUSER: portfel
-      PGPASSWORD: portfel
-      PGDATABASE: portfel
+      PGUSER: ${POSTGRES_USER:-portfel}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD не задан в .env}
+      PGDATABASE: ${POSTGRES_DB:-portfel}
       BACKUP_RETENTION_COUNT: 7
       BACKUP_INTERVAL_SECONDS: 86400
     volumes:

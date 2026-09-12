@@ -26,14 +26,31 @@ SPEC §28 о размещении персональных данных граж
 ## Первый запуск
 
 1. Скопировать репозиторий на сервер.
-2. Создать `.env` на основе `.env.example`:
+2. Создать `.env` на основе `.env.example`. Пароль базы и ключ шифрования токенов
+   генерируются на сервере и в репозиторий не попадают:
    ```
    PORT=3001
-   DATABASE_URL=postgresql://portfel:portfel@postgres:5432/portfel
+   POSTGRES_DB=portfel
+   POSTGRES_USER=portfel
+   POSTGRES_PASSWORD=<openssl rand -hex 24>
+   DATABASE_URL=postgresql://portfel:<тот же пароль>@postgres:5432/portfel
    SESSION_TTL_DAYS=30
+   TOKEN_ENCRYPTION_KEY=<openssl rand -hex 32>
+   TINKOFF_API_MODE=sandbox
    ```
-   Внутри docker-compose backend обращается к базе по имени сервиса `postgres`, а не
-   `localhost` — это единственное отличие от локального `.env` для разработки.
+   Отличия от локального `.env` для разработки: внутри docker-compose backend обращается
+   к базе по имени сервиса `postgres`, а не `localhost`, и все секреты обязательны.
+   Backend запускается с `NODE_ENV=production` и падает на старте, если `DATABASE_URL`
+   или `TOKEN_ENCRYPTION_KEY` не заданы: без ключа токены брокеров шифровались бы
+   общеизвестной строкой из репозитория (SPEC §28). `docker compose` так же откажется
+   поднимать `postgres` без `POSTGRES_PASSWORD`.
+
+   Пароль в `DATABASE_URL` должен совпадать с `POSTGRES_PASSWORD` — это два разных
+   способа задать одно и то же подключение, и рассинхронизация проявится только при
+   старте backend.
+
+   Порт `5432` наружу не публикуется: база доступна только сервисам внутри
+   compose-сети. Подключиться вручную — `docker compose exec postgres psql -U portfel -d portfel`.
 3. Собрать образы: `docker compose build`.
 4. Получить сертификат Let's Encrypt (одноразовая процедура, решает проблему курицы и яйца:
    nginx не запустится без сертификата, а certbot не может его выдать, пока nginx не отвечает

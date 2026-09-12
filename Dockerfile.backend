@@ -5,6 +5,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# Ставится после npm ci: иначе npm пропустил бы devDependencies, а запуск идёт через tsx.
+ENV NODE_ENV=production
+
 COPY server ./server
 COPY db ./db
 

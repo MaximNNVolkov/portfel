@@ -55,6 +55,12 @@ type User = { id: string; email: string; passwordHash: string; salt: string }
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
+// Дефолт с логином и паролем из репозитория годится только для локальной разработки:
+// в production молчаливый откат на него означал бы подключение не к той базе или
+// работу с учётной записью, пароль которой известен всем (§28).
+if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL не задан. В production запуск с параметрами подключения по умолчанию запрещён (§28)')
+}
 const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel'
 const db = new Pool({ connectionString: databaseUrl, max: 10 })
 const users = new Map<string, User>()
