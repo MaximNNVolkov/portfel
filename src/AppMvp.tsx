@@ -932,13 +932,7 @@ function AppMvp() {
           />
           <Route
             path="/recommendations"
-            element={
-              <Recommendations
-                products={products}
-                payments={payments}
-                total={total}
-              />
-            }
+            element={<Recommendations token={token} />}
           />
           <Route path="/integrations" element={<Integrations token={token} />} />
           <Route
@@ -1472,57 +1466,80 @@ function AnalyticsPage({
     </Page>
   );
 }
-function Recommendations({
-  products,
-  payments,
-  total,
-}: {
-  products: Product[];
-  payments: Payment[];
-  total: number;
-}) {
-  const cash =
-    products.find((product) => product.type === "Деньги")?.amount || 0;
+type RecommendationRuleType =
+  | "concentration"
+  | "maturity"
+  | "drawdown"
+  | "payout_gap";
+type RecommendationItem = {
+  ruleType: RecommendationRuleType;
+  text: string;
+  payload: Record<string, unknown>;
+};
+// Иконка и стиль карточки по типу правила (§24) — просадка/концентрация/погашение
+// требуют внимания в ближайшее время, разрыв в выплатах — нейтральная информация о прогнозе.
+const RECOMMENDATION_STYLE: Record<
+  RecommendationRuleType,
+  { icon: string; warning: boolean }
+> = {
+  concentration: { icon: "!", warning: true },
+  maturity: { icon: "⏳", warning: true },
+  drawdown: { icon: "↓", warning: true },
+  payout_gap: { icon: "ℹ", warning: false },
+};
+
+function Recommendations({ token }: { token: string }) {
+  const [items, setItems] = useState<RecommendationItem[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const response = await fetch(`${apiUrl}/recommendations`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("Не удалось загрузить рекомендации");
+        const result = (await response.json()) as RecommendationItem[];
+        if (!cancelled) setItems(result);
+      } catch {
+        if (!cancelled) setError("Не удалось загрузить рекомендации");
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   return (
     <Page
       title="Рекомендации"
-      subtitle="Простые правила на основе текущего портфеля"
+      subtitle="Аналитические уведомления на основе текущего портфеля — не являются индивидуальной инвестиционной рекомендацией"
     >
-      <div className="recommendation-list">
-        <article className="recommendation">
-          <span className="rec-icon">✓</span>
-          <div>
-            <strong>Регулярные выплаты настроены</strong>
-            <p>
-              В календаре есть {payments.length} будущих выплат на сумму{" "}
-              {money(
-                payments.reduce((sum, payment) => sum + payment.amount, 0),
-              )}
-              .
-            </p>
-          </div>
-        </article>
-        <article className="recommendation">
-          <span className="rec-icon">↗</span>
-          <div>
-            <strong>Свободные деньги работают</strong>
-            <p>
-              {pct(cash, total).toFixed(1).replace(".", ",")}% портфеля
-              сейчас находится в денежных средствах.
-            </p>
-          </div>
-        </article>
-        <article className="recommendation warning">
-          <span className="rec-icon">!</span>
-          <div>
-            <strong>Проверьте концентрацию</strong>
-            <p>
-              Перед покупкой нового продукта сравните его долю с текущей
-              структурой портфеля.
-            </p>
-          </div>
-        </article>
-      </div>
+      {error && <p className="form-error">{error}</p>}
+      {!error && items === null && <p>Загрузка…</p>}
+      {!error && items !== null && items.length === 0 && (
+        <p>Пока нет замечаний по портфелю.</p>
+      )}
+      {!error && items !== null && items.length > 0 && (
+        <div className="recommendation-list">
+          {items.map((item, index) => {
+            const style = RECOMMENDATION_STYLE[item.ruleType];
+            return (
+              <article
+                key={`${item.ruleType}-${index}`}
+                className={`recommendation${style.warning ? " warning" : ""}`}
+              >
+                <span className="rec-icon">{style.icon}</span>
+                <div>
+                  <p>{item.text}</p>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
     </Page>
   );
 }

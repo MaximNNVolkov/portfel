@@ -17,6 +17,7 @@ import {
   aggregateByGroup, calculateReturns, resolveAssetGroup,
   type AssetGroup, type EngineContext, type PositionInput,
 } from './portfolio-engine.ts'
+import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
@@ -809,6 +810,29 @@ app.get('/api/portfolio/history', async (request, response) => {
   await withTransaction(db, (client) => recordSnapshot(client, userId))
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
+})
+
+// §24 (Этап 5): 4 базовых правила рекомендаций. Считаются на лету из текущего состояния
+// портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
+app.get('/api/recommendations', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const [positions, payouts] = await Promise.all([listPositions(db, userId), listPayouts(db, userId)])
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
+  const positionSnapshots: PositionSnapshot[] = positions.map((position) => {
+    const valuation = valuationById.get(position.id)
+    return {
+      id: position.id,
+      name: position.instrument.name,
+      group: valuation?.group ?? GROUP_LABELS[position.instrument.groupType] ?? 'Прочее',
+      issuer: position.instrument.issuer,
+      maturityDate: position.instrument.maturityDate,
+      valueBase: valuation?.valueBase ?? null,
+      pnlPercent: valuation?.pnlPercent ?? null,
+    }
+  })
+  const payoutSnapshots: PayoutSnapshot[] = payouts.map((payout) => ({ date: payout.date, amount: payout.amount, status: payout.status }))
+  response.json(buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots))
 })
 
 // ---------------------------------------------------------------------------
