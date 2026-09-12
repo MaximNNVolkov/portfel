@@ -209,6 +209,11 @@ type PortfolioSummary = {
     unavailable: { id: string; name: string; group: string; reason: string }[];
   };
 };
+type BrokerStatus = {
+  status: string;
+  lastSyncAt?: string;
+  lastError?: string;
+};
 // Офлайн-фолбэк (нет сети/бэкенда недоступен) — единственное место, где допустимо
 // пересчитывать эти показатели на фронте, поскольку Portfolio Engine недоступен вовсе.
 function localSummary(products: Product[], payments: Payment[]): PortfolioSummary {
@@ -555,6 +560,7 @@ function AppMvp() {
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
+  const [brokerStatus, setBrokerStatus] = useState<BrokerStatus | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
@@ -585,6 +591,7 @@ function AppMvp() {
     setApiOnline(false);
     setOcrSummary(null);
     setUserEmail(null);
+    setBrokerStatus(null);
     setToast("Сессия закончилась. Войдите снова.");
   }
 
@@ -600,6 +607,7 @@ function AppMvp() {
           historyResponse,
           summaryResponse,
           meResponse,
+          brokerResponse,
         ] = await Promise.all([
           fetch(`${apiUrl}/positions`, { headers }),
           fetch(`${apiUrl}/payouts`, { headers }),
@@ -607,6 +615,7 @@ function AppMvp() {
           fetch(`${apiUrl}/portfolio/history`, { headers }),
           fetch(`${apiUrl}/portfolio/summary`, { headers }),
           fetch(`${apiUrl}/auth/me`, { headers }),
+          fetch(`${apiUrl}/brokers/tinkoff`, { headers }),
         ]);
         if (
           productsResponse.status === 401 ||
@@ -614,7 +623,8 @@ function AppMvp() {
           transactionsResponse.status === 401 ||
           historyResponse.status === 401 ||
           summaryResponse.status === 401 ||
-          meResponse.status === 401
+          meResponse.status === 401 ||
+          brokerResponse.status === 401
         ) {
           expireSession();
           return;
@@ -625,7 +635,8 @@ function AppMvp() {
           !transactionsResponse.ok ||
           !historyResponse.ok ||
           !summaryResponse.ok ||
-          !meResponse.ok
+          !meResponse.ok ||
+          !brokerResponse.ok
         )
           throw new Error("API unavailable");
         setProducts((await productsResponse.json()) as Product[]);
@@ -634,6 +645,7 @@ function AppMvp() {
         setHistory((await historyResponse.json()) as Snapshot[]);
         setSummary((await summaryResponse.json()) as PortfolioSummary);
         setUserEmail((await meResponse.json()).email as string | null);
+        setBrokerStatus((await brokerResponse.json()) as BrokerStatus);
         setApiOnline(true);
       } catch {
         const saved = localStorage.getItem(storageKey);
@@ -678,6 +690,12 @@ function AppMvp() {
       headers: authHeaders,
     });
     if (response.ok) setSummary((await response.json()) as PortfolioSummary);
+  }
+  async function refreshBrokerStatus() {
+    const response = await fetch(`${apiUrl}/brokers/tinkoff`, {
+      headers: authHeaders,
+    });
+    if (response.ok) setBrokerStatus((await response.json()) as BrokerStatus);
   }
   async function addProduct(product: Product) {
     if (apiOnline) {
@@ -993,6 +1011,7 @@ function AppMvp() {
                 onHide={() => setHideAmounts(!hideAmounts)}
                 userEmail={userEmail}
                 apiOnline={apiOnline}
+                brokerStatus={brokerStatus}
               />
             }
           />
@@ -1092,7 +1111,12 @@ function AppMvp() {
             path="/recommendations"
             element={<Recommendations token={token} />}
           />
-          <Route path="/integrations" element={<Integrations token={token} />} />
+          <Route
+            path="/integrations"
+            element={
+              <Integrations token={token} onStatusChange={refreshBrokerStatus} />
+            }
+          />
           <Route
             path="/settings"
             element={
@@ -1134,6 +1158,7 @@ function Dashboard({
   onHide,
   userEmail,
   apiOnline,
+  brokerStatus,
 }: {
   summary: PortfolioSummary | null;
   products: Product[];
@@ -1143,6 +1168,7 @@ function Dashboard({
   onHide: () => void;
   userEmail: string | null;
   apiOnline: boolean;
+  brokerStatus: BrokerStatus | null;
 }) {
   const navigate = useNavigate();
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
@@ -1162,6 +1188,8 @@ function Dashboard({
     .format(new Date())
     .toUpperCase();
   const displayName = userEmail?.split("@")[0] || "";
+  const brokerDegraded = brokerStatus?.status === "error";
+  const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
   if (products.length === 0) {
     return (
       <div className="content-wrap">
@@ -1228,11 +1256,35 @@ function Dashboard({
             {display(total)}
             <span className="total-currency">RUB</span>
           </div>
+          {brokerHasCache && (
+            <p className="muted">
+              Данные неполные — показано по состоянию на{" "}
+              {new Date(brokerStatus!.lastSyncAt!).toLocaleString("ru-RU")}.
+            </p>
+          )}
+          {brokerDegraded && !brokerHasCache && (
+            <p className="muted">Данные неполные — брокер недоступен.</p>
+          )}
           <div className="profit-line">
             <span className="positive-pill">↗ {display(profit)}</span>
             <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
             <span className="muted">за всё время</span>
           </div>
+          {brokerHasCache && (
+            <div className="demo-note">
+              ⚠ Данные от брокера «Т-Инвестиции» по состоянию на{" "}
+              {new Date(brokerStatus!.lastSyncAt!).toLocaleString("ru-RU")}.
+              Не удалось обновить.{" "}
+              <Link to="/integrations">Повторить попытку</Link>
+            </div>
+          )}
+          {brokerDegraded && !brokerHasCache && (
+            <div className="demo-note">
+              ⚠ Не удалось загрузить данные от брокера «Т-Инвестиции».
+              Показана только доступная часть портфеля.{" "}
+              <Link to="/integrations">Повторить подключение</Link>
+            </div>
+          )}
           {valuation.incomplete && (
             <div className="demo-note">
               ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
@@ -2307,7 +2359,13 @@ function Settings({
     </Page>
   );
 }
-function Integrations({ token }: { token: string }) {
+function Integrations({
+  token,
+  onStatusChange,
+}: {
+  token: string;
+  onStatusChange: () => void;
+}) {
   const [brokerToken, setBrokerToken] = useState("");
   const [status, setStatus] = useState("disconnected");
   const [maskedToken, setMaskedToken] = useState("");
@@ -2330,6 +2388,7 @@ function Integrations({ token }: { token: string }) {
     setMaskedToken(result.maskedToken || "");
     setLastSyncAt(result.lastSyncAt);
     setLastError(result.lastError);
+    onStatusChange();
   };
 
   useEffect(() => {
