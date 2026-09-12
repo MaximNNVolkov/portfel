@@ -1129,7 +1129,7 @@ function AppMvp() {
           <Route
             path="/analytics"
             element={
-              <AnalyticsPage summary={summary} />
+              <AnalyticsPage summary={summary} token={token} />
             }
           />
           <Route
@@ -2239,9 +2239,114 @@ function ProductDetailPage({
     </Page>
   );
 }
-function AnalyticsPage({ summary }: { summary: PortfolioSummary | null }) {
+// §23: разрезы структуры портфеля помимо класса активов (тот уже покрыт `groups` выше,
+// приходит вместе с /api/portfolio/summary). Зеркалит Breakdown из server/portfolio-engine.ts.
+type StructureBreakdown = {
+  key: string;
+  invested: number;
+  value: number;
+  pnl: number;
+  pnlPercent: number | null;
+  share: number | null;
+  positions: number;
+  priceUnavailable: number;
+};
+type PortfolioStructure = {
+  byCurrency: StructureBreakdown[];
+  byBroker: StructureBreakdown[];
+  byBank: StructureBreakdown[];
+  byInstrument: StructureBreakdown[];
+  byIssuer: StructureBreakdown[];
+};
+
+function BreakdownList({
+  title,
+  items,
+  emptyHint,
+}: {
+  title: string;
+  items: StructureBreakdown[];
+  emptyHint: string;
+}) {
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
+  return (
+    <article className="allocation-card">
+      <div className="section-heading compact">
+        <div>
+          <h2>{title}</h2>
+          <p>{items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}</p>
+        </div>
+      </div>
+      {items.length > 0 && (
+        <div className="list-card">
+          {visible.map((item) => {
+            const pnl = pnlDisplay(item.value, item.invested);
+            return (
+              <div className="list-row" key={item.key}>
+                <div className="list-row-summary list-row-static">
+                  <div className="list-row-main">
+                    <strong>{item.key}</strong>
+                    {item.priceUnavailable > 0 && (
+                      <small className="danger-text">
+                        {" "}
+                        · цена недоступна ({item.priceUnavailable})
+                      </small>
+                    )}
+                  </div>
+                  <div className="list-row-value">
+                    <strong>{money(item.value)}</strong>
+                    <small className={pnl.className}>
+                      {Math.round(item.share ?? 0)}% · {pnl.percentText}
+                    </small>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          <ListPagination
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
+          />
+        </div>
+      )}
+    </article>
+  );
+}
+
+function AnalyticsPage({
+  summary,
+  token,
+}: {
+  summary: PortfolioSummary | null;
+  token: string;
+}) {
   const { total, profitPercent, groups } = summary ?? localSummary([], []);
   const bonds = groups.find((groupSummary) => groupSummary.group === "Облигации");
+  const [structure, setStructure] = useState<PortfolioStructure | null>(null);
+  const [structureError, setStructureError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const response = await fetch(`${apiUrl}/portfolio/structure`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("Не удалось загрузить структуру портфеля");
+        const result = (await response.json()) as PortfolioStructure;
+        if (!cancelled) setStructure(result);
+      } catch {
+        if (!cancelled) setStructureError("Не удалось загрузить структуру портфеля");
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   return (
     <Page title="Аналитика" subtitle="Базовые показатели портфеля">
       <div className="analytics-grid">
@@ -2271,6 +2376,28 @@ function AnalyticsPage({ summary }: { summary: PortfolioSummary | null }) {
           </p>
         </div>
       </div>
+      {structureError && <p className="form-error">{structureError}</p>}
+      {structure && (
+        <>
+          <BreakdownList title="По валютам" items={structure.byCurrency} emptyHint="Нет данных" />
+          <BreakdownList
+            title="По брокерам"
+            items={structure.byBroker}
+            emptyHint="Нет счетов с типом «брокер»"
+          />
+          <BreakdownList
+            title="По банкам"
+            items={structure.byBank}
+            emptyHint="Нет счетов с типом «банк»"
+          />
+          <BreakdownList title="По инструментам" items={structure.byInstrument} emptyHint="Нет данных" />
+          <BreakdownList
+            title="По эмитентам"
+            items={structure.byIssuer}
+            emptyHint="Эмитент не указан ни у одного инструмента"
+          />
+        </>
+      )}
     </Page>
   );
 }
