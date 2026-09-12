@@ -261,6 +261,56 @@ export function aggregateByGroup(positions: PositionInput[], context: EngineCont
 }
 
 // ---------------------------------------------------------------------------
+// Произвольные разрезы структуры портфеля (§23): по валютам, брокерам, банкам,
+// инструментам, эмитентам. По классам активов — уже покрыто aggregateByGroup выше.
+// ---------------------------------------------------------------------------
+
+export type KeyedValuation = { key: string; investedBase: number | null; valueBase: number | null; priceUnavailable: boolean }
+
+export type Breakdown = {
+  key: string
+  invested: number
+  value: number
+  pnl: number
+  pnlPercent: number | null
+  /** Доля разреза в портфеле, % от суммарной оценённой стоимости. null, если стоимость неизвестна. */
+  share: number | null
+  positions: number
+  priceUnavailable: number
+}
+
+/**
+ * Группировка уже оценённых позиций (§10.1) по произвольному ключу (валюта, эмитент,
+ * провайдер и т.п.) — та же арифметика сумм/долей, что и aggregateByGroup, но без
+ * привязки к группам активов, чтобы не дублировать её для каждого нового разреза §23.
+ */
+export function aggregateByKey(items: KeyedValuation[]): Breakdown[] {
+  const buckets = new Map<string, Breakdown>()
+  let totalValue = 0
+  for (const item of items) {
+    const bucket = buckets.get(item.key) ?? { key: item.key, invested: 0, value: 0, pnl: 0, pnlPercent: null, share: null, positions: 0, priceUnavailable: 0 }
+    bucket.positions += 1
+    if (item.investedBase !== null) bucket.invested += item.investedBase
+    if (item.valueBase !== null) { bucket.value += item.valueBase; totalValue += item.valueBase }
+    if (item.priceUnavailable) bucket.priceUnavailable += 1
+    buckets.set(item.key, bucket)
+  }
+  const list = [...buckets.values()].map((bucket) => {
+    const pnl = bucket.value - bucket.invested
+    return {
+      ...bucket,
+      invested: round2(bucket.invested) as number,
+      value: round2(bucket.value) as number,
+      pnl: round2(pnl) as number,
+      pnlPercent: bucket.invested > 0 ? round4((pnl / bucket.invested) * 100) : null,
+    }
+  })
+  for (const bucket of list) bucket.share = totalValue > 0 ? round4((bucket.value / totalValue) * 100) : null
+  list.sort((left, right) => right.value - left.value)
+  return list
+}
+
+// ---------------------------------------------------------------------------
 // Финансовый результат и доходность (§10.6)
 // ---------------------------------------------------------------------------
 

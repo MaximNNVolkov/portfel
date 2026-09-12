@@ -15,8 +15,8 @@ import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexLastPrice } from './market-data.ts'
 import {
-  aggregateByGroup, calculateReturns, resolveAssetGroup,
-  type AssetGroup, type EngineContext, type PositionInput,
+  aggregateByGroup, aggregateByKey, calculateReturns, resolveAssetGroup,
+  type AssetGroup, type Breakdown, type EngineContext, type KeyedValuation, type PositionInput,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
@@ -861,6 +861,35 @@ app.get('/api/portfolio/history', async (request, response) => {
   await withTransaction(db, (client) => recordSnapshot(client, userId))
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
+})
+
+// §23: структура портфеля по разрезам, отличным от класса активов (тот уже отдаёт
+// /api/portfolio/summary как groups). Провайдер счёта (§11 Account.type) разводит
+// «по брокерам» и «по банкам» на два независимых разреза одних и тех же provider-имён.
+app.get('/api/portfolio/structure', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const positions = await listPositions(db, userId)
+  const context = await engineContext()
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), context)
+  const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
+  const keyed = (keyOf: (position: Position) => string | null): KeyedValuation[] =>
+    positions
+      .map((position) => ({ key: keyOf(position), valuation: valuationById.get(position.id) }))
+      .filter((item): item is { key: string; valuation: typeof item.valuation } => item.key !== null)
+      .map(({ key, valuation }) => ({
+        key,
+        investedBase: valuation?.investedBase ?? null,
+        valueBase: valuation?.valueBase ?? null,
+        priceUnavailable: valuation?.priceUnavailable ?? true,
+      }))
+  const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf))
+  response.json({
+    byCurrency: breakdown((position) => position.instrument.currency || 'RUB'),
+    byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
+    byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
+    byInstrument: breakdown((position) => position.instrument.name),
+    byIssuer: breakdown((position) => position.instrument.issuer || null),
+  })
 })
 
 // §24 (Этап 5): 4 базовых правила рекомендаций. Считаются на лету из текущего состояния
