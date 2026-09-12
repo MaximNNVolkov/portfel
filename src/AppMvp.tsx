@@ -454,6 +454,67 @@ const dateLabel = (date: string) =>
     .replace(".", "");
 const fullDate = (date: string) =>
   new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
+function pnlDisplay(current: number, invested: number) {
+  const diff = current - invested;
+  const percent = pct(diff, invested);
+  const positive = diff >= 0;
+  const sign = positive ? "+" : "";
+  return {
+    className: positive ? "teal-text" : "danger-text",
+    amountText: `${sign}${money(diff)}`,
+    percentText: `${sign}${percent.toFixed(1).replace(".", ",")}%`,
+  };
+}
+const sourceLabels: Record<string, string> = {
+  manual: "Ручной ввод",
+  ocr: "Со скриншота",
+  broker: "Т-Инвестиции",
+};
+function usePagedList<T>(items: T[], initial = 20) {
+  const [visibleCount, setVisibleCount] = useState(initial);
+  return {
+    visible: items.slice(0, visibleCount),
+    hasMore: items.length > visibleCount,
+    loadMore: () => setVisibleCount((count) => count + 20),
+    pageSize: visibleCount,
+    setPageSize: setVisibleCount,
+  };
+}
+function ListPagination({
+  hasMore,
+  onLoadMore,
+  pageSize,
+  onPageSizeChange,
+}: {
+  hasMore: boolean;
+  onLoadMore: () => void;
+  pageSize: number;
+  onPageSizeChange: (size: number) => void;
+}) {
+  const bucket = pageSize <= 20 ? 20 : pageSize <= 50 ? 50 : 100;
+  return (
+    <div className="list-pagination">
+      {hasMore ? (
+        <button className="outline-button" type="button" onClick={onLoadMore}>
+          Загрузить ещё
+        </button>
+      ) : (
+        <span />
+      )}
+      <label className="page-size-select">
+        <span>Показывать по</span>
+        <select
+          value={bucket}
+          onChange={(event) => onPageSizeChange(Number(event.target.value))}
+        >
+          <option value={20}>20</option>
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+        </select>
+      </label>
+    </div>
+  );
+}
 function chartPath(history: Snapshot[], close = false) {
   if (!history.length) return "";
   const max = Math.max(...history.map((point) => point.value), 1);
@@ -927,6 +988,16 @@ function AppMvp() {
             element={<ProductsPage products={products} />}
           />
           <Route
+            path="/products/:id"
+            element={
+              <ProductDetailPage
+                products={products}
+                transactions={transactions}
+                payments={payments}
+              />
+            }
+          />
+          <Route
             path="/products/new"
             element={
               <ProductFormPage
@@ -1332,6 +1403,8 @@ function Dashboard({
 }
 
 function ProductsPage({ products }: { products: Product[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(products);
   return (
     <Page title="Инструменты" subtitle="Все продукты в вашем портфеле">
       <div className="toolbar">
@@ -1342,69 +1415,122 @@ function ProductsPage({ products }: { products: Product[] }) {
           Фильтр: все типы⌄
         </button>
       </div>
-      <div className="table-card">
-        <div className="table-head">
-          <span>Название</span>
-          <span>Тип</span>
-          <span>Стоимость</span>
-          <span>Доходность</span>
-          <span>Действия</span>
+      {products.length === 0 ? (
+        <p className="muted">Пока нет добавленных инструментов.</p>
+      ) : (
+        <div className="list-card">
+          {visible.map((product) => {
+            const expanded = expandedId === product.id;
+            const pnl = pnlDisplay(product.amount, product.invested);
+            return (
+              <div className="list-row" key={product.id}>
+                <button
+                  type="button"
+                  className="list-row-summary"
+                  aria-expanded={expanded}
+                  onClick={() => setExpandedId(expanded ? null : product.id)}
+                >
+                  <span className="list-row-main">
+                    <strong>{product.name}</strong>
+                    <span className={`type-tag ${typeColors[product.type]}`}>
+                      {product.type}
+                    </span>
+                  </span>
+                  <span className="list-row-value">
+                    <strong>{money(product.amount)}</strong>
+                    <small className={pnl.className}>{pnl.percentText}</small>
+                  </span>
+                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
+                </button>
+                {expanded && (
+                  <div className="list-row-details">
+                    <div className="detail-line">
+                      <span>Тикер / ISIN</span>
+                      <span>
+                        {product.ticker || "—"}
+                        {product.isin ? ` · ${product.isin}` : ""}
+                      </span>
+                    </div>
+                    <div className="detail-line">
+                      <span>Банк / брокер</span>
+                      <span>{product.institution || "—"} · {product.currency}</span>
+                    </div>
+                    <div className="detail-line">
+                      <span>Дата открытия/покупки</span>
+                      <span>{fullDate(product.date)}</span>
+                    </div>
+                    {product.type === "Облигации" &&
+                      (product.maturityDate || product.couponRate !== undefined) && (
+                        <div className="detail-line">
+                          <span>Купон / погашение</span>
+                          <span>
+                            {product.maturityDate
+                              ? `Погашение ${fullDate(product.maturityDate)}`
+                              : ""}
+                            {product.maturityDate && product.couponRate !== undefined
+                              ? " · "
+                              : ""}
+                            {product.couponRate !== undefined
+                              ? `купон ${product.couponRate}%`
+                              : ""}
+                          </span>
+                        </div>
+                      )}
+                    {product.type === "Вклады" && product.rate !== undefined && (
+                      <div className="detail-line">
+                        <span>Ставка</span>
+                        <span>
+                          {product.rate}%
+                          {product.termEndDate ? ` · до ${fullDate(product.termEndDate)}` : ""}
+                        </span>
+                      </div>
+                    )}
+                    {(product.type === "Акции" || product.type === "Фонды") &&
+                      product.quantity !== undefined && (
+                        <div className="detail-line">
+                          <span>Количество / цена</span>
+                          <span>
+                            {product.quantity} шт.
+                            {product.currentPrice !== undefined
+                              ? ` · тек. цена ${money(product.currentPrice)}`
+                              : " · текущая цена недоступна"}
+                          </span>
+                        </div>
+                      )}
+                    <div className="list-row-actions">
+                      <Link className="outline-button" to={`/products/${product.id}`}>
+                        Подробнее
+                      </Link>
+                      {product.source !== "broker" && (
+                        <>
+                          <Link
+                            className="outline-button"
+                            to={`/products/${product.id}/edit`}
+                          >
+                            Редактировать
+                          </Link>
+                          <Link
+                            className="delete-button"
+                            to={`/products/${product.id}/delete`}
+                          >
+                            Удалить
+                          </Link>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <ListPagination
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
+          />
         </div>
-        {products.map((product) => (
-          <div className="table-row" key={product.id}>
-            <div>
-              <strong>{product.name}</strong>
-              <small>
-                {product.ticker || product.institution} · {product.currency}
-              </small>
-              {product.type === "Облигации" && (product.maturityDate || product.couponRate !== undefined) && (
-                <small>
-                  {product.maturityDate ? `Погашение ${fullDate(product.maturityDate)}` : ""}
-                  {product.maturityDate && product.couponRate !== undefined ? " · " : ""}
-                  {product.couponRate !== undefined ? `купон ${product.couponRate}%` : ""}
-                </small>
-              )}
-              {product.type === "Вклады" && product.rate !== undefined && (
-                <small>
-                  Ставка {product.rate}%
-                  {product.termEndDate ? ` · до ${fullDate(product.termEndDate)}` : ""}
-                </small>
-              )}
-              {(product.type === "Акции" || product.type === "Фонды") && product.quantity !== undefined && (
-                <small>
-                  {product.quantity} шт.
-                  {product.currentPrice !== undefined ? ` · тек. цена ${money(product.currentPrice)}` : " · текущая цена недоступна"}
-                </small>
-              )}
-            </div>
-            <span className={`type-tag ${typeColors[product.type]}`}>
-              {product.type}
-            </span>
-            <strong>{money(product.amount)}</strong>
-            <span className="teal-text">
-              +
-              {pct(product.amount - product.invested, product.invested)
-                .toFixed(1)
-                .replace(".", ",")}
-              %
-            </span>
-            <div className="row-actions">
-              <Link
-                className="outline-button"
-                to={`/products/${product.id}/edit`}
-              >
-                Редактировать
-              </Link>
-              <Link
-                className="delete-button"
-                to={`/products/${product.id}/delete`}
-              >
-                Удалить
-              </Link>
-            </div>
-          </div>
-        ))}
-      </div>
+      )}
     </Page>
   );
 }
@@ -1415,6 +1541,8 @@ function TransactionsPage({
   transactions: Transaction[];
   products: Product[];
 }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(transactions);
   return (
     <Page title="Операции" subtitle="История пополнений, покупок и выплат">
       <div className="toolbar">
@@ -1422,50 +1550,84 @@ function TransactionsPage({
           ＋ Новая операция
         </Link>
       </div>
-      <div className="table-card">
-        <div className="table-head">
-          <span>Операция</span>
-          <span>Тип</span>
-          <span>Сумма</span>
-          <span>Дата</span>
-          <span>Действия</span>
+      {transactions.length === 0 ? (
+        <p className="muted">Пока нет операций.</p>
+      ) : (
+        <div className="list-card">
+          {visible.map((transaction) => {
+            const expanded = expandedId === transaction.id;
+            const position = products.find(
+              (product) => product.id === transaction.positionId,
+            );
+            return (
+              <div className="list-row" key={transaction.id}>
+                <button
+                  type="button"
+                  className="list-row-summary"
+                  aria-expanded={expanded}
+                  onClick={() => setExpandedId(expanded ? null : transaction.id)}
+                >
+                  <span className="list-row-main">
+                    <strong>{transaction.title}</strong>
+                    <span className="type-tag teal">
+                      {transactionTypeLabels[transaction.type]}
+                    </span>
+                  </span>
+                  <span className="list-row-value">
+                    <strong>{money(transaction.amount)}</strong>
+                    <small>{dateLabel(transaction.date)}</small>
+                  </span>
+                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
+                </button>
+                {expanded && (
+                  <div className="list-row-details">
+                    <div className="detail-line">
+                      <span>Инструмент</span>
+                      <span>{position?.name || "Портфель Основной"}</span>
+                    </div>
+                    <div className="detail-line">
+                      <span>Дата</span>
+                      <span>{fullDate(transaction.date)}</span>
+                    </div>
+                    {transaction.currency && (
+                      <div className="detail-line">
+                        <span>Валюта</span>
+                        <span>{transaction.currency}</span>
+                      </div>
+                    )}
+                    <div className="list-row-actions">
+                      <Link
+                        className="outline-button"
+                        to={`/transactions/${transaction.id}/edit`}
+                      >
+                        Редактировать
+                      </Link>
+                      <Link
+                        className="delete-button"
+                        to={`/transactions/${transaction.id}/delete`}
+                      >
+                        Удалить
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <ListPagination
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
+          />
         </div>
-        {transactions.map((transaction) => (
-          <div className="table-row" key={transaction.id}>
-            <div>
-              <strong>{transaction.title}</strong>
-              <small>
-                {products.find(
-                  (product) => product.id === transaction.positionId,
-                )?.name || "Портфель Основной"}
-              </small>
-            </div>
-            <span className="type-tag teal">
-              {transactionTypeLabels[transaction.type]}
-            </span>
-            <strong>{money(transaction.amount)}</strong>
-            <span>{dateLabel(transaction.date)}</span>
-            <div className="row-actions">
-              <Link
-                className="outline-button"
-                to={`/transactions/${transaction.id}/edit`}
-              >
-                Редактировать
-              </Link>
-              <Link
-                className="delete-button"
-                to={`/transactions/${transaction.id}/delete`}
-              >
-                Удалить
-              </Link>
-            </div>
-          </div>
-        ))}
-      </div>
+      )}
     </Page>
   );
 }
 function PaymentsPage({ payments }: { payments: Payment[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(payments);
   return (
     <Page title="Выплаты" subtitle="Календарь ожидаемых доходов">
       <div className="toolbar">
@@ -1473,33 +1635,251 @@ function PaymentsPage({ payments }: { payments: Payment[] }) {
           ＋ Добавить выплату
         </Link>
       </div>
-      <div className="payment-grid">
-        {payments.map((payment) => (
-          <article className="payment-large" key={payment.id}>
-            <div className="date-box">
-              <strong>{dateLabel(payment.date).split(" ")[0]}</strong>
-              <small>
-                {dateLabel(payment.date).split(" ")[1]?.toUpperCase()}
-              </small>
-            </div>
-            <div>
-              <strong>{payment.title}</strong>
-              <p>
-                {payoutTypeLabels[payment.type]} · {dateLabel(payment.date)}
-              </p>
-            </div>
-            <b>+{money(payment.amount)}</b>
-            <div className="row-actions">
-              <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
-                Редактировать
-              </Link>
-              <Link className="delete-button" to={`/payments/${payment.id}/delete`}>
-                Удалить
-              </Link>
-            </div>
-          </article>
-        ))}
+      {payments.length === 0 ? (
+        <p className="muted">Пока нет добавленных выплат.</p>
+      ) : (
+        <div className="list-card">
+          {visible.map((payment) => {
+            const expanded = expandedId === payment.id;
+            return (
+              <div className="list-row" key={payment.id}>
+                <button
+                  type="button"
+                  className="list-row-summary"
+                  aria-expanded={expanded}
+                  onClick={() => setExpandedId(expanded ? null : payment.id)}
+                >
+                  <span className="list-row-main">
+                    <strong>{payment.title}</strong>
+                    <span className="type-tag teal">
+                      {payoutTypeLabels[payment.type]}
+                    </span>
+                  </span>
+                  <span className="list-row-value">
+                    <strong>+{money(payment.amount)}</strong>
+                    <small>{dateLabel(payment.date)}</small>
+                  </span>
+                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
+                </button>
+                {expanded && (
+                  <div className="list-row-details">
+                    <div className="detail-line">
+                      <span>Статус</span>
+                      <span>{payoutStatusLabels[payment.status]}</span>
+                    </div>
+                    <div className="detail-line">
+                      <span>Дата</span>
+                      <span>{fullDate(payment.date)}</span>
+                    </div>
+                    <div className="detail-line">
+                      <span>Валюта</span>
+                      <span>{payment.currency}</span>
+                    </div>
+                    <div className="list-row-actions">
+                      <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
+                        Редактировать
+                      </Link>
+                      <Link className="delete-button" to={`/payments/${payment.id}/delete`}>
+                        Удалить
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <ListPagination
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
+          />
+        </div>
+      )}
+    </Page>
+  );
+}
+function ProductDetailPage({
+  products,
+  transactions,
+  payments,
+}: {
+  products: Product[];
+  transactions: Transaction[];
+  payments: Payment[];
+}) {
+  const { id } = useParams();
+  const product = products.find((item) => item.id === id);
+  if (!product) return <Navigate to="/products" replace />;
+  const relatedTransactions = transactions.filter(
+    (transaction) => transaction.positionId === product.id,
+  );
+  const relatedPayments = product.instrumentId
+    ? payments.filter((payment) => payment.instrumentId === product.instrumentId)
+    : [];
+  const received = relatedPayments
+    .filter((payment) => payment.status === "received")
+    .reduce((sum, payment) => sum + payment.amount, 0);
+  const expected = relatedPayments
+    .filter((payment) => payment.status === "expected")
+    .reduce((sum, payment) => sum + payment.amount, 0);
+  const pnl = pnlDisplay(product.amount, product.invested);
+  return (
+    <Page title={product.name} subtitle="Карточка инструмента" back>
+      <div className="confirm-card">
+        <div className="detail-line">
+          <span>Тип</span>
+          <span className={`type-tag ${typeColors[product.type]}`}>{product.type}</span>
+        </div>
+        <div className="detail-line">
+          <span>Тикер</span>
+          <span>{product.ticker || "—"}</span>
+        </div>
+        <div className="detail-line">
+          <span>ISIN</span>
+          <span>{product.isin || "—"}</span>
+        </div>
+        <div className="detail-line">
+          <span>Банк / брокер</span>
+          <span>{product.institution || "—"}</span>
+        </div>
+        <div className="detail-line">
+          <span>Валюта</span>
+          <span>{product.currency}</span>
+        </div>
+        {product.quantity !== undefined && (
+          <div className="detail-line">
+            <span>Количество</span>
+            <span>{product.quantity}</span>
+          </div>
+        )}
+        <div className="detail-line">
+          <span>Вложено</span>
+          <span>{money(product.invested)}</span>
+        </div>
+        {product.averagePrice !== undefined && (
+          <div className="detail-line">
+            <span>Средняя цена</span>
+            <span>{money(product.averagePrice)}</span>
+          </div>
+        )}
+        <div className="detail-line">
+          <span>Текущая цена</span>
+          <span>
+            {product.currentPrice !== undefined
+              ? money(product.currentPrice)
+              : "Актуальная цена недоступна"}
+          </span>
+        </div>
+        <div className="detail-line">
+          <span>Текущая стоимость</span>
+          <span>{money(product.amount)}</span>
+        </div>
+        <div className="detail-line">
+          <span>Нереализованный P&L</span>
+          <span className={pnl.className}>
+            {pnl.amountText} ({pnl.percentText})
+          </span>
+        </div>
+        <div className="detail-line">
+          <span>Выплаты получено</span>
+          <span>{money(received)}</span>
+        </div>
+        <div className="detail-line">
+          <span>Выплаты ожидается</span>
+          <span>{money(expected)}</span>
+        </div>
+        <div className="detail-line">
+          <span>Дата покупки / открытия</span>
+          <span>{fullDate(product.date)}</span>
+        </div>
+        {product.maturityDate && (
+          <div className="detail-line">
+            <span>Дата погашения</span>
+            <span>{fullDate(product.maturityDate)}</span>
+          </div>
+        )}
+        {product.ofertaDate && (
+          <div className="detail-line">
+            <span>Оферта</span>
+            <span>{fullDate(product.ofertaDate)}</span>
+          </div>
+        )}
+        {product.termEndDate && (
+          <div className="detail-line">
+            <span>Окончание вклада</span>
+            <span>{fullDate(product.termEndDate)}</span>
+          </div>
+        )}
+        <div className="detail-line">
+          <span>Источник данных</span>
+          <span>{sourceLabels[product.source] || product.source}</span>
+        </div>
+        {product.source !== "broker" && (
+          <div className="confirm-actions">
+            <Link className="outline-button" to={`/products/${product.id}/edit`}>
+              Редактировать
+            </Link>
+            <Link className="delete-button" to={`/products/${product.id}/delete`}>
+              Удалить
+            </Link>
+          </div>
+        )}
       </div>
+      <div className="section-heading compact">
+        <div>
+          <h2>История операций</h2>
+        </div>
+      </div>
+      {relatedTransactions.length === 0 ? (
+        <p className="muted">Операций по этому инструменту пока нет.</p>
+      ) : (
+        <div className="list-card">
+          {relatedTransactions.map((transaction) => (
+            <div className="list-row" key={transaction.id}>
+              <div className="list-row-summary list-row-static">
+                <span className="list-row-main">
+                  <strong>{transaction.title}</strong>
+                  <span className="type-tag teal">
+                    {transactionTypeLabels[transaction.type]}
+                  </span>
+                </span>
+                <span className="list-row-value">
+                  <strong>{money(transaction.amount)}</strong>
+                  <small>{dateLabel(transaction.date)}</small>
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="section-heading compact">
+        <div>
+          <h2>История выплат</h2>
+        </div>
+      </div>
+      {relatedPayments.length === 0 ? (
+        <p className="muted">Выплат по этому инструменту пока нет.</p>
+      ) : (
+        <div className="list-card">
+          {relatedPayments.map((payment) => (
+            <div className="list-row" key={payment.id}>
+              <div className="list-row-summary list-row-static">
+                <span className="list-row-main">
+                  <strong>{payoutTypeLabels[payment.type]}</strong>
+                  <span className="type-tag teal">
+                    {payoutStatusLabels[payment.status]}
+                  </span>
+                </span>
+                <span className="list-row-value">
+                  <strong>+{money(payment.amount)}</strong>
+                  <small>{dateLabel(payment.date)}</small>
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </Page>
   );
 }
