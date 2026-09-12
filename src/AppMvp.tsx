@@ -481,6 +481,7 @@ function AppMvp() {
   const [apiOnline, setApiOnline] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
     () => (localStorage.getItem(themeKey) as ThemePreference | null) || "system",
@@ -509,6 +510,7 @@ function AppMvp() {
     setToken("");
     setApiOnline(false);
     setOcrSummary(null);
+    setUserEmail(null);
     setToast("Сессия закончилась. Войдите снова.");
   }
 
@@ -523,19 +525,22 @@ function AppMvp() {
           transactionsResponse,
           historyResponse,
           summaryResponse,
+          meResponse,
         ] = await Promise.all([
           fetch(`${apiUrl}/positions`, { headers }),
           fetch(`${apiUrl}/payouts`, { headers }),
           fetch(`${apiUrl}/transactions`, { headers }),
           fetch(`${apiUrl}/portfolio/history`, { headers }),
           fetch(`${apiUrl}/portfolio/summary`, { headers }),
+          fetch(`${apiUrl}/auth/me`, { headers }),
         ]);
         if (
           productsResponse.status === 401 ||
           paymentsResponse.status === 401 ||
           transactionsResponse.status === 401 ||
           historyResponse.status === 401 ||
-          summaryResponse.status === 401
+          summaryResponse.status === 401 ||
+          meResponse.status === 401
         ) {
           expireSession();
           return;
@@ -545,7 +550,8 @@ function AppMvp() {
           !paymentsResponse.ok ||
           !transactionsResponse.ok ||
           !historyResponse.ok ||
-          !summaryResponse.ok
+          !summaryResponse.ok ||
+          !meResponse.ok
         )
           throw new Error("API unavailable");
         setProducts((await productsResponse.json()) as Product[]);
@@ -553,6 +559,7 @@ function AppMvp() {
         setTransactions((await transactionsResponse.json()) as Transaction[]);
         setHistory((await historyResponse.json()) as Snapshot[]);
         setSummary((await summaryResponse.json()) as PortfolioSummary);
+        setUserEmail((await meResponse.json()).email as string | null);
         setApiOnline(true);
       } catch {
         const saved = localStorage.getItem(storageKey);
@@ -799,6 +806,7 @@ function AppMvp() {
     setToken("");
     setApiOnline(false);
     setOcrSummary(null);
+    setUserEmail(null);
   }
   async function deleteAccount() {
     const response = await fetch(`${apiUrl}/auth/me`, {
@@ -816,6 +824,7 @@ function AppMvp() {
     setToken("");
     setApiOnline(false);
     setOcrSummary(null);
+    setUserEmail(null);
     navigate("/portfolio");
   }
 
@@ -909,6 +918,8 @@ function AppMvp() {
                 history={history}
                 hideAmounts={hideAmounts}
                 onHide={() => setHideAmounts(!hideAmounts)}
+                userEmail={userEmail}
+                apiOnline={apiOnline}
               />
             }
           />
@@ -1038,6 +1049,8 @@ function Dashboard({
   history,
   hideAmounts,
   onHide,
+  userEmail,
+  apiOnline,
 }: {
   summary: PortfolioSummary | null;
   products: Product[];
@@ -1045,6 +1058,8 @@ function Dashboard({
   history: Snapshot[];
   hideAmounts: boolean;
   onHide: () => void;
+  userEmail: string | null;
+  apiOnline: boolean;
 }) {
   const navigate = useNavigate();
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
@@ -1055,6 +1070,15 @@ function Dashboard({
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
   const { total, invested, profit, profitPercent, paid, expected, groups, valuation } =
     summary ?? localSummary(products, payments);
+  const todayLabel = new Intl.DateTimeFormat("ru-RU", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  })
+    .format(new Date())
+    .toUpperCase();
+  const displayName = userEmail?.split("@")[0] || "";
   if (products.length === 0) {
     return (
       <div className="content-wrap">
@@ -1092,9 +1116,9 @@ function Dashboard({
     <div className="content-wrap">
       <section className="page-heading">
         <div>
-          <p className="eyebrow">СРЕДА, 6 СЕНТЯБРЯ 2026</p>
+          <p className="eyebrow">{todayLabel}</p>
           <h1>
-            Добрый день, Максим <span>✦</span>
+            Добрый день{displayName ? `, ${displayName}` : ""} <span>✦</span>
           </h1>
           <p className="subtitle">
             Вот как чувствует себя ваш капитал сегодня.
@@ -1297,10 +1321,13 @@ function Dashboard({
           </button>
         </article>
       </section>
-      <div className="demo-note">
-        <span>✦</span> Данные сохраняются в браузере. Подключение API брокера и
-        OCR добавим следующим техническим этапом.
-      </div>
+      {!apiOnline && (
+        <div className="demo-note">
+          <span>✦</span> Нет связи с сервером — данные сохраняются только
+          в этом браузере. Подключение API брокера и загрузка скриншотов
+          станут доступны снова после восстановления связи.
+        </div>
+      )}
     </div>
   );
 }

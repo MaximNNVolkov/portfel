@@ -369,7 +369,10 @@ app.post('/api/auth/logout', async (request, response) => {
   await db.query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(authToken(request))])
   response.status(204).send()
 })
-app.get('/api/auth/me', async (request, response) => { if (!(await currentUserId(request, response))) return; response.json({ authenticated: true }) })
+app.get('/api/auth/me', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  response.json({ authenticated: true, email: users.get(userId)?.email ?? null })
+})
 app.delete('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   await withTransaction(db, (client) => deleteUserData(client, userId))
