@@ -618,7 +618,6 @@ function AppMvp() {
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
-    navigate("/products");
   }
   async function addPayment(payment: Payment) {
     if (apiOnline) {
@@ -1905,13 +1904,29 @@ function InstrumentDetailsFields({
   details: ProductDetails;
   onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
 }) {
-  if (type === "Деньги" || type === "Прочее") return null;
-  const showPosition = type === "Облигации" || type === "Акции" || type === "Фонды";
+  const fieldset = InstrumentDetailsFieldset({ type, details, onChange });
+  if (!fieldset) return null;
   return (
     <details className="details-block">
       <summary>Добавить дополнительные детали</summary>
-      <div className="details-fields">
-        {showPosition && (
+      <div className="details-fields">{fieldset}</div>
+    </details>
+  );
+}
+function InstrumentDetailsFieldset({
+  type,
+  details,
+  onChange,
+}: {
+  type: AssetType;
+  details: ProductDetails;
+  onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
+}) {
+  if (type === "Деньги" || type === "Прочее") return null;
+  const showPosition = type === "Облигации" || type === "Акции" || type === "Фонды";
+  return (
+    <>
+      {showPosition && (
           <>
             <label>
               ISIN
@@ -2091,10 +2106,21 @@ function InstrumentDetailsFields({
             </label>
           </>
         )}
-      </div>
-    </details>
+    </>
   );
 }
+const wizardTypeOptions: { value: AssetType; label: string; icon: string }[] = [
+  { value: "Вклады", label: "Вклад", icon: "🏦" },
+  { value: "Облигации", label: "Облигация", icon: "📜" },
+  { value: "Акции", label: "Акция", icon: "📈" },
+  { value: "Фонды", label: "ПИФ", icon: "🧺" },
+  { value: "Прочее", label: "Прочее", icon: "▧" },
+];
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function ProductFormPage({
   token,
   onUnauthorized,
@@ -2103,39 +2129,74 @@ function ProductFormPage({
 }: {
   token: string;
   onUnauthorized: () => void;
-  onSubmit: (product: Product) => void;
+  onSubmit: (product: Product) => Promise<void>;
   onOcrComplete: (result: OcrUploadResult) => void;
 }) {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"manual" | "screenshot">(
     searchParams.get("mode") === "screenshot" ? "screenshot" : "manual",
   );
-  const [type, setType] = useState<AssetType>("Облигации");
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [type, setType] = useState<AssetType | null>(null);
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayIsoDate);
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState("");
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
   const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
     setDetails((current) => ({ ...current, [key]: value }));
-  const submit = (event: FormEvent) => {
+  const resetWizard = () => {
+    setStep(1);
+    setType(null);
+    setName("");
+    setAmount("");
+    setDate(todayIsoDate());
+    setInvested("");
+    setInstitution("");
+    setDetails(emptyProductDetails);
+    setError("");
+    setSaved(false);
+  };
+  const selectType = (value: AssetType) => {
+    setType(value);
+    setStep(2);
+  };
+  const goToConfirm = (event: FormEvent) => {
     event.preventDefault();
-    onSubmit({
-      id: crypto.randomUUID(),
-      name,
-      type,
-      amount: Number(amount),
-      invested: Number(invested || amount),
-      ticker: "",
-      date: new Date().toISOString().slice(0, 10),
-      institution: institution || "Ручной ввод",
-      currency: "RUB",
-      source: "manual",
-      ...detailsToPayload(details),
-    });
+    setError("");
+    setStep(3);
+  };
+  const submit = async () => {
+    if (!type) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onSubmit({
+        id: crypto.randomUUID(),
+        name,
+        type,
+        amount: Number(amount),
+        invested: Number(invested || amount),
+        ticker: "",
+        date,
+        institution: institution || "Ручной ввод",
+        currency: "RUB",
+        source: "manual",
+        ...detailsToPayload(details),
+      });
+      setSaved(true);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Не удалось сохранить продукт");
+    } finally {
+      setSaving(false);
+    }
   };
   async function recognizeScreenshot() {
     if (!file) return;
@@ -2216,62 +2277,139 @@ function ProductFormPage({
           {error && <small className="form-error">{error}</small>}
         </div>
       )}
-      {mode === "manual" && (
-        <form className="modal-form" onSubmit={submit}>
-          <label>
-            Название
-            <input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Например, ОФЗ 26241"
-              required
-            />
-          </label>
-          <label>
-            Текущая стоимость
-            <input
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              type="number"
-              min="1"
-              placeholder="100000"
-              required
-            />
-          </label>
-          <label>
-            Первичная цена
-            <input
-              value={invested}
-              onChange={(event) => setInvested(event.target.value)}
-              type="number"
-              min="1"
-              placeholder="100000"
-            />
-          </label>
-          <label>
-            Банк или брокер
-            <input
-              value={institution}
-              onChange={(event) => setInstitution(event.target.value)}
-              placeholder="Необязательно"
-            />
-          </label>
-          <label>
-            Тип продукта
-            <select
-              value={type}
-              onChange={(event) => setType(event.target.value as AssetType)}
-            >
-              {Object.keys(typeColors).map((item) => (
-                <option key={item}>{item}</option>
+      {mode === "manual" && !saved && (
+        <>
+          <ol className="wizard-steps">
+            <li className={step >= 1 ? "done" : ""}>1. Тип</li>
+            <li className={step === 2 ? "active" : step > 2 ? "done" : ""}>2. Данные</li>
+            <li className={step === 3 ? "active" : ""}>3. Подтверждение</li>
+          </ol>
+          {step === 1 && (
+            <div className="type-grid">
+              {wizardTypeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="empty-option type-card"
+                  onClick={() => selectType(option.value)}
+                >
+                  <span className="empty-option-icon">{option.icon}</span>
+                  <strong>{option.label}</strong>
+                </button>
               ))}
-            </select>
-          </label>
-          <InstrumentDetailsFields type={type} details={details} onChange={updateDetail} />
-          <button className="primary-button" type="submit">
-            Сохранить продукт
-          </button>
-        </form>
+            </div>
+          )}
+          {step === 2 && type && (
+            <form className="modal-form" onSubmit={goToConfirm}>
+              <label>
+                Название
+                <input
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Например, ОФЗ 26241"
+                  autoFocus
+                  required
+                />
+              </label>
+              <label>
+                Сумма
+                <input
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  type="number"
+                  min="1"
+                  placeholder="100000"
+                  required
+                />
+              </label>
+              <label>
+                Дата
+                <input
+                  value={date}
+                  onChange={(event) => setDate(event.target.value)}
+                  type="date"
+                  required
+                />
+              </label>
+              <div className="wizard-actions">
+                <button type="button" className="outline-button" onClick={() => setStep(1)}>
+                  Назад
+                </button>
+                <button type="submit" className="primary-button">
+                  Далее
+                </button>
+              </div>
+            </form>
+          )}
+          {step === 3 && type && (
+            <div className="confirm-card">
+              <p>
+                <strong>{name}</strong>
+                <br />
+                {wizardTypeOptions.find((option) => option.value === type)?.label ?? type} ·{" "}
+                {amount} ₽ · {date}
+              </p>
+              <details className="details-block">
+                <summary>Добавить дополнительные детали</summary>
+                <div className="details-fields">
+                  <label>
+                    Банк или брокер
+                    <input
+                      value={institution}
+                      onChange={(event) => setInstitution(event.target.value)}
+                      placeholder="Необязательно"
+                    />
+                  </label>
+                  <label>
+                    Первичная цена
+                    <input
+                      value={invested}
+                      onChange={(event) => setInvested(event.target.value)}
+                      type="number"
+                      min="1"
+                      placeholder="100000"
+                    />
+                  </label>
+                  {InstrumentDetailsFieldset({ type, details, onChange: updateDetail })}
+                </div>
+              </details>
+              {error && <small className="form-error">{error}</small>}
+              <div className="wizard-actions">
+                <button
+                  type="button"
+                  className="outline-button"
+                  onClick={() => setStep(2)}
+                  disabled={saving}
+                >
+                  Назад
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void submit()}
+                  disabled={saving}
+                >
+                  {saving ? "Сохраняем..." : "Добавить"}
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {mode === "manual" && saved && (
+        <div className="confirm-card">
+          <p>
+            <strong>Продукт добавлен в портфель.</strong>
+          </p>
+          <div className="confirm-actions">
+            <button type="button" className="outline-button" onClick={resetWizard}>
+              Добавить ещё один актив
+            </button>
+            <button type="button" className="primary-button" onClick={() => navigate("/portfolio")}>
+              Перейти к портфелю
+            </button>
+          </div>
+        </div>
       )}
     </Page>
   );
