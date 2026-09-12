@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -514,6 +514,19 @@ function ListPagination({
       </label>
     </div>
   );
+}
+type PaymentViewMode = "day" | "month" | "year";
+function periodKey(date: string, mode: PaymentViewMode): string {
+  return mode === "year" ? date.slice(0, 4) : date.slice(0, 7);
+}
+function periodLabel(key: string, mode: PaymentViewMode): string {
+  if (mode === "year") return key;
+  const [year, month] = key.split("-").map(Number);
+  const formatted = new Intl.DateTimeFormat("ru-RU", {
+    month: "long",
+    year: "numeric",
+  }).format(new Date(year, month - 1, 1));
+  return formatted.charAt(0).toUpperCase() + formatted.slice(1);
 }
 function chartPath(history: Snapshot[], close = false) {
   if (!history.length) return "";
@@ -1051,7 +1064,7 @@ function AppMvp() {
           />
           <Route
             path="/payments"
-            element={<PaymentsPage payments={payments} />}
+            element={<PaymentsPage payments={payments} products={products} />}
           />
           <Route
             path="/payments/new"
@@ -1402,21 +1415,80 @@ function Dashboard({
   );
 }
 
+const PRODUCT_SORT_OPTIONS = {
+  value: "По стоимости",
+  return: "По доходности",
+  pnl: "По P&L",
+  maturity: "По дате погашения",
+} as const;
+type ProductSortKey = keyof typeof PRODUCT_SORT_OPTIONS;
+
+function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
+  const withIndex = products.map((product, index) => ({ product, index }));
+  withIndex.sort((a, b) => {
+    if (sortBy === "value") return b.product.amount - a.product.amount;
+    if (sortBy === "return") {
+      return pct(b.product.amount - b.product.invested, b.product.invested) -
+        pct(a.product.amount - a.product.invested, a.product.invested);
+    }
+    if (sortBy === "pnl") {
+      return (b.product.amount - b.product.invested) - (a.product.amount - a.product.invested);
+    }
+    // maturity: с ближайшей датой погашения впереди, без даты — в конец, исходный порядок сохраняется
+    if (!a.product.maturityDate && !b.product.maturityDate) return a.index - b.index;
+    if (!a.product.maturityDate) return 1;
+    if (!b.product.maturityDate) return -1;
+    return a.product.maturityDate.localeCompare(b.product.maturityDate);
+  });
+  return withIndex.map((entry) => entry.product);
+}
+
 function ProductsPage({ products }: { products: Product[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(products);
+  const [typeFilter, setTypeFilter] = useState<AssetType | "all">("all");
+  const [sortBy, setSortBy] = useState<ProductSortKey>("value");
+  const filtered = typeFilter === "all"
+    ? products
+    : products.filter((product) => product.type === typeFilter);
+  const sorted = sortProducts(filtered, sortBy);
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(sorted);
+  const productTypes = Array.from(new Set(products.map((product) => product.type)));
   return (
     <Page title="Инструменты" subtitle="Все продукты в вашем портфеле">
       <div className="toolbar">
         <Link className="primary-button" to="/products/new">
           ＋ Добавить продукт
         </Link>
-        <button className="outline-button" type="button">
-          Фильтр: все типы⌄
-        </button>
+        <label className="inline-select">
+          <span>Фильтр</span>
+          <select
+            value={typeFilter}
+            onChange={(event) => setTypeFilter(event.target.value as AssetType | "all")}
+          >
+            <option value="all">Все типы</option>
+            {productTypes.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
+        </label>
+        <label className="inline-select">
+          <span>Сортировка</span>
+          <select
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value as ProductSortKey)}
+          >
+            {Object.entries(PRODUCT_SORT_OPTIONS).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </label>
       </div>
-      {products.length === 0 ? (
-        <p className="muted">Пока нет добавленных инструментов.</p>
+      {sorted.length === 0 ? (
+        <p className="muted">
+          {products.length === 0
+            ? "Пока нет добавленных инструментов."
+            : "Нет инструментов, подходящих под выбранный фильтр."}
+        </p>
       ) : (
         <div className="list-card">
           {visible.map((product) => {
@@ -1625,63 +1697,253 @@ function TransactionsPage({
     </Page>
   );
 }
-function PaymentsPage({ payments }: { payments: Payment[] }) {
+function PaymentRow({
+  payment,
+  expanded,
+  onToggle,
+}: {
+  payment: Payment;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="list-row">
+      <button
+        type="button"
+        className="list-row-summary"
+        aria-expanded={expanded}
+        onClick={onToggle}
+      >
+        <span className="list-row-main">
+          <strong>{payment.title}</strong>
+          <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
+        </span>
+        <span className="list-row-value">
+          <strong>+{money(payment.amount)}</strong>
+          <small>{dateLabel(payment.date)}</small>
+        </span>
+        <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded && (
+        <div className="list-row-details">
+          <div className="detail-line">
+            <span>Статус</span>
+            <span>{payoutStatusLabels[payment.status]}</span>
+          </div>
+          <div className="detail-line">
+            <span>Дата</span>
+            <span>{fullDate(payment.date)}</span>
+          </div>
+          <div className="detail-line">
+            <span>Валюта</span>
+            <span>{payment.currency}</span>
+          </div>
+          <div className="list-row-actions">
+            <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
+              Редактировать
+            </Link>
+            <Link className="delete-button" to={`/payments/${payment.id}/delete`}>
+              Удалить
+            </Link>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+function PaymentsPage({
+  payments,
+  products,
+}: {
+  payments: Payment[];
+  products: Product[];
+}) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(payments);
+  const [viewMode, setViewMode] = useState<PaymentViewMode>("day");
+  const [typeFilter, setTypeFilter] = useState<PayoutType | "all">("all");
+  const [instrumentFilter, setInstrumentFilter] = useState<string>("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const instrumentOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    payments.forEach((payment) => {
+      if (!payment.instrumentId) return;
+      const product = products.find((item) => item.instrumentId === payment.instrumentId);
+      if (product) map.set(payment.instrumentId, product.name);
+    });
+    return Array.from(map.entries());
+  }, [payments, products]);
+
+  const filtered = payments.filter((payment) => {
+    if (typeFilter !== "all" && payment.type !== typeFilter) return false;
+    if (instrumentFilter !== "all" && payment.instrumentId !== instrumentFilter) return false;
+    if (dateFrom && payment.date < dateFrom) return false;
+    if (dateTo && payment.date > dateTo) return false;
+    return true;
+  });
+  const sorted = [...filtered].sort((a, b) => a.date.localeCompare(b.date));
+
+  const now = new Date();
+  const currentMonthKey = periodKey(now.toISOString().slice(0, 10), "month");
+  const forecastAmount = payments
+    .filter((payment) => payment.status === "expected" && periodKey(payment.date, "month") === currentMonthKey)
+    .reduce((sum, payment) => sum + payment.amount, 0);
+
+  const groups = useMemo(() => {
+    const map = new Map<string, Payment[]>();
+    sorted.forEach((payment) => {
+      const key = periodKey(payment.date, viewMode);
+      const list = map.get(key) ?? [];
+      list.push(payment);
+      map.set(key, list);
+    });
+    return Array.from(map.entries()).map(([key, items]) => ({
+      key,
+      label: periodLabel(key, viewMode),
+      items,
+      expected: items.filter((item) => item.status === "expected").reduce((sum, item) => sum + item.amount, 0),
+      received: items.filter((item) => item.status === "received").reduce((sum, item) => sum + item.amount, 0),
+    }));
+  }, [sorted, viewMode]);
+
+  const dayPaging = usePagedList(sorted);
+  const groupPaging = usePagedList(groups);
+
   return (
     <Page title="Выплаты" subtitle="Календарь ожидаемых доходов">
+      {forecastAmount > 0 && (
+        <div className="demo-note">
+          📅 В {periodLabel(currentMonthKey, "month").toLowerCase()} ожидается {money(forecastAmount)}
+        </div>
+      )}
       <div className="toolbar">
         <Link className="primary-button" to="/payments/new">
           ＋ Добавить выплату
         </Link>
+        <div className="view-mode-switch">
+          <button
+            className={viewMode === "day" ? "selected" : ""}
+            type="button"
+            onClick={() => setViewMode("day")}
+          >
+            По дням
+          </button>
+          <button
+            className={viewMode === "month" ? "selected" : ""}
+            type="button"
+            onClick={() => setViewMode("month")}
+          >
+            По месяцам
+          </button>
+          <button
+            className={viewMode === "year" ? "selected" : ""}
+            type="button"
+            onClick={() => setViewMode("year")}
+          >
+            По годам
+          </button>
+        </div>
       </div>
-      {payments.length === 0 ? (
-        <p className="muted">Пока нет добавленных выплат.</p>
+      <div className="filters-bar">
+        <label className="inline-select">
+          <span>Тип</span>
+          <select
+            value={typeFilter}
+            onChange={(event) => setTypeFilter(event.target.value as PayoutType | "all")}
+          >
+            <option value="all">Все типы</option>
+            {Object.entries(payoutTypeLabels).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </label>
+        {instrumentOptions.length > 0 && (
+          <label className="inline-select">
+            <span>Инструмент</span>
+            <select
+              value={instrumentFilter}
+              onChange={(event) => setInstrumentFilter(event.target.value)}
+            >
+              <option value="all">Все инструменты</option>
+              {instrumentOptions.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="inline-select">
+          <span>С</span>
+          <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+        </label>
+        <label className="inline-select">
+          <span>По</span>
+          <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+        </label>
+      </div>
+      {sorted.length === 0 ? (
+        <p className="muted">
+          {payments.length === 0
+            ? "Пока нет добавленных выплат."
+            : "Нет выплат, подходящих под выбранные условия."}
+        </p>
+      ) : viewMode === "day" ? (
+        <div className="list-card">
+          {dayPaging.visible.map((payment) => (
+            <PaymentRow
+              key={payment.id}
+              payment={payment}
+              expanded={expandedId === payment.id}
+              onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
+            />
+          ))}
+          <ListPagination
+            hasMore={dayPaging.hasMore}
+            onLoadMore={dayPaging.loadMore}
+            pageSize={dayPaging.pageSize}
+            onPageSizeChange={dayPaging.setPageSize}
+          />
+        </div>
       ) : (
         <div className="list-card">
-          {visible.map((payment) => {
-            const expanded = expandedId === payment.id;
+          {groupPaging.visible.map((group) => {
+            const expanded = expandedId === group.key;
             return (
-              <div className="list-row" key={payment.id}>
+              <div className="list-row" key={group.key}>
                 <button
                   type="button"
                   className="list-row-summary"
                   aria-expanded={expanded}
-                  onClick={() => setExpandedId(expanded ? null : payment.id)}
+                  onClick={() => setExpandedId(expanded ? null : group.key)}
                 >
                   <span className="list-row-main">
-                    <strong>{payment.title}</strong>
-                    <span className="type-tag teal">
-                      {payoutTypeLabels[payment.type]}
-                    </span>
+                    <strong>{group.label}</strong>
                   </span>
                   <span className="list-row-value">
-                    <strong>+{money(payment.amount)}</strong>
-                    <small>{dateLabel(payment.date)}</small>
+                    <strong>+{money(group.received)}</strong>
+                    <small>ожидается {money(group.expected)}</small>
                   </span>
                   <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
                 {expanded && (
                   <div className="list-row-details">
-                    <div className="detail-line">
-                      <span>Статус</span>
-                      <span>{payoutStatusLabels[payment.status]}</span>
-                    </div>
-                    <div className="detail-line">
-                      <span>Дата</span>
-                      <span>{fullDate(payment.date)}</span>
-                    </div>
-                    <div className="detail-line">
-                      <span>Валюта</span>
-                      <span>{payment.currency}</span>
-                    </div>
-                    <div className="list-row-actions">
-                      <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
-                        Редактировать
-                      </Link>
-                      <Link className="delete-button" to={`/payments/${payment.id}/delete`}>
-                        Удалить
-                      </Link>
+                    <div className="list-card">
+                      {group.items.map((payment) => (
+                        <div className="list-row" key={payment.id}>
+                          <div className="list-row-summary list-row-static">
+                            <span className="list-row-main">
+                              <strong>{payment.title}</strong>
+                              <span className="type-tag teal">
+                                {payoutTypeLabels[payment.type]}
+                              </span>
+                            </span>
+                            <span className="list-row-value">
+                              <strong>+{money(payment.amount)}</strong>
+                              <small>{dateLabel(payment.date)} · {payoutStatusLabels[payment.status]}</small>
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1689,10 +1951,10 @@ function PaymentsPage({ payments }: { payments: Payment[] }) {
             );
           })}
           <ListPagination
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            pageSize={pageSize}
-            onPageSizeChange={setPageSize}
+            hasMore={groupPaging.hasMore}
+            onLoadMore={groupPaging.loadMore}
+            pageSize={groupPaging.pageSize}
+            onPageSizeChange={groupPaging.setPageSize}
           />
         </div>
       )}
