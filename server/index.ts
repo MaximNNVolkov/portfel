@@ -13,6 +13,7 @@ import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
+import { getCbrRateTable } from './market-data.ts'
 import {
   aggregateByGroup, calculateReturns, resolveAssetGroup,
   type AssetGroup, type EngineContext, type PositionInput,
@@ -70,12 +71,14 @@ app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
 // позиции в вход движка и отдаёт его результат наружу, ничего не считая сам.
-//
-// Таблица курсов на MVP ещё не подключена (источник — ЦБ РФ, §13), поэтому позиции
-// в валютах, отличных от базовой, движок помечает как неоценённые (reason 'no-rate')
-// и не подмешивает их в итог нулями (§7.3). Как только появится загрузчик курсов,
-// его результат передаётся сюда через поле rates — остальной код не меняется.
-const ENGINE_CONTEXT: EngineContext = { baseCurrency: 'RUB' }
+const BASE_CURRENCY = 'RUB'
+
+// Курсы ЦБ РФ (§13) подгружаются с кэшем в market-data.ts; без них позиции в валютах,
+// отличных от базовой, движок помечает как неоценённые (reason 'no-rate') и не подмешивает
+// их в итог нулями (§7.3) — это уже деградация, а не отсутствие функциональности.
+async function engineContext(): Promise<EngineContext> {
+  return { baseCurrency: BASE_CURRENCY, rates: await getCbrRateTable() }
+}
 
 // Машинный ключ группы активов (portfolio.asset_groups.type) ↔ подпись группы, которой
 // оперируют движок (§7.2) и интерфейс. В базе хранится ключ, наружу отдаётся подпись.
@@ -181,7 +184,7 @@ function toEngineInput(position: Position): PositionInput {
     id: position.id,
     name: position.instrument.name,
     type: GROUP_LABELS[position.instrument.groupType],
-    currency: position.instrument.currency || ENGINE_CONTEXT.baseCurrency,
+    currency: position.instrument.currency || BASE_CURRENCY,
     invested: position.invested,
     value: position.value ?? null,
     quantity: position.quantity ?? null,
@@ -198,7 +201,7 @@ async function recordSnapshot(client: Db, userId: string, date = new Date().toIS
   if (!portfolio) return
   const positions = await listPositions(client, userId)
   if (!positions.length) return
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext())
   await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
 }
 async function loadUsers() {
@@ -798,8 +801,8 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const [payouts, costs] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId)])
-  const portfolio = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  const [payouts, costs, context] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId), engineContext()])
+  const portfolio = aggregateByGroup(positions.map(toEngineInput), context)
   const returns = calculateReturns({
     currentValue: portfolio.value,
     invested: portfolio.invested,
@@ -838,8 +841,8 @@ app.get('/api/portfolio/history', async (request, response) => {
 // портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
 app.get('/api/recommendations', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const [positions, payouts] = await Promise.all([listPositions(db, userId), listPayouts(db, userId)])
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), ENGINE_CONTEXT)
+  const [positions, payouts, context] = await Promise.all([listPositions(db, userId), listPayouts(db, userId), engineContext()])
+  const aggregate = aggregateByGroup(positions.map(toEngineInput), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   const positionSnapshots: PositionSnapshot[] = positions.map((position) => {
     const valuation = valuationById.get(position.id)
