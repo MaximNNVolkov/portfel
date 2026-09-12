@@ -259,6 +259,11 @@ function toCandidateName(raw: string): string {
     .trim()
   return cleaned.slice(0, 120) || 'Распознанный продукт'
 }
+// §18 дедупликация: единственные поля, которые эвристический OCR-парсер извлекает надёжно —
+// название и сумма (без ISIN/тикера/даты погашения/банка) — см. Пункт 14 плана.
+function normalizeOcrName(name: string): string {
+  return name.trim().toLowerCase()
+}
 function buildOcrCandidates(text: string) {
   const blocks = text
     .split(/\n|\r|\|\s*\|/)
@@ -742,11 +747,22 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
     const recognized = candidates.filter((candidate) => candidate.amount > 0 && candidate.name && candidate.name !== 'Распознанный продукт')
     const date = new Date().toISOString().slice(0, 10)
     // §40.4: распознанное сохраняется как есть, без шага подтверждения полей.
+    // §18 дедупликация (решено автономно: вариант А — см. план) — совпадение по названию+сумме
+    // не блокирует сохранение, а лишь помечается в ответе, чтобы пользователь заметил его сам
+    // на экране-сводке (что и так требуется читать по §40.4).
+    const duplicateFlags: boolean[] = []
     const created = recognized.length
       ? await withTransaction(db, async (client) => {
+          const existing = await listPositions(client, userId)
+          const knownAmounts = new Map<string, number>(
+            existing.map((position) => [normalizeOcrName(position.instrument.name), position.value ?? position.invested]),
+          )
           const positions: Position[] = []
           for (const candidate of recognized) {
-            positions.push(await createPosition(client, userId, {
+            const key = normalizeOcrName(candidate.name)
+            const knownAmount = knownAmounts.get(key)
+            duplicateFlags.push(knownAmount !== undefined && Math.abs(knownAmount - candidate.amount) < 0.01)
+            const position = await createPosition(client, userId, {
               name: candidate.name,
               type: candidate.type,
               amount: candidate.amount,
@@ -754,7 +770,9 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
               date,
               institution: 'Проверьте источник',
               currency: candidate.currency,
-            }, 'ocr'))
+            }, 'ocr')
+            positions.push(position)
+            knownAmounts.set(key, position.value ?? position.invested)
           }
           await recordSnapshot(client, userId)
           return positions
@@ -769,7 +787,8 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
             : `Не удалось распознать ${unrecognizedCount} из ${candidates.length} позиций`,
         }]
       : []
-    response.status(created.length ? 201 : 200).json({ date, items: created.map(positionToWire), failures })
+    const items = created.map((position, index) => ({ ...positionToWire(position), possibleDuplicate: duplicateFlags[index] }))
+    response.status(created.length ? 201 : 200).json({ date, items, failures })
   } finally {
     await worker.terminate()
     await unlink(request.file.path).catch(() => undefined)

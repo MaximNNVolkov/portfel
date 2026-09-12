@@ -183,7 +183,10 @@ type Transaction = {
 };
 type Snapshot = { date: string; value: number; invested: number | null };
 type OcrFailure = { filename: string; reason: string };
-type OcrUploadResult = { date: string; items: Product[]; failures: OcrFailure[] };
+// possibleDuplicate — транзиентный флаг только этого ответа (§18, вариант А: запись всё
+// равно сохраняется, пользователь сам решает на экране-сводке), не персистится как поле Product.
+type OcrItem = Product & { possibleDuplicate?: boolean };
+type OcrUploadResult = { date: string; items: OcrItem[]; failures: OcrFailure[] };
 // Зеркалит GroupAggregate/PortfolioAggregate из server/portfolio-engine.ts — расчёт
 // (§10) целиком на бэкенде, фронт только отображает уже готовый результат.
 type GroupSummary = {
@@ -3293,6 +3296,11 @@ function OcrSummaryPage({ summary }: { summary: OcrUploadResult | null }) {
               <small>
                 {item.institution} · {item.currency}
               </small>
+              {item.possibleDuplicate && (
+                <small className="danger-text">
+                  ⚠ Похоже, такой инструмент уже есть в портфеле — проверьте, не дубликат ли это
+                </small>
+              )}
             </div>
             <span className={`type-tag ${typeColors[item.type]}`}>
               {item.type}
