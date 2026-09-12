@@ -61,6 +61,27 @@ services:
     entrypoint: >-
       sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
 
+  backup:
+    image: postgres:16-alpine
+    container_name: portfel-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: portfel
+      PGPASSWORD: portfel
+      PGDATABASE: portfel
+      BACKUP_RETENTION_COUNT: 7
+      BACKUP_INTERVAL_SECONDS: 86400
+    volumes:
+      - postgres_backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+      - ./scripts/restore.sh:/restore.sh:ro
+    entrypoint: ["sh", "/backup.sh"]
+
 volumes:
   postgres_data:
   backend_uploads:
+  postgres_backups:
