@@ -38,8 +38,16 @@ def get_token():
     return json.load(open('/home/user1/.claude/.credentials.json'))['claudeAiOauth']['accessToken']
 
 def get_session_usage():
-    """Возвращает (remaining_pct, minutes_to_reset) для текущего сессионного окна."""
-    snap = fetch_account_usage(provider='anthropic', api_key=get_token(), base_url='http://127.0.0.1:8787')
+    """Возвращает (remaining_pct, minutes_to_reset) для текущего сессионного окна.
+    Возвращает (None, None), если API лимитов недоступен/вернул пусто."""
+    try:
+        snap = fetch_account_usage(provider='anthropic', api_key=get_token(), base_url='http://127.0.0.1:8787')
+    except Exception as e:
+        log(f"get_session_usage: fetch_account_usage raised {e!r}")
+        return None, None
+    if snap is None or not getattr(snap, 'windows', None):
+        log("get_session_usage: fetch_account_usage returned None/empty")
+        return None, None
     for w in snap.windows:
         if w.label == 'Current session':
             remaining = 100 - w.used_percent
