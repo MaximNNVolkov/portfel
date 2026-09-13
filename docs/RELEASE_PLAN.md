@@ -59,17 +59,41 @@
   данные вернулись ровно к состоянию бэкапа (3 строки, значение восстановлено).
 - **Коммит:** "fix: make database restore work against a populated database (§31/§37)"
 
-### P0-2. OCR в docker-образе остаётся без языковых данных
+### P0-2. ✅ OCR в docker-образе остаётся без языковых данных
 
-`server/ocr.ts:143` вызывает `createWorker('rus+eng')`. Файлы `rus.traineddata`
-и `eng.traineddata` лежат в корне репозитория, но добавлены в `.gitignore` и не
-копируются в образ (`Dockerfile.backend` копирует только `server` и `db`). На сервере
-tesseract.js полезет за ними в интернет при первом распознавании: в лучшем случае
+`server/ocr.ts:143` вызывал `createWorker('rus+eng')`. Файлы `rus.traineddata`
+и `eng.traineddata` лежали в корне репозитория, были добавлены в `.gitignore` и не
+копировались в образ (`Dockerfile.backend` копировал только `server` и `db`). На сервере
+tesseract.js полез бы за ними в интернет при первом распознавании: в лучшем случае
 первый скриншот обрабатывается минуты, в худшем (закрытый исходящий трафик) OCR
 молча не работает — а это критерий §37 п.5.
 
-- Класть языковые данные в образ (отдельный каталог, не корень репозитория)
-  и задать `langPath`/`cachePath` при создании воркера.
+- Файлы перенесены в новый каталог `tessdata/` в корне репозитория (остаются
+  gitignored — `*.traineddata` в `.gitignore` матчит на любой глубине).
+- `Dockerfile.backend`: добавлена строка `COPY tessdata ./tessdata`.
+- `server/ocr.ts`: `recognizeText` теперь вызывает `createWorker('rus+eng', undefined,
+  { langPath, gzip: false, cacheMethod: 'none' })`. `langPath` вычисляется от расположения
+  самого файла (`fileURLToPath(import.meta.url)` → `../tessdata`), а не CWD/абсолютной
+  константы — одинаково работает и в dev (`server/ocr.ts` → `../tessdata` в корне
+  репозитория), и в образе (`/app/server/ocr.ts` → `/app/tessdata`). `gzip: false` —
+  бандл содержит несжатые `.traineddata`, а не `.traineddata.gz` (дефолт библиотеки —
+  `gzip: true`, при котором загрузчик искал бы файл с несуществующим расширением).
+  `cacheMethod: 'none'` — каждый вызов создаёт и сразу завершает воркер (без пула),
+  поэтому кэш между вызовами не даёт выигрыша, а только пишет лишние файлы на диск.
+- Проверено, что без этих правок tesseract.js в Node действительно ищет
+  `langPath/eng.traineddata.gz` (не `.traineddata`) при `gzip` по умолчанию — прочитан
+  `node_modules/tesseract.js/src/worker-script/index.js`.
+- **Живая проверка без сети:** сгенерирован тестовый PNG (Python/Pillow) с текстом,
+  распознавание запущено через `createWorker` с теми же опциями, что и в `ocr.ts`,
+  при `HTTP_PROXY`/`HTTPS_PROXY`, указывающих на заведомо недоступный адрес
+  (`http://127.0.0.1:1`) — распознавание прошло успешно, что подтверждает: язык
+  реально читается с диска (`langPath`), сеть не требуется даже при `cacheMethod: 'none'`
+  (без обращения к локальному кэшу).
+- **Проверка образа:** `docker build -f Dockerfile.backend` — собирается чисто;
+  `docker run --rm ... ls -la /app/tessdata` подтвердил оба файла (`eng.traineddata`
+  5 199 098 байт, `rus.traineddata` 5 053 706 байт) внутри готового образа. Тестовый
+  образ и контейнер удалены после проверки (`docker rmi`).
+- `npx tsc -b` — чисто.
 - **Коммит:** "fix: bundle tesseract language data into the backend image (§18)"
 
 ### P0-3. ✅ Rate limiting за nginx считает всех тестировщиков одним клиентом

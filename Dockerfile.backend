@@ -10,6 +10,7 @@ ENV NODE_ENV=production
 
 COPY server ./server
 COPY db ./db
+COPY tessdata ./tessdata
 
 RUN mkdir -p server/uploads
 

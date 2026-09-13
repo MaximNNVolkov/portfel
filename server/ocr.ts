@@ -7,6 +7,8 @@
 //
 // Разбор текста ниже — чистые функции без БД и сети, поэтому покрыты server/ocr.test.ts.
 import { unlink } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createWorker } from 'tesseract.js'
 import { logError } from './logger.ts'
 import { recordSnapshot, regenerateForecastPayouts } from './daily-tasks.ts'
@@ -139,8 +141,24 @@ export type OcrResult = {
   failures: OcrFailure[]
 }
 
+// P0-2 (§18/§37): в образе backend нет исходящего доступа к интернету, поэтому tesseract.js
+// не может скачать rus.traineddata/eng.traineddata при первом запуске (как он делает по
+// умолчанию). Файлы лежат в tessdata/ рядом с репозиторием (COPY tessdata ./tessdata в
+// Dockerfile.backend) и читаются с диска напрямую. Путь считается от расположения этого
+// файла, а не CWD/абсолютной константы — работает одинаково и в dev (server/ocr.ts →
+// ../tessdata), и в образе (/app/server/ocr.ts → /app/tessdata).
+const TESSDATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'tessdata')
+
 async function recognizeText(filePath: string): Promise<string> {
-  const worker = await createWorker('rus+eng')
+  // gzip: false — файлы лежат как plain .traineddata, а не .traineddata.gz (дефолт
+  // tesseract.js — gzip: true, при нём загрузчик искал бы несуществующий .gz-файл).
+  // cacheMethod: 'none' — каждый вызов создаёт и сразу завершает воркер (см. finally
+  // ниже), поэтому кэш между вызовами не даёт выигрыша, а только пишет лишние файлы.
+  const worker = await createWorker('rus+eng', undefined, {
+    langPath: TESSDATA_DIR,
+    gzip: false,
+    cacheMethod: 'none',
+  })
   try {
     const result = await worker.recognize(filePath)
     // Схлопываем только горизонтальные пробелы: переводы строк — единственная разметка,
