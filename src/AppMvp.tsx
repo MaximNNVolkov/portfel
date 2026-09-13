@@ -387,13 +387,15 @@ const initialTransactions: Transaction[] = [
 ];
 
 const navItems = [
-  ["Портфель", "◈", "/portfolio"],
-  ["Инструменты", "▦", "/products"],
-  ["Операции", "↕", "/transactions"],
-  ["Выплаты", "◷", "/payments"],
-  ["Аналитика", "⌁", "/analytics"],
-  ["Рекомендации", "✦", "/recommendations"],
-  ["Интеграции", "⇄", "/integrations"],
+  ["Портфель", "◈", "/portfolio", false],
+  ["Инструменты", "▦", "/products", false],
+  ["Операции", "↕", "/transactions", false],
+  ["Выплаты", "◷", "/payments", false],
+  ["Аналитика", "⌁", "/analytics", false],
+  ["Рекомендации", "✦", "/recommendations", false],
+  ["Отчёты", "▤", "/reports", true],
+  ["Интеграции", "⇄", "/integrations", false],
+  ["Импорт", "⇩", "/import", true],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -969,7 +971,7 @@ function AppMvp() {
           <span className="chevron">⌄</span>
         </div>
         <nav className="nav-list" aria-label="Основная навигация">
-          {navItems.map(([label, icon, path]) => (
+          {navItems.map(([label, icon, path, isV2]) => (
             <NavLink
               className={({ isActive }) =>
                 `nav-item ${isActive ? "active" : ""}`
@@ -979,6 +981,7 @@ function AppMvp() {
             >
               <span className="nav-icon">{icon}</span>
               {label}
+              {isV2 && <span className="v2-badge">v2</span>}
               {label === "Рекомендации" && (
                 <span className="notification-dot" />
               )}
@@ -1153,6 +1156,24 @@ function AppMvp() {
             }
           />
           <Route
+            path="/reports"
+            element={
+              <ComingSoonPage
+                title="Отчёты"
+                text="PDF-отчёты по портфелю появятся в следующей версии приложения."
+              />
+            }
+          />
+          <Route
+            path="/import"
+            element={
+              <ComingSoonPage
+                title="Импорт"
+                text="Импорт из Excel/CSV появится в следующей версии приложения. Сейчас добавить активы можно вручную, со скриншота или через Т-Инвестиции."
+              />
+            }
+          />
+          <Route
             path="/settings"
             element={
               <Settings
@@ -1245,6 +1266,15 @@ function Dashboard({
               <div>
                 <strong>Ввести вручную</strong>
                 <small>Если у вас нет скриншота под рукой</small>
+              </div>
+            </Link>
+            <Link className="empty-option" to="/import">
+              <span className="empty-option-icon">⇩</span>
+              <div>
+                <strong>
+                  Импортировать Excel / CSV <span className="v2-badge">v2</span>
+                </strong>
+                <small>Пока недоступно, появится в следующей версии</small>
               </div>
             </Link>
           </div>
@@ -2762,6 +2792,17 @@ function Integrations({
           </button>
         )}
         {message && <div className="demo-note">{message}</div>}
+      </div>
+    </Page>
+  );
+}
+function ComingSoonPage({ title, text }: { title: string; text: string }) {
+  return (
+    <Page title={title} subtitle="Скоро">
+      <div className="empty-portfolio">
+        <p className="eyebrow">v2</p>
+        <h1>Этот раздел появится в следующей версии</h1>
+        <p>{text}</p>
       </div>
     </Page>
   );

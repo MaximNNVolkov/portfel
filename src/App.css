@@ -32,3 +32,5 @@
 :root[data-theme="dark"] .connection-state.pending { color: #e8c374; background: rgba(230,185,97,.16); }
 :root[data-theme="dark"] .recommendation.warning { border-color: rgba(241,227,195,.35); background: rgba(255,250,240,.06); }
 :root[data-theme="dark"] .donut { background: conic-gradient(#4a9384 0 44%, #b57a42 44% 71%, #a68a52 71% 89%, #5b699b 89% 94%, #2a3d3a 94%); }
+.v2-badge { margin-left: 6px; padding: 1px 6px; border-radius: 4px; color: #a9c0ba; background: rgba(255,255,255,.1); font-size: 9px; font-weight: 700; letter-spacing: .5px; vertical-align: 1px; }
+.empty-option .v2-badge { color: var(--muted); background: var(--bg-subtle); }
