@@ -122,16 +122,22 @@ tesseract.js полез бы за ними в интернет при перво
   `POST /api/auth/register` плюс поле «Код приглашения» на форме регистрации.
 - **Коммит:** "feat: invite code gate for registration on internal test stand (§28)"
 
-### P0-5. Заголовки безопасности и DOMAIN/EMAIL в конфигурации
+### P0-5. ✅ Заголовки безопасности и DOMAIN/EMAIL в конфигурации
 
-- `nginx/nginx.conf.template`: нет HSTS и CSP (`helmet` ставит заголовки только на
-  ответы API, статику отдаёт nginx).
-- `DOMAIN` и `EMAIL` нигде не описаны в `.env.example`, хотя `docker-compose.yml`
-  и `init-letsencrypt.sh` их требуют — деплой по инструкции спотыкается на этом.
-- Проверить, нужен ли ещё `location /uploads/` в nginx: OCR удаляет файл после
-  обработки (§28), маршрут может быть мёртвым.
-- На сервере должен стоять плагин `docker compose` v2 — файл использует
-  `depends_on.condition`, который устаревший `docker-compose` 1.x не понимает.
+- `nginx/nginx.conf.template`: добавлены HSTS (`max-age=63072000; includeSubDomains`,
+  без `preload` — намеренно, см. план) и CSP, собранная из фактического использования
+  ресурсов приложения (проверено сборкой `dist/`, нет инлайн-скриптов/стилей; единственный
+  внешний ресурс — Google Fonts): `default-src 'self'; script-src 'self'; style-src 'self'
+  https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self';
+  connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self';
+  frame-ancestors 'none';`.
+- `location /uploads/` удалена из nginx как мёртвый маршрут: OCR удаляет файл сразу
+  после обработки (пункт 21 плана), а фронтенд нигде не строит `/uploads/...`-ссылки —
+  проверено grep'ом по `src/AppMvp.tsx`.
+- `DOMAIN`, `EMAIL`, `REGISTRATION_INVITE_CODE` задокументированы в `.env.example`
+  (последний — попутная находка: тоже требуется в проде, тоже нигде не был описан).
+- Плагин `docker compose` v2 уже был задокументирован в `docs/DEPLOY.md` (раздел
+  «Требования») до этого пункта — доп. действий не потребовалось.
 - **Коммит:** "chore: security headers and deployment configuration gaps (§28)"
 
 ### P0-6. ✅ Заглушки «Отчёты» и «Импорт» в сайдбаре (пункт 6.7)
