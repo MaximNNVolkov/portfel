@@ -1,8 +1,7 @@
 // Репозиторий доступа к данным пользователя — целевая схема §11 (схема БД `portfolio`).
 //
-// Legacy-таблицы public.products/payments/transactions остаются в базе как исторический
-// архив: бэкфилл выполнен миграцией 003_new_schema.sql, но ни одна выборка отсюда их
-// больше не читает и не пишет. Всё API работает только с новой схемой.
+// В public остались только users и sessions (§5): legacy-таблицы старой версии перенесены
+// в схему `portfolio` миграцией 003_new_schema.sql и удалены 005_drop_legacy.sql.
 //
 // Изменения точечные (INSERT/UPDATE/DELETE по одной записи): полная перезапись портфеля
 // при каждой правке неприемлема на объёмах §34 (10 000 инструментов, 100 000 операций).
@@ -955,8 +954,7 @@ export async function completeUploadedDocument(
   )
 }
 
-// Полное удаление аккаунта (§28): пользователь должен иметь возможность стереть себя целиком,
-// включая legacy-архив, который остался от старой схемы.
+// Полное удаление аккаунта (§28): пользователь должен иметь возможность стереть себя целиком.
 export async function deleteUserData(db: Db, userId: string): Promise<void> {
   // Каскад по portfolios снимает счета, позиции, операции, выплаты и снимки портфеля.
   await db.query('DELETE FROM portfolio.portfolios WHERE user_id = $1', [userId])
@@ -964,11 +962,6 @@ export async function deleteUserData(db: Db, userId: string): Promise<void> {
   await db.query('DELETE FROM portfolio.broker_connections WHERE user_id = $1', [userId])
   await db.query('DELETE FROM portfolio.uploaded_documents WHERE user_id = $1', [userId])
   await db.query('DELETE FROM portfolio.recommendations WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM products WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM payments WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM transactions WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM portfolio_snapshots WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM broker_connections WHERE user_id = $1', [userId])
   await db.query('DELETE FROM sessions WHERE user_id = $1', [userId])
   await db.query('DELETE FROM users WHERE id = $1', [userId])
 }
