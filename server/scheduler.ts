@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { Pool, types } from 'pg'
 import { logError } from './logger.ts'
 import { decryptToken } from './token-crypto.ts'
-import { performTinkoffSync, recordSnapshot, refreshMarketPrices } from './daily-tasks.ts'
+import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
 import {
   findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
   updateBrokerConnectionSync, withTransaction,
@@ -58,6 +58,11 @@ async function runDailyTasks(): Promise<void> {
   for (const { userId } of portfolios) {
     await withTransaction(db, (client) => refreshMarketPrices(client, userId))
       .catch((error) => logError('scheduler.market-prices', error))
+    // §15/§22: плановые выплаты пересчитываются ежедневно, а не только при правке инструмента —
+    // с течением времени часть прогноза становится прошлым, а вклад с автопролонгацией или
+    // облигация с наступившей офертой меняют горизонт без всякого действия пользователя.
+    await withTransaction(db, (client) => regenerateForecastPayouts(client, userId))
+      .catch((error) => logError('scheduler.payout-forecast', error))
     // §21: снимок пишется безусловно, раз в сутки, независимо от того, обновились ли цены —
     // это единственное место, которое обеспечивает историю портфеля без действия пользователя.
     await withTransaction(db, (client) => recordSnapshot(client, userId))

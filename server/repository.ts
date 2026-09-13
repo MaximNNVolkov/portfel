@@ -19,6 +19,9 @@ export type TransactionType =
   | 'INTEREST' | 'FEE' | 'TAX' | 'REDEMPTION' | 'OTHER'
 export type PayoutType = 'COUPON' | 'DIVIDEND' | 'INTEREST' | 'DEPOSIT_PRINCIPAL' | 'REDEMPTION' | 'OTHER'
 export type PayoutStatus = 'expected' | 'received'
+// Происхождение выплаты: 'forecast' — рассчитана системой из параметров инструмента (§15, §22)
+// и пересоздаётся при каждом пересчёте; остальные источники пересчёт никогда не трогает.
+export type PayoutSource = 'manual' | 'forecast' | 'broker'
 export type BrokerStatus = 'disconnected' | 'pending' | 'connected' | 'error'
 
 export type Portfolio = { id: string; name: string; baseCurrency: string }
@@ -101,6 +104,7 @@ export type Payout = {
   amount: number
   currency: string
   status: PayoutStatus
+  source: PayoutSource
   instrumentId?: string
   transactionId?: string
   description?: string
@@ -647,7 +651,7 @@ export async function sumTransactionCosts(db: Db, userId: string): Promise<{ com
 
 const PAYOUT_FIELDS = `
   o.id, o.account_id, o.instrument_id, o.transaction_id, o.payout_date, o.type,
-  o.amount, o.currency, o.status, o.description`
+  o.amount, o.currency, o.status, o.source, o.description`
 
 const PAYOUT_FROM = `
   FROM portfolio.payouts o
@@ -663,6 +667,7 @@ function mapPayout(row: any): Payout {
     amount: Number(row.amount),
     currency: row.currency,
     status: row.status,
+    source: row.source,
     instrumentId: text(row.instrument_id),
     transactionId: text(row.transaction_id),
     description: text(row.description),
@@ -690,15 +695,15 @@ export async function findPayout(db: Db, userId: string, id: string): Promise<Pa
 function payoutValues(payout: Payout): unknown[] {
   return [
     payout.accountId, payout.instrumentId ?? null, payout.transactionId ?? null, payout.date,
-    payout.type, payout.amount, payout.currency, payout.status, payout.description ?? null,
+    payout.type, payout.amount, payout.currency, payout.status, payout.source, payout.description ?? null,
   ]
 }
 
 export async function insertPayout(db: Db, payout: Payout): Promise<void> {
   await db.query(
     `INSERT INTO portfolio.payouts (
-       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, description
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, source, description
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [payout.id, ...payoutValues(payout)],
   )
 }
@@ -711,7 +716,7 @@ export async function updatePayout(db: Db, userId: string, payout: Payout): Prom
   const result = await db.query(
     `UPDATE portfolio.payouts o SET
        account_id = $3, instrument_id = $4, transaction_id = $5, payout_date = $6, type = $7,
-       amount = $8, currency = $9, status = $10, description = $11
+       amount = $8, currency = $9, status = $10, source = $11, description = $12
      WHERE o.id = $1 AND ${OWNED_PAYOUT}`,
     [payout.id, userId, ...payoutValues(payout)],
   )
@@ -731,6 +736,19 @@ export async function deletePayout(db: Db, userId: string, id: string): Promise<
 // «полученный» доход без движения денег.
 export async function deletePayoutsForTransaction(db: Db, transactionId: string): Promise<void> {
   await db.query('DELETE FROM portfolio.payouts WHERE transaction_id = $1', [transactionId])
+}
+
+// Плановые выплаты (§15, §22) пересчитываются целиком: собственные строки прогноза удаляются,
+// затем генерируются заново из текущих параметров инструментов. Ручные и брокерские выплаты
+// под условие не попадают и переживают любое число пересчётов.
+export async function deleteForecastPayouts(db: Db, userId: string): Promise<void> {
+  await db.query(
+    `DELETE FROM portfolio.payouts o WHERE o.source = 'forecast' AND o.account_id IN (
+       SELECT a.id FROM portfolio.accounts a
+       JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $1
+     )`,
+    [userId],
+  )
 }
 
 // Полученные и ожидаемые выплаты (§7.1). Мультивалютные выплаты суммируются как есть —

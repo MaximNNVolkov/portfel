@@ -147,6 +147,7 @@ type PayoutType =
   | "REDEMPTION"
   | "OTHER";
 type PayoutStatus = "expected" | "received";
+type PayoutSource = "manual" | "forecast" | "broker";
 type Payment = {
   id: string;
   title: string;
@@ -155,6 +156,8 @@ type Payment = {
   type: PayoutType;
   status: PayoutStatus;
   currency: string;
+  /** 'forecast' — строка рассчитана системой из параметров инструмента (§15) и пересчитывается автоматически. */
+  source?: PayoutSource;
   instrumentId?: string;
   accountId?: string;
   transactionId?: string;
@@ -1805,6 +1808,9 @@ function PaymentRow({
         <span className="list-row-main">
           <strong>{payment.title}</strong>
           <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
+          {payment.source === "forecast" && (
+            <span className="type-tag slate">Прогноз</span>
+          )}
         </span>
         <span className="list-row-value">
           <strong>+{money(payment.amount)}</strong>
@@ -1826,6 +1832,15 @@ function PaymentRow({
             <span>Валюта</span>
             <span>{payment.currency}</span>
           </div>
+          {payment.source === "forecast" && (
+            <div className="detail-line">
+              <span>Источник</span>
+              <span>
+                Расчёт по параметрам инструмента — обновляется автоматически. Правка
+                переведёт выплату в ручные.
+              </span>
+            </div>
+          )}
           <div className="list-row-actions">
             <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
               Редактировать

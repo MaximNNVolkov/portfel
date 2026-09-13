@@ -7,10 +7,12 @@ import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexLastPrice } from './market-data.ts'
 import { aggregateByGroup, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
+import { forecastPayouts } from './payout-forecast.ts'
 import {
   ensureAccount, ensurePortfolio, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, insertPayout, insertPosition, insertTransaction,
-  deletePayoutsForTransaction, listPositions, updatePosition, updatePositionMarketPrice, upsertSnapshot,
+  deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
+  updatePositionMarketPrice, upsertSnapshot,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
 } from './repository.ts'
 
@@ -89,8 +91,49 @@ export async function syncPayoutForTransaction(client: Db, transaction: Transact
     amount: transaction.amount,
     currency: transaction.currency,
     status: 'received',
+    // Выплата наследует происхождение своей операции: пришедшая от брокера остаётся
+    // брокерской, введённая руками/через OCR — ручной. Прогнозом такая строка не является
+    // никогда, поэтому пересчёт (regenerateForecastPayouts) её не тронет.
+    source: transaction.source === 'broker' ? 'broker' : 'manual',
     description: transaction.description,
   } satisfies Payout)
+}
+
+// §15 («система должна рассчитывать ожидаемые проценты и формировать будущие выплаты»)
+// и §22 (календарь показывает ожидаемые купоны, проценты, возврат тела и погашение).
+// Прогноз — производная от параметров инструментов, а не самостоятельные данные, поэтому
+// пересчитывается целиком при каждом изменении состава портфеля и раз в сутки планировщиком:
+// свои прошлые строки удаляются, новые считаются из текущих параметров. Чужие строки
+// (ручные, брокерские) не удаляются и не задваиваются — совпадение по инструменту, дате и
+// типу означает, что выплата уже учтена фактическими данными, и прогноз для неё не нужен.
+export async function regenerateForecastPayouts(
+  client: Db, userId: string, today = new Date().toISOString().slice(0, 10),
+): Promise<number> {
+  await deleteForecastPayouts(client, userId)
+  const [positions, existing] = await Promise.all([listPositions(client, userId), listPayouts(client, userId)])
+  const taken = new Set(existing.map((payout) => `${payout.instrumentId ?? ''}|${payout.date}|${payout.type}`))
+  let created = 0
+  for (const position of positions) {
+    for (const forecast of forecastPayouts(position, position.instrument, today)) {
+      const key = `${position.instrumentId}|${forecast.date}|${forecast.type}`
+      if (taken.has(key)) continue
+      taken.add(key)
+      await insertPayout(client, {
+        id: randomUUID(),
+        accountId: position.accountId,
+        instrumentId: position.instrumentId,
+        date: forecast.date,
+        type: forecast.type,
+        amount: forecast.amount,
+        currency: forecast.currency,
+        status: 'expected',
+        source: 'forecast',
+        description: forecast.description,
+      } satisfies Payout)
+      created += 1
+    }
+  }
+  return created
 }
 
 // Синхронизация (§19): позиции ставятся из ответа брокера целиком (количество/цены/стоимость
@@ -176,6 +219,7 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
     await syncPayoutForTransaction(client, transaction)
   }
 
+  await regenerateForecastPayouts(client, userId)
   await recordSnapshot(client, userId)
 }
 

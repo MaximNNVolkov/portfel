@@ -20,7 +20,7 @@ import {
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts,
 } from './daily-tasks.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
@@ -180,6 +180,7 @@ function payoutToWire(payout: Payout) {
     type: payout.type,
     status: payout.status,
     currency: payout.currency,
+    source: payout.source,
     instrumentId: payout.instrumentId,
     accountId: payout.accountId,
     transactionId: payout.transactionId,
@@ -593,6 +594,7 @@ app.post('/api/positions', async (request, response) => {
   try {
     const position = await withTransaction(db, async (client) => {
       const created = await createPosition(client, userId, request.body ?? {}, 'manual')
+      await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       return created
     })
@@ -634,6 +636,9 @@ app.patch('/api/positions/:id', async (request, response) => {
       }
       await updateInstrument(client, userId, instrument)
       await updatePosition(client, userId, record)
+      // Ставка, срок, купон или количество могли измениться — плановые выплаты по этому
+      // инструменту больше не соответствуют его параметрам и считаются заново (§15).
+      await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       return {
         ...record,
@@ -650,6 +655,10 @@ app.delete('/api/positions/:id', async (request, response) => {
   if (!existing) return response.status(404).json({ error: 'Position not found' })
   await withTransaction(db, async (client) => {
     await deletePosition(client, userId, existing.id)
+    // Порядок важен: сначала пересчёт (он убирает прогнозные выплаты удалённой позиции),
+    // и только потом удаление инструмента — иначе оставшиеся ссылки из portfolio.payouts
+    // заставили бы deleteOrphanInstrument считать инструмент всё ещё используемым.
+    await regenerateForecastPayouts(client, userId)
     // Инструмент, заведённый вручную или со скриншота, без позиций и истории больше не нужен.
     await deleteOrphanInstrument(client, userId, existing.instrumentId)
     await recordSnapshot(client, userId)
@@ -706,6 +715,7 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
             positions.push(position)
             knownAmounts.set(key, position.value ?? position.invested)
           }
+          await regenerateForecastPayouts(client, userId)
           await recordSnapshot(client, userId)
           return positions
         })
@@ -871,6 +881,9 @@ app.post('/api/payouts', async (request, response) => {
         amount,
         currency: position?.instrument.currency ?? 'RUB',
         status,
+        // Выплата, заведённая пользователем, никогда не считается прогнозом — иначе
+        // ближайший пересчёт (§15) удалил бы её как собственную строку.
+        source: 'manual',
         description: title,
       }
       await insertPayout(client, record)
@@ -892,6 +905,10 @@ app.patch('/api/payouts/:id', async (request, response) => {
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
       type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,
       status: body.status !== undefined ? payoutStatus(body.status, existing.status) : existing.status,
+      // Правка прогнозной строки означает, что пользователь взял её под свой контроль:
+      // дальше она живёт как ручная и переживает пересчёт, а прогноз на ту же дату/тип
+      // повторно не создаётся благодаря дедупликации по (инструмент, дата, тип).
+      source: existing.source === 'forecast' ? 'manual' : existing.source,
     }
     await updatePayout(db, userId, updated)
     response.json(payoutToWire(updated))
@@ -1026,6 +1043,7 @@ app.post('/api/transactions', async (request, response) => {
       await positions.flush()
       await insertTransaction(client, created)
       await syncPayoutForTransaction(client, created)
+      await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       return created
     })
@@ -1049,6 +1067,7 @@ app.patch('/api/transactions/:id', async (request, response) => {
       await positions.flush()
       await updateTransaction(client, userId, next)
       await syncPayoutForTransaction(client, next)
+      await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       return next
     })
@@ -1065,6 +1084,7 @@ app.delete('/api/transactions/:id', async (request, response) => {
     await positions.flush()
     await deletePayoutsForTransaction(client, existing.id)
     await deleteTransaction(client, userId, existing.id)
+    await regenerateForecastPayouts(client, userId)
     await recordSnapshot(client, userId)
   })
   response.status(204).send()
