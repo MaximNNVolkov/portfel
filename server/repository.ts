@@ -169,6 +169,14 @@ export async function findPortfolio(db: Db, userId: string): Promise<Portfolio |
   return result.rows[0] ? mapPortfolio(result.rows[0]) : undefined
 }
 
+// Перечисление всех портфелей всех пользователей — нужно только планировщику фоновых задач
+// (§19/§21/§32): единственное место, которому требуется работать «поперёк» пользователей,
+// а не в рамках одной сессии, поэтому нет обычной проверки владения.
+export async function listAllPortfolios(db: Db): Promise<Array<{ userId: string; portfolioId: string }>> {
+  const result = await db.query('SELECT user_id, id FROM portfolio.portfolios')
+  return result.rows.map((row) => ({ userId: row.user_id, portfolioId: row.id }))
+}
+
 // Портфель заводится лениво, при первом сохранении данных: у пустого аккаунта строки нет.
 // Мультипортфельность (§4, §13) схема поддерживает, UI на MVP работает с первым портфелем.
 export async function ensurePortfolio(db: Db, userId: string, id: string, baseCurrency = 'RUB'): Promise<Portfolio> {
@@ -783,6 +791,13 @@ function mapBrokerConnection(row: any): BrokerConnection {
 }
 
 const BROKER_CONNECTION_FIELDS = 'id, broker_type, token_masked, encrypted_token, status, last_sync_at, last_error, created_at'
+
+// Перечисление всех подключений всех пользователей — только для планировщика (§19/§32),
+// который должен раз в сутки пройтись по каждому подключённому брокеру каждого пользователя.
+export async function listAllBrokerConnections(db: Db): Promise<Array<{ userId: string; brokerType: string }>> {
+  const result = await db.query('SELECT user_id, broker_type FROM portfolio.broker_connections')
+  return result.rows.map((row) => ({ userId: row.user_id, brokerType: row.broker_type }))
+}
 
 export async function findBrokerConnection(db: Db, userId: string, brokerType: string): Promise<BrokerConnection | undefined> {
   const result = await db.query(

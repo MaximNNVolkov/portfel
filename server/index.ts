@@ -13,25 +13,28 @@ import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
-import { getCbrRateTable, getMoexLastPrice } from './market-data.ts'
 import {
   aggregateByGroup, aggregateByKey, calculateReturns, resolveAssetGroup,
-  type AssetGroup, type Breakdown, type EngineContext, type KeyedValuation, type PositionInput,
+  type AssetGroup, type Breakdown, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
+  DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices,
+} from './daily-tasks.ts'
+import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
-  findCashPosition, findInstrumentByKey, findPayout, findPortfolio, findPosition,
-  findPositionByAccountInstrument, findTransaction, findTransactionByExternalId,
+  findCashPosition, findPayout, findPortfolio, findPosition,
+  findTransaction,
   insertInstrument, insertPayout, insertPosition, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
   sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
-  updatePortfolio, updatePosition, updatePositionMarketPrice, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
+  updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
   withTransaction,
   type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument,
   type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Portfolio, type Position,
-  type PositionRecord, type Transaction, type TransactionType,
+  type Transaction, type TransactionType,
 } from './repository.ts'
 
 // DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
@@ -77,17 +80,10 @@ app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
 
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
 // позиции в вход движка и отдаёт его результат наружу, ничего не считая сам.
-// Базовая валюта — настраиваемое поле портфеля (§13, §6.10), RUB — только дефолт для
-// только что созданного портфеля.
-const DEFAULT_BASE_CURRENCY = 'RUB'
+// engineContext/DEFAULT_BASE_CURRENCY/GROUP_LABELS/toEngineInput/recordSnapshot общие
+// с планировщиком (server/scheduler.ts, §19/§21/§32) — вынесены в daily-tasks.ts.
 const SUPPORTED_BASE_CURRENCIES = ['RUB', 'USD', 'CNY']
 
-// Курсы ЦБ РФ (§13) подгружаются с кэшем в market-data.ts; без них позиции в валютах,
-// отличных от базовой, движок помечает как неоценённые (reason 'no-rate') и не подмешивает
-// их в итог нулями (§7.3) — это уже деградация, а не отсутствие функциональности.
-async function engineContext(baseCurrency: string): Promise<EngineContext> {
-  return { baseCurrency, rates: await getCbrRateTable() }
-}
 // Портфель заводится лениво (см. ensurePortfolio) — у аккаунта без единой сохранённой
 // записи его ещё может не быть, тогда используем дефолт, а не падаем.
 async function resolveBaseCurrency(client: Db, userId: string): Promise<string> {
@@ -95,11 +91,7 @@ async function resolveBaseCurrency(client: Db, userId: string): Promise<string> 
   return portfolio?.baseCurrency ?? DEFAULT_BASE_CURRENCY
 }
 
-// Машинный ключ группы активов (portfolio.asset_groups.type) ↔ подпись группы, которой
-// оперируют движок (§7.2) и интерфейс. В базе хранится ключ, наружу отдаётся подпись.
-const GROUP_LABELS: Record<AssetGroupType, AssetGroup> = {
-  deposit: 'Вклады', bond: 'Облигации', share: 'Акции', fund: 'Фонды', cash: 'Деньги', other: 'Прочее',
-}
+// GROUP_LABELS — импортирован из daily-tasks.ts (используется и планировщиком).
 const GROUP_TYPES: Record<AssetGroup, AssetGroupType> = {
   'Вклады': 'deposit', 'Облигации': 'bond', 'Акции': 'share', 'Фонды': 'fund', 'Деньги': 'cash', 'Прочее': 'other',
 }
@@ -194,31 +186,6 @@ function payoutToWire(payout: Payout) {
   }
 }
 
-function toEngineInput(position: Position): PositionInput {
-  return {
-    id: position.id,
-    name: position.instrument.name,
-    type: GROUP_LABELS[position.instrument.groupType],
-    currency: position.instrument.currency || BASE_CURRENCY,
-    invested: position.invested,
-    value: position.value ?? null,
-    quantity: position.quantity ?? null,
-    averagePrice: position.averagePrice ?? null,
-    currentPrice: position.currentPrice ?? null,
-    accruedInterest: position.accruedInterest ?? null,
-  }
-}
-
-// Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается
-// уже после точечной записи и внутри той же транзакции, что и само изменение.
-async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {
-  const portfolio = await findPortfolio(client, userId)
-  if (!portfolio) return
-  const positions = await listPositions(client, userId)
-  if (!positions.length) return
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(portfolio.baseCurrency))
-  await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
-}
 async function loadUsers() {
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users')
   for (const row of result.rows) {
@@ -431,94 +398,7 @@ app.patch('/api/settings', async (request, response) => {
 // §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе
 // перезапуск сервера «отключал» бы брокера. Токен хранится только зашифрованным (§28,
 // server/token-crypto.ts) — расшифровывается на секунду вызова коннектора и никогда не логируется.
-const TINKOFF_PROVIDER = 'Т-Инвестиции'
-const BROKER_GROUP_TYPE: Record<'bond' | 'share' | 'fund' | 'deposit' | 'other', AssetGroupType> = {
-  bond: 'bond', share: 'share', fund: 'fund', deposit: 'deposit', other: 'other',
-}
-
-// Синхронизация (§19): позиции ставятся из ответа брокера целиком (количество/цены/стоимость
-// перезаписываются как авторитетные), а не разносятся через applyTransactionEffect — тот
-// путь предназначен для ручного/OCR-ввода и задвоил бы результат поверх уже готового снимка
-// брокера. Операции добавляются с дедупликацией по external_id, чтобы повторный запуск
-// не плодил дубликаты; связанные выплаты заводятся тем же syncPayoutForTransaction,
-// что и для ручных операций — у него нет побочных эффектов на позиции.
-async function performTinkoffSync(client: Db, userId: string, token: string): Promise<void> {
-  const data = await tinkoffConnector.fetchSyncData(token)
-  const portfolio = await ensurePortfolio(client, userId, randomUUID())
-  const instrumentIdByExternal = new Map<string, string>()
-
-  for (const brokerPosition of data.positions) {
-    let instrument = await findInstrumentByKey(client, userId, {
-      isin: brokerPosition.instrument.isin, ticker: brokerPosition.instrument.ticker,
-    })
-    if (!instrument) {
-      instrument = {
-        id: randomUUID(),
-        groupType: BROKER_GROUP_TYPE[brokerPosition.instrument.assetType] ?? 'other',
-        instrumentType: brokerPosition.instrument.assetType,
-        name: brokerPosition.instrument.name,
-        currency: brokerPosition.instrument.currency,
-        source: 'broker',
-        ticker: brokerPosition.instrument.ticker,
-        isin: brokerPosition.instrument.isin,
-        nominal: brokerPosition.instrument.nominal,
-        maturityDate: brokerPosition.instrument.maturityDate,
-        couponRate: brokerPosition.instrument.couponRate,
-      }
-      await insertInstrument(client, userId, instrument)
-    }
-    instrumentIdByExternal.set(brokerPosition.instrument.externalId, instrument.id)
-
-    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
-      type: 'broker', provider: TINKOFF_PROVIDER, currency: instrument.currency,
-    })
-    const existing = await findPositionByAccountInstrument(client, userId, account.id, instrument.id)
-    const invested = brokerPosition.averagePrice !== null
-      ? brokerPosition.averagePrice * brokerPosition.quantity
-      : (existing?.invested ?? 0)
-    const record: PositionRecord = {
-      id: existing?.id ?? randomUUID(),
-      accountId: account.id,
-      instrumentId: instrument.id,
-      quantity: brokerPosition.quantity,
-      averagePrice: brokerPosition.averagePrice ?? undefined,
-      currentPrice: brokerPosition.currentPrice ?? undefined,
-      value: brokerPosition.currentValue ?? undefined,
-      invested,
-      source: 'broker',
-      openedOn: existing?.openedOn,
-    }
-    if (existing) await updatePosition(client, userId, record)
-    else await insertPosition(client, record)
-  }
-
-  for (const operation of data.operations) {
-    if (await findTransactionByExternalId(client, userId, operation.externalId)) continue
-    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
-      type: 'broker', provider: TINKOFF_PROVIDER, currency: operation.currency,
-    })
-    const transaction: Transaction = {
-      id: randomUUID(),
-      accountId: account.id,
-      type: operation.type,
-      date: operation.date.slice(0, 10),
-      amount: operation.amount,
-      currency: operation.currency,
-      commission: operation.commission ?? 0,
-      tax: 0,
-      source: 'broker',
-      instrumentId: operation.instrumentExternalId ? instrumentIdByExternal.get(operation.instrumentExternalId) : undefined,
-      quantity: operation.quantity,
-      price: operation.price,
-      description: operation.description,
-      externalId: operation.externalId,
-    }
-    await insertTransaction(client, transaction)
-    await syncPayoutForTransaction(client, transaction)
-  }
-
-  await recordSnapshot(client, userId)
-}
+// performTinkoffSync — импортирован из daily-tasks.ts (используется и планировщиком).
 
 app.get('/api/brokers/tinkoff', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -585,30 +465,13 @@ app.post('/api/brokers/tinkoff/sync', async (request, response) => {
   }
 })
 
-// §20: обновление текущей цены акций/фондов по данным MOEX ISS — явное действие
-// пользователя (кнопка «Обновить цены»), а не фоновая задача (в проекте нет Celery/Redis,
-// см. решение по стеку в начале плана) и не побочный эффект каждого GET (непредсказуемые
-// записи в БД на чтении — хуже, чем явная кнопка с понятным результатом).
+// §20: обновление текущей цены акций/фондов по данным MOEX ISS — раньше было исключительно
+// явным действием пользователя (кнопка «Обновить цены»); теперь та же логика (daily-tasks.ts)
+// используется и планировщиком (§19/§21/§32), кнопка вызывает тот же код внутри транзакции.
 app.post('/api/market-data/refresh', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  const positions = await listPositions(db, userId)
-  const eligible = positions.filter((position) =>
-    position.source !== 'broker'
-    && Boolean(position.quantity)
-    && Boolean(position.instrument.ticker)
-    && (position.instrument.groupType === 'share' || position.instrument.groupType === 'fund'),
-  )
-  let updated = 0
-  await withTransaction(db, async (client) => {
-    for (const position of eligible) {
-      const price = await getMoexLastPrice(position.instrument.ticker!)
-      if (price === null) continue
-      await updatePositionMarketPrice(client, userId, { id: position.id, currentPrice: price, value: price * position.quantity! })
-      updated += 1
-    }
-    if (updated > 0) await recordSnapshot(client, userId)
-  })
-  response.json({ checked: eligible.length, updated })
+  const result = await withTransaction(db, (client) => refreshMarketPrices(client, userId))
+  response.json(result)
 })
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'portfolio-api' }))
@@ -1049,10 +912,6 @@ const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRA
 const CASH_CREDIT: TransactionType[] = ['DEPOSIT', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION']
 const CASH_DEBIT: TransactionType[] = ['WITHDRAW', 'FEE', 'TAX']
 const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
-// Операции, которые одновременно являются полученной выплатой и попадают в календарь (§22).
-const PAYOUT_BY_TRANSACTION: Partial<Record<TransactionType, PayoutType>> = {
-  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION',
-}
 
 function transactionType(value: unknown): TransactionType {
   const raw = requiredText(value, 'type').toUpperCase()
@@ -1120,26 +979,7 @@ async function applyTransactionEffect(positions: PositionCache, transaction: Pic
   }
 }
 
-// Полученная выплата (купон, дивиденд, проценты, погашение) попадает и в операции, и в
-// календарь выплат (§22): календарная запись создаётся вместе с операцией и живёт ровно
-// столько же, поэтому в сводке она считается один раз.
-async function syncPayoutForTransaction(client: Db, transaction: Transaction) {
-  await deletePayoutsForTransaction(client, transaction.id)
-  const type = PAYOUT_BY_TRANSACTION[transaction.type]
-  if (!type) return
-  await insertPayout(client, {
-    id: randomUUID(),
-    accountId: transaction.accountId,
-    instrumentId: transaction.instrumentId,
-    transactionId: transaction.id,
-    date: transaction.date,
-    type,
-    amount: transaction.amount,
-    currency: transaction.currency,
-    status: 'received',
-    description: transaction.description,
-  })
-}
+// syncPayoutForTransaction — импортирован из daily-tasks.ts (используется и планировщиком).
 
 async function buildTransaction(client: Db, userId: string, id: string, body: PositionBody, existing?: Transaction): Promise<Transaction> {
   const type = body.type !== undefined || !existing ? transactionType(body.type) : existing.type
