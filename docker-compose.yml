@@ -101,9 +101,16 @@ services:
     environment:
       NODE_ENV: production
       SCHEDULER_INTERVAL_SECONDS: 86400
+      # §34: очередь OCR обрабатывается тем же процессом, но своим быстрым циклом —
+      # загруженный скриншот не может ждать суточного такта.
+      OCR_POLL_SECONDS: 2
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      # Тот же том, что у backend: HTTP-обработчик кладёт сюда загруженный файл,
+      # а распознаёт его воркер планировщика — без общего тома он не увидит файл.
+      - backend_uploads:/app/server/uploads
 
 volumes:
   postgres_data:

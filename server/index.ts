@@ -12,12 +12,12 @@ import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import {
-  aggregateByGroup, aggregateByKey, calculateReturns, resolveAssetGroup,
-  type AssetGroup, type Breakdown, type KeyedValuation,
+  aggregateByGroup, aggregateByKey, calculateReturns,
+  type Breakdown, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
-  accountTypeFor, createPosition, mergeInstrument, optionalBool, optionalNumber, optionalText,
+  accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
   positionToWire, positiveNumber, requiredText, MANUAL_PROVIDER, type PositionBody,
 } from './positions.ts'
 import {
@@ -29,13 +29,14 @@ import {
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
   findCashPosition, findPayout, findPortfolio, findPosition,
   findTransaction,
-  insertInstrument, insertPayout, insertPosition, insertTransaction,
+  findUploadedDocument, insertUploadedDocument,
+  insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
   sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
-  updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection, upsertSnapshot,
+  updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
-  type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument,
-  type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Portfolio, type Position,
+  type Db, type Instrument,
+  type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Position,
   type Transaction, type TransactionType,
 } from './repository.ts'
 

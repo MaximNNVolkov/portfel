@@ -54,6 +54,14 @@ export function toCandidateName(raw: string): string {
 export function normalizeOcrName(name: string): string {
   return name.trim().toLowerCase()
 }
+// Числа в строке скриншота. Разряды разделяются пробелом («350 000»), поэтому просто взять
+// всё подряд идущее из цифр и пробелов нельзя: в «ОФЗ 26238 120 000» это склеилось бы
+// в 26 миллиардов. Группа разрядов — ровно три цифры, всё остальное считается отдельным
+// числом (номер выпуска, год, количество).
+const NUMBER_PATTERN = /\d{1,3}(?:[ \u00a0\u2009]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?/g
+export function extractNumbers(block: string): number[] {
+  return [...block.matchAll(NUMBER_PATTERN)].map((match) => parseNumber(match[0]))
+}
 export function buildOcrCandidates(text: string) {
   const blocks = text
     .split(/\n|\r|\|\s*\|/)
@@ -67,11 +75,16 @@ export function buildOcrCandidates(text: string) {
     const hasMoney = /(₽|руб|RUB|USD|EUR|\$|€)/i.test(block) || /\d{2,}.*\d{2,}/.test(block)
     if (!hasNumbers || !hasMoney) continue
 
-    const digits = [...block.matchAll(/\d[\d\s.,]{2,}/g)].map((match) => parseNumber(match[0]))
+    const digits = extractNumbers(block)
     if (!digits.length) continue
 
     const amount = digits.filter((value) => value > 0).sort((a, b) => b - a)[0] || 0
-    const invested = digits.filter((value) => value > 0 && value !== amount).sort((a, b) => a - b)[0] || amount
+    // Второе число строки считается «вложено» только если оно того же порядка, что и сумма.
+    // В строке вида «ОФЗ 26238 120 000 ₽» меньшее число — часть названия выпуска, а не
+    // сумма вложения, и подставлять его означало бы нарисовать несуществующую доходность
+    // (§7.3: лучше честное «результат неизвестен», чем выдуманная цифра).
+    const candidateInvested = digits.filter((value) => value > 0 && value !== amount).sort((a, b) => b - a)[0]
+    const invested = candidateInvested !== undefined && candidateInvested >= amount * 0.5 ? candidateInvested : amount
     const name = toCandidateName(block)
     const type = inferAssetType(block)
     const currency = normalizeCurrency(block)
@@ -130,7 +143,11 @@ async function recognizeText(filePath: string): Promise<string> {
   const worker = await createWorker('rus+eng')
   try {
     const result = await worker.recognize(filePath)
-    return result.data.text.replace(/\s+/g, ' ').trim()
+    // Схлопываем только горизонтальные пробелы: переводы строк — единственная разметка,
+    // по которой buildOcrCandidates отделяет один продукт от другого (§18 «несколько
+    // продуктов на одном изображении»), и стирать их означает склеить весь скриншот
+    // в одну запись с бессмысленной суммой.
+    return result.data.text.replace(/[^\S\n]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim()
   } finally {
     await worker.terminate()
   }

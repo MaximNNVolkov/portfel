@@ -263,6 +263,10 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "/api";
+// Опрос статуса OCR (§34): интервал заметно больше такта воркера (OCR_POLL_SECONDS),
+// чтобы страница не долбила API, но результат появлялся почти сразу после обработки.
+const OCR_POLL_INTERVAL_MS = 1500;
+const OCR_WAIT_LIMIT_MS = 3 * 60 * 1000;
 const tokenKey = "capital-api-token";
 const themeKey = "capital-theme-preference";
 type ThemePreference = "light" | "dark" | "system";
@@ -3107,6 +3111,9 @@ function ProductFormPage({
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
+  // §34: статус асинхронной операции виден пользователю — очередь и распознавание
+  // различаются, потому что документ может ждать освободившегося воркера.
+  const [ocrStage, setOcrStage] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -3158,27 +3165,29 @@ function ProductFormPage({
       setSaving(false);
     }
   };
+  // §34: распознавание вынесено из HTTP-запроса в фоновый воркер, поэтому загрузка только
+  // ставит документ в очередь и возвращает 202, а страница опрашивает его статус.
   async function recognizeScreenshot() {
     if (!file) return;
     setRecognizing(true);
+    setOcrStage("Загружаем скриншот...");
     setError("");
     try {
-      const response = await fetch(`${apiUrl}/ocr/upload`, {
+      const uploadResponse = await fetch(`${apiUrl}/ocr/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
       });
-      const result = (await response.json()) as {
-        error?: string;
-        date?: string;
-        items?: Product[];
-        failures?: OcrFailure[];
-      };
-      if (response.status === 401) {
+      if (uploadResponse.status === 401) {
         onUnauthorized();
         return;
       }
-      if (!response.ok) throw new Error(result.error || "Не удалось распознать изображение");
+      const uploaded = (await uploadResponse.json()) as { error?: string; documentId?: string };
+      if (!uploadResponse.ok || !uploaded.documentId) {
+        throw new Error(uploaded.error || "Не удалось загрузить изображение");
+      }
+      setOcrStage("В очереди на распознавание...");
+      const result = await waitForOcrResult(uploaded.documentId);
       onOcrComplete({
         date: result.date || new Date().toISOString().slice(0, 10),
         items: result.items || [],
@@ -3188,6 +3197,35 @@ function ProductFormPage({
       setError(recognitionError instanceof Error ? recognitionError.message : "Не удалось распознать изображение");
     } finally {
       setRecognizing(false);
+      setOcrStage("");
+    }
+  }
+  // Опрос статуса документа. Верхняя граница ожидания нужна, чтобы страница не висела
+  // бесконечно, если воркер планировщика не запущен: пользователю честно говорим, что
+  // обработка продолжается, а результат появится в портфеле сам.
+  async function waitForOcrResult(documentId: string) {
+    const deadline = Date.now() + OCR_WAIT_LIMIT_MS;
+    for (;;) {
+      await new Promise((wake) => setTimeout(wake, OCR_POLL_INTERVAL_MS));
+      const response = await fetch(`${apiUrl}/ocr/documents/${documentId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.status === 401) {
+        onUnauthorized();
+        throw new Error("Сессия истекла");
+      }
+      const status = (await response.json()) as {
+        error?: string;
+        status?: string;
+        result?: { date?: string; items?: Product[]; failures?: OcrFailure[] };
+      };
+      if (!response.ok) throw new Error(status.error || "Не удалось получить статус распознавания");
+      if (status.status === "processing") setOcrStage("Распознаём изображение...");
+      if (status.status === "failed") throw new Error(status.error || "Не удалось распознать изображение");
+      if (status.status === "done") return status.result || {};
+      if (Date.now() > deadline) {
+        throw new Error("Распознавание занимает дольше обычного. Записи появятся в портфеле, когда обработка завершится.");
+      }
     }
   }
   return (
@@ -3230,7 +3268,7 @@ function ProductFormPage({
                 disabled={recognizing}
                 type="button"
               >
-                {recognizing ? "Распознаём и сохраняем..." : "Распознать и сохранить"}
+                {recognizing ? ocrStage || "Распознаём и сохраняем..." : "Распознать и сохранить"}
               </button>
             </>
           )}

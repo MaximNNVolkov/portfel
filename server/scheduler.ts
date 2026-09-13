@@ -3,6 +3,7 @@ import { Pool, types } from 'pg'
 import { logError } from './logger.ts'
 import { decryptToken } from './token-crypto.ts'
 import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
+import { processNextDocument } from './ocr.ts'
 import {
   findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
   updateBrokerConnectionSync, withTransaction,
@@ -21,6 +22,10 @@ const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@lo
 const db = new Pool({ connectionString: databaseUrl, max: 5 })
 
 const INTERVAL_SECONDS = Number(process.env.SCHEDULER_INTERVAL_SECONDS || 86400)
+// Очередь OCR живёт в том же процессе, но в отдельном цикле: раз в сутки — неприемлемое
+// ожидание для загруженного скриншота, а суточные задачи, наоборот, нечего гонять каждые
+// две секунды. §34 требует именно асинхронного выполнения со статусом, а не быстрого.
+const OCR_POLL_SECONDS = Number(process.env.OCR_POLL_SECONDS || 2)
 
 // §19: MVP поддерживает единственного брокера (Т-Инвестиции) — интерфейс BrokerConnector
 // (server/brokers/types.ts) уже спроектирован под несколько коннекторов, но сам планировщик
@@ -72,11 +77,26 @@ async function runDailyTasks(): Promise<void> {
   console.log(`[scheduler] ${new Date().toISOString()} daily run: done (${connections.length} connections, ${portfolios.length} portfolios)`)
 }
 
-async function loop(): Promise<void> {
+const sleep = (seconds: number) => new Promise((resolveDelay) => setTimeout(resolveDelay, seconds * 1000))
+
+async function dailyLoop(): Promise<void> {
   for (;;) {
     await runDailyTasks().catch((error) => logError('scheduler.run', error))
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, INTERVAL_SECONDS * 1000))
+    await sleep(INTERVAL_SECONDS)
   }
 }
 
-loop()
+// Очередь вычерпывается до конца, и только на пустой очереди воркер засыпает: несколько
+// скриншотов, загруженных подряд, не должны ждать по такту опроса каждый.
+async function ocrLoop(): Promise<void> {
+  for (;;) {
+    const processed = await processNextDocument(db).catch((error) => {
+      logError('scheduler.ocr', error)
+      return false
+    })
+    if (!processed) await sleep(OCR_POLL_SECONDS)
+  }
+}
+
+dailyLoop()
+ocrLoop()
