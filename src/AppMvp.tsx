@@ -904,6 +904,9 @@ function AppMvp() {
       body: JSON.stringify({
         email: form.get("email"),
         password: form.get("password"),
+        // Код приглашения нужен только при регистрации и только если сервер его
+        // требует (REGISTRATION_INVITE_CODE, §28) — при входе поле не отправляется.
+        ...(mode === "register" ? { inviteCode: form.get("inviteCode") } : {}),
       }),
     });
     if (!response.ok) {
@@ -2833,6 +2836,17 @@ function Login({
             required
           />
         </label>
+        {mode === "register" && (
+          <label>
+            Код приглашения
+            <input
+              name="inviteCode"
+              type="text"
+              placeholder="Выдаётся владельцем стенда"
+              autoComplete="off"
+            />
+          </label>
+        )}
         <button className="primary-button" type="submit">
           {mode === "login" ? "Войти в портфель" : "Зарегистрироваться"}
         </button>

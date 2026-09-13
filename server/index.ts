@@ -49,6 +49,10 @@ type Snapshot = { date: string; value: number; invested: number | null }
 type User = { id: string; email: string; passwordHash: string; salt: string }
 
 const app = express()
+// За nginx (стенд и production) все запросы приходят с адреса прокси. Без этого
+// express-rate-limit считает всех пользователей одним клиентом, и лимит в 10 попыток
+// входа за 15 минут становится общим на всех сразу (§28).
+app.set('trust proxy', 1)
 const port = Number(process.env.PORT || 3001)
 // Дефолт с логином и паролем из репозитория годится только для локальной разработки:
 // в production молчаливый откат на него означал бы подключение не к той базе или
@@ -158,8 +162,20 @@ async function currentUserId(request: Request, response: Response): Promise<stri
   return userId
 }
 
+// §28: на публичном стенде регистрация не должна быть открыта всему интернету —
+// чужой аккаунт означает чужие персональные и финансовые данные в нашей базе.
+// Если REGISTRATION_INVITE_CODE задан, регистрация требует совпадающий код; если
+// переменная пуста (локальная разработка) — поведение прежнее.
+const registrationInviteCode = (process.env.REGISTRATION_INVITE_CODE || '').trim()
+
 app.post('/api/auth/register', authLimiter, async (request, response) => {
   try {
+    if (registrationInviteCode) {
+      const provided = typeof request.body?.inviteCode === 'string' ? request.body.inviteCode.trim() : ''
+      if (provided !== registrationInviteCode) {
+        return response.status(403).json({ error: 'Неверный код приглашения' })
+      }
+    }
     const email = requiredText(request.body?.email, 'email').toLowerCase()
     const password = requiredText(request.body?.password, 'password')
     if (password.length < 8) return response.status(400).json({ error: 'Password must contain at least 8 characters' })
