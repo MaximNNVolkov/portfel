@@ -84,6 +84,27 @@ services:
       - ./scripts/restore.sh:/restore.sh:ro
     entrypoint: ["sh", "/backup.sh"]
 
+  # §19/§21/§32: ежедневные snapshots, автосинхронизация брокера и обновление цен MOEX —
+  # раньше только по явному действию пользователя. Тот же образ, что и backend (тот же код,
+  # server/scheduler.ts переиспользует server/daily-tasks.ts), но отдельный процесс/контейнер,
+  # а не встроенный в HTTP-сервер таймер — падение или рестарт backend не должны влиять
+  # на фоновые задачи и наоборот.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: portfel-scheduler
+    restart: unless-stopped
+    command: ["npx", "tsx", "server/scheduler.ts"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      SCHEDULER_INTERVAL_SECONDS: 86400
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   backend_uploads:
