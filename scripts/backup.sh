@@ -14,7 +14,9 @@ run_backup() {
   timestamp=$(date -u +%Y%m%d-%H%M%S)
   file="$BACKUP_DIR/portfel-$timestamp.sql.gz"
   echo "[backup] $(date -u -Iseconds) starting backup to $file"
-  if pg_dump -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" | gzip > "$file.tmp"; then
+  # --clean --if-exists: дамп содержит DROP перед CREATE, поэтому restore.sh можно
+  # накатывать поверх уже заполненной базы, не только поверх пустой (см. scripts/restore.sh).
+  if pg_dump -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" --clean --if-exists | gzip > "$file.tmp"; then
     mv "$file.tmp" "$file"
     echo "[backup] $(date -u -Iseconds) backup complete: $file"
   else
