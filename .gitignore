@@ -35,3 +35,4 @@ server/users.json
 server/data.json
 server/uploads/
 *.traineddata
+scripts/__pycache__/
