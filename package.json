@@ -11,7 +11,8 @@
     "dev:full": "concurrently \"npm run api\" \"npm run scheduler\" \"npm run dev\"",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsx server/smoke-test.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
