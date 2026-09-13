@@ -3,12 +3,10 @@ import express, { type Request, type Response } from 'express'
 import helmet from 'helmet'
 import { rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
-import { unlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import multer from 'multer'
 import { Pool, types } from 'pg'
-import { createWorker } from 'tesseract.js'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
@@ -18,6 +16,10 @@ import {
   type AssetGroup, type Breakdown, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
+import {
+  accountTypeFor, createPosition, mergeInstrument, optionalBool, optionalNumber, optionalText,
+  positionToWire, positiveNumber, requiredText, MANUAL_PROVIDER, type PositionBody,
+} from './positions.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts,
@@ -42,17 +44,6 @@ import {
 // breaking every frontend helper that expects a plain date string).
 types.setTypeParser(1082, (value) => value)
 
-function optionalNumber(value: unknown): number | undefined {
-  if (value === undefined || value === null || value === '') return undefined
-  const result = Number(value)
-  return Number.isFinite(result) ? result : undefined
-}
-function optionalText(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
-}
-function optionalBool(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined
-}
 type Snapshot = { date: string; value: number; invested: number | null }
 type User = { id: string; email: string; passwordHash: string; salt: string }
 
@@ -92,66 +83,6 @@ async function resolveBaseCurrency(client: Db, userId: string): Promise<string> 
 }
 
 // GROUP_LABELS — импортирован из daily-tasks.ts (используется и планировщиком).
-const GROUP_TYPES: Record<AssetGroup, AssetGroupType> = {
-  'Вклады': 'deposit', 'Облигации': 'bond', 'Акции': 'share', 'Фонды': 'fund', 'Деньги': 'cash', 'Прочее': 'other',
-}
-const MANUAL_PROVIDER = 'Ручной ввод'
-
-function toGroupType(value: unknown): AssetGroupType {
-  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  if (raw in GROUP_LABELS) return raw as AssetGroupType
-  return GROUP_TYPES[resolveAssetGroup(typeof value === 'string' ? value : null)]
-}
-// Тип счёта выводится так же, как при бэкфилле: ручные записи — прочий счёт,
-// вклады — банковский, остальное — брокерский (§11 Account).
-function accountTypeFor(provider: string, groupType: AssetGroupType): AccountType {
-  if (provider === MANUAL_PROVIDER) return 'other'
-  if (groupType === 'deposit') return 'bank'
-  return 'broker'
-}
-
-// Позиция наружу — плоская запись: поля позиции (§11 Position) вместе с параметрами
-// её инструмента (§11 Instrument) и названием счёта, чтобы карточка инструмента (§9)
-// собиралась одним запросом.
-function positionToWire(position: Position) {
-  const instrument = position.instrument
-  return {
-    id: position.id,
-    accountId: position.accountId,
-    instrumentId: position.instrumentId,
-    name: instrument.name,
-    type: GROUP_LABELS[instrument.groupType] ?? 'Прочее',
-    instrumentType: instrument.instrumentType,
-    // Текущая стоимость. null = актуальной цены нет; ноль вместо неё не подставляется (§7.3).
-    amount: position.value ?? null,
-    invested: position.invested,
-    ticker: instrument.ticker ?? '',
-    date: position.openedOn ?? '',
-    institution: position.account.provider,
-    currency: instrument.currency,
-    source: position.source,
-    isin: instrument.isin,
-    issuer: instrument.issuer,
-    quantity: position.quantity,
-    averagePrice: position.averagePrice,
-    currentPrice: position.currentPrice,
-    accruedInterest: position.accruedInterest,
-    nominal: instrument.nominal,
-    couponRate: instrument.couponRate,
-    couponDate: instrument.couponDate,
-    maturityDate: instrument.maturityDate,
-    ofertaDate: instrument.ofertaDate,
-    amortization: instrument.amortization,
-    rate: instrument.rate,
-    effectiveRate: instrument.effectiveRate,
-    capitalization: instrument.capitalization,
-    termEndDate: instrument.termEndDate,
-    interestPayoutFrequency: instrument.interestPayoutFrequency,
-    replenishable: instrument.replenishable,
-    partialWithdrawal: instrument.partialWithdrawal,
-    autoProlongation: instrument.autoProlongation,
-  }
-}
 function instrumentToWire(instrument: Instrument) {
   return { ...instrument, type: GROUP_LABELS[instrument.groupType] ?? 'Прочее' }
 }
@@ -193,10 +124,6 @@ async function loadUsers() {
     users.set(row.id, { id: row.id, email: row.email, passwordHash: row.passwordHash, salt: row.salt })
   }
 }
-function requiredText(value: unknown, field: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is required`)
-  return value.trim()
-}
 function listOptions(request: Request): ListOptions | undefined {
   const limit = optionalNumber(request.query.limit)
   const offset = optionalNumber(request.query.offset)
@@ -212,110 +139,6 @@ function decodeUploadName(value: string) {
   } catch {
     return value
   }
-}
-function normalizeCurrency(value: string): string {
-  const normalized = value.trim().toUpperCase()
-  if (/RUB|₽|РУБ/.test(normalized)) return 'RUB'
-  if (/USD|\$/.test(normalized)) return 'USD'
-  if (/EUR|€/.test(normalized)) return 'EUR'
-  return 'RUB'
-}
-function parseNumber(value: string): number {
-  const sanitized = value.replace(/\s+/g, '').replace(/ /g, '').replace(/[^\d,.-]/g, '')
-  if (!sanitized || sanitized === '-' || sanitized === '.') return 0
-  const numeric = sanitized.replace(/,/g, '.')
-  const result = Number(numeric)
-  return Number.isFinite(result) ? result : 0
-}
-function inferAssetType(text: string): AssetGroup {
-  const haystack = text.toLowerCase()
-  if (/(офз|облигац|bond|coupon|coupon)/.test(haystack)) return 'Облигации'
-  if (/(акц|share|stock|sber|gazp|yandex|aapl|msft|nvda|tsla)/.test(haystack)) return 'Акции'
-  if (/(вклад|депозит|deposit|срок)/.test(haystack)) return 'Вклады'
-  if (/(фонд|etf|fund|пай|paй)/.test(haystack)) return 'Фонды'
-  if (/(деньг|cash|налич|остаток)/.test(haystack)) return 'Деньги'
-  return 'Прочее'
-}
-function toCandidateName(raw: string): string {
-  const cleaned = raw
-    .replace(/^(название|инструмент|product|asset|сумма|стоимость|цена)\s*[:\-]*/i, '')
-    .replace(/\s*(?:₽|руб|RUB|USD|EUR|%|\d[\d\s.,]*)+$/g, '')
-    .replace(/[|•\n\t]+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim()
-  return cleaned.slice(0, 120) || 'Распознанный продукт'
-}
-// §18 дедупликация: единственные поля, которые эвристический OCR-парсер извлекает надёжно —
-// название и сумма (без ISIN/тикера/даты погашения/банка) — см. Пункт 14 плана.
-function normalizeOcrName(name: string): string {
-  return name.trim().toLowerCase()
-}
-function buildOcrCandidates(text: string) {
-  const blocks = text
-    .split(/\n|\r|\|\s*\|/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 4)
-
-  const candidates: Array<{ name: string; type: AssetGroup; amount: number; invested: number; currency: string; deltaPercent: number; confidence: number; missingFields: string[] }> = []
-
-  for (const block of blocks) {
-    const hasNumbers = /\d/.test(block)
-    const hasMoney = /(₽|руб|RUB|USD|EUR|\$|€)/i.test(block) || /\d{2,}.*\d{2,}/.test(block)
-    if (!hasNumbers || !hasMoney) continue
-
-    const digits = [...block.matchAll(/\d[\d\s.,]{2,}/g)].map((match) => parseNumber(match[0]))
-    if (!digits.length) continue
-
-    const amount = digits.filter((value) => value > 0).sort((a, b) => b - a)[0] || 0
-    const invested = digits.filter((value) => value > 0 && value !== amount).sort((a, b) => a - b)[0] || amount
-    const name = toCandidateName(block)
-    const type = inferAssetType(block)
-    const currency = normalizeCurrency(block)
-    const deltaPercent = amount > 0 && invested > 0 ? ((amount - invested) / invested) * 100 : 0
-    const missingFields: string[] = []
-    if (!name || name === 'Распознанный продукт') missingFields.push('name')
-    if (!(amount > 0)) missingFields.push('amount')
-    if (!(invested > 0)) missingFields.push('invested')
-    if (type === 'Прочее') missingFields.push('type')
-
-    candidates.push({
-      name,
-      type,
-      amount,
-      invested,
-      currency,
-      deltaPercent,
-      confidence: amount > 0 ? 0.7 : 0.4,
-      missingFields,
-    })
-  }
-
-  const unique = candidates.filter((candidate, index, list) => {
-    const sameName = list.findIndex((item) => item.name === candidate.name && item.amount === candidate.amount)
-    return sameName === index
-  })
-
-  if (!unique.length) {
-    const amountMatch = text.match(/(?:₽|руб(?:лей|\.)?|RUB|USD|EUR)\s*([\d\s,\.]+)/i) || text.match(/([\d\s]{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|USD|EUR)/i)
-    const amount = amountMatch ? parseNumber(amountMatch[1]) : 0
-    return [{
-      name: toCandidateName(text),
-      type: inferAssetType(text),
-      amount,
-      invested: amount,
-      currency: normalizeCurrency(text),
-      deltaPercent: 0,
-      confidence: amount > 0 ? 0.55 : 0.3,
-      missingFields: amount > 0 ? ['invested'] : ['name', 'amount', 'invested'],
-    }]
-  }
-
-  return unique.sort((a, b) => b.confidence - a.confidence).slice(0, 6)
-}
-function positiveNumber(value: unknown, field: string): number {
-  const result = Number(value)
-  if (!Number.isFinite(result) || result <= 0) throw new Error(`${field} must be positive`)
-  return result
 }
 function hashPassword(password: string, salt: string) { return scryptSync(password, salt, 64).toString('hex') }
 function authToken(request: Request) { const value = request.headers.authorization; return value?.startsWith('Bearer ') ? value.slice(7) : '' }
@@ -481,102 +304,6 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, service
 // Позиции и инструменты (§8, §9, §11)
 // ---------------------------------------------------------------------------
 
-type PositionBody = Record<string, unknown>
-
-function instrumentFromBody(body: PositionBody, id: string, source: DataSource): Instrument {
-  const groupType = toGroupType(body.type)
-  return {
-    id,
-    groupType,
-    instrumentType: optionalText(body.instrumentType) || groupType,
-    name: requiredText(body.name, 'name'),
-    currency: optionalText(body.currency) || 'RUB',
-    source,
-    ticker: optionalText(body.ticker),
-    isin: optionalText(body.isin),
-    issuer: optionalText(body.issuer),
-    nominal: optionalNumber(body.nominal),
-    maturityDate: optionalText(body.maturityDate),
-    couponRate: optionalNumber(body.couponRate),
-    couponDate: optionalText(body.couponDate),
-    ofertaDate: optionalText(body.ofertaDate),
-    amortization: optionalBool(body.amortization),
-    rate: optionalNumber(body.rate),
-    effectiveRate: optionalNumber(body.effectiveRate),
-    capitalization: optionalBool(body.capitalization),
-    termEndDate: optionalText(body.termEndDate),
-    interestPayoutFrequency: optionalText(body.interestPayoutFrequency),
-    replenishable: optionalBool(body.replenishable),
-    partialWithdrawal: optionalBool(body.partialWithdrawal),
-    autoProlongation: optionalBool(body.autoProlongation),
-  }
-}
-function mergeInstrument(existing: Instrument, body: PositionBody): Instrument {
-  const groupType = body.type !== undefined ? toGroupType(body.type) : existing.groupType
-  return {
-    ...existing,
-    groupType,
-    instrumentType: body.instrumentType !== undefined
-      ? (optionalText(body.instrumentType) || groupType)
-      : (body.type !== undefined ? groupType : existing.instrumentType),
-    name: body.name !== undefined ? requiredText(body.name, 'name') : existing.name,
-    currency: body.currency !== undefined ? (optionalText(body.currency) || 'RUB') : existing.currency,
-    ticker: body.ticker !== undefined ? optionalText(body.ticker) : existing.ticker,
-    isin: body.isin !== undefined ? optionalText(body.isin) : existing.isin,
-    issuer: body.issuer !== undefined ? optionalText(body.issuer) : existing.issuer,
-    nominal: body.nominal !== undefined ? optionalNumber(body.nominal) : existing.nominal,
-    maturityDate: body.maturityDate !== undefined ? optionalText(body.maturityDate) : existing.maturityDate,
-    couponRate: body.couponRate !== undefined ? optionalNumber(body.couponRate) : existing.couponRate,
-    couponDate: body.couponDate !== undefined ? optionalText(body.couponDate) : existing.couponDate,
-    ofertaDate: body.ofertaDate !== undefined ? optionalText(body.ofertaDate) : existing.ofertaDate,
-    amortization: body.amortization !== undefined ? optionalBool(body.amortization) : existing.amortization,
-    rate: body.rate !== undefined ? optionalNumber(body.rate) : existing.rate,
-    effectiveRate: body.effectiveRate !== undefined ? optionalNumber(body.effectiveRate) : existing.effectiveRate,
-    capitalization: body.capitalization !== undefined ? optionalBool(body.capitalization) : existing.capitalization,
-    termEndDate: body.termEndDate !== undefined ? optionalText(body.termEndDate) : existing.termEndDate,
-    interestPayoutFrequency: body.interestPayoutFrequency !== undefined ? optionalText(body.interestPayoutFrequency) : existing.interestPayoutFrequency,
-    replenishable: body.replenishable !== undefined ? optionalBool(body.replenishable) : existing.replenishable,
-    partialWithdrawal: body.partialWithdrawal !== undefined ? optionalBool(body.partialWithdrawal) : existing.partialWithdrawal,
-    autoProlongation: body.autoProlongation !== undefined ? optionalBool(body.autoProlongation) : existing.autoProlongation,
-  }
-}
-
-// Создание позиции — единая точка для ручного ввода (§17) и распознанных со скриншота
-// записей (§18): заводит портфель и счёт, если их ещё нет, затем инструмент и позицию.
-async function createPosition(client: Db, userId: string, body: PositionBody, source: DataSource): Promise<Position> {
-  const instrument = instrumentFromBody(body, randomUUID(), source)
-  const value = positiveNumber(body.amount, 'amount')
-  const invested = positiveNumber(body.invested ?? body.amount, 'invested')
-  const openedOn = requiredText(body.date, 'date')
-  const provider = optionalText(body.institution) || MANUAL_PROVIDER
-
-  const portfolio = await ensurePortfolio(client, userId, randomUUID())
-  const account = await ensureAccount(client, portfolio.id, randomUUID(), {
-    type: accountTypeFor(provider, instrument.groupType),
-    provider,
-    currency: instrument.currency,
-  })
-  await insertInstrument(client, userId, instrument)
-  const record = {
-    id: randomUUID(),
-    accountId: account.id,
-    instrumentId: instrument.id,
-    invested,
-    source,
-    value,
-    quantity: optionalNumber(body.quantity),
-    averagePrice: optionalNumber(body.averagePrice),
-    currentPrice: optionalNumber(body.currentPrice),
-    accruedInterest: optionalNumber(body.accruedInterest),
-    openedOn,
-  }
-  await insertPosition(client, record)
-  return {
-    ...record,
-    instrument,
-    account: { id: account.id, type: account.type, provider: account.provider, currency: account.currency },
-  }
-}
 
 app.get('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -679,62 +406,33 @@ app.get('/api/instruments', async (request, response) => {
 app.post('/api/ocr/upload', upload.single('image'), async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   if (!request.file) return response.status(400).json({ error: 'Изображение не загружено или имеет неподдерживаемый формат' })
-  const filename = decodeUploadName(request.file.originalname)
-  const worker = await createWorker('rus+eng')
-  try {
-    const result = await worker.recognize(request.file.path)
-    const text = result.data.text.replace(/\s+/g, ' ').trim()
-    const candidates = buildOcrCandidates(text)
-    const recognized = candidates.filter((candidate) => candidate.amount > 0 && candidate.name && candidate.name !== 'Распознанный продукт')
-    const date = new Date().toISOString().slice(0, 10)
-    // §40.4: распознанное сохраняется как есть, без шага подтверждения полей.
-    // §18 дедупликация (решено автономно: вариант А — см. план) — совпадение по названию+сумме
-    // не блокирует сохранение, а лишь помечается в ответе, чтобы пользователь заметил его сам
-    // на экране-сводке (что и так требуется читать по §40.4).
-    const duplicateFlags: boolean[] = []
-    const created = recognized.length
-      ? await withTransaction(db, async (client) => {
-          const existing = await listPositions(client, userId)
-          const knownAmounts = new Map<string, number>(
-            existing.map((position) => [normalizeOcrName(position.instrument.name), position.value ?? position.invested]),
-          )
-          const positions: Position[] = []
-          for (const candidate of recognized) {
-            const key = normalizeOcrName(candidate.name)
-            const knownAmount = knownAmounts.get(key)
-            duplicateFlags.push(knownAmount !== undefined && Math.abs(knownAmount - candidate.amount) < 0.01)
-            const position = await createPosition(client, userId, {
-              name: candidate.name,
-              type: candidate.type,
-              amount: candidate.amount,
-              invested: candidate.invested > 0 ? candidate.invested : candidate.amount,
-              date,
-              institution: 'Проверьте источник',
-              currency: candidate.currency,
-            }, 'ocr')
-            positions.push(position)
-            knownAmounts.set(key, position.value ?? position.invested)
-          }
-          await regenerateForecastPayouts(client, userId)
-          await recordSnapshot(client, userId)
-          return positions
-        })
-      : []
-    const unrecognizedCount = candidates.length - recognized.length
-    const failures = unrecognizedCount > 0
-      ? [{
-          filename,
-          reason: created.length === 0
-            ? 'Не удалось распознать данные на изображении'
-            : `Не удалось распознать ${unrecognizedCount} из ${candidates.length} позиций`,
-        }]
-      : []
-    const items = created.map((position, index) => ({ ...positionToWire(position), possibleDuplicate: duplicateFlags[index] }))
-    response.status(created.length ? 201 : 200).json({ date, items, failures })
-  } finally {
-    await worker.terminate()
-    await unlink(request.file.path).catch(() => undefined)
-  }
+  // §34: тяжёлая операция не выполняется внутри запроса — документ только встаёт в очередь
+  // (portfolio.uploaded_documents), распознаванием займётся воркер планировщика, а клиент
+  // опрашивает статус через GET /api/ocr/documents/:id.
+  const document = await insertUploadedDocument(db, userId, {
+    id: randomUUID(),
+    fileName: decodeUploadName(request.file.originalname),
+    filePath: request.file.path,
+    mimeType: request.file.mimetype,
+  })
+  response.status(202).json({ documentId: document.id, status: document.status })
+})
+
+app.get('/api/ocr/documents/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const document = await findUploadedDocument(db, userId, request.params.id)
+  if (!document) return response.status(404).json({ error: 'Документ не найден' })
+  response.json({
+    documentId: document.id,
+    status: document.status,
+    fileName: document.fileName,
+    createdAt: document.createdAt,
+    processedAt: document.processedAt,
+    // Тело результата — то же {date, items, failures}, что раньше приходило синхронным
+    // ответом на загрузку: экран-сводка (§40.4) читает его без изменений.
+    result: document.status === 'done' ? document.extractedJson : undefined,
+    error: document.errorMessage,
+  })
 })
 
 app.get('/api/portfolio/summary', async (request, response) => {

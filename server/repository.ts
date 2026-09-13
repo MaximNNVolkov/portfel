@@ -10,6 +10,10 @@ import type { Pool, PoolClient } from 'pg'
 
 // Любой исполнитель запроса: пул (автокоммит) или клиент внутри транзакции.
 export type Db = Pool | PoolClient
+// Пул реэкспортируется, чтобы фоновые модули (server/ocr.ts) могли типизировать свой
+// параметр без прямого импорта 'pg' — очередь работает только на пуле, не на клиенте
+// внутри транзакции: она сама открывает транзакцию на каждый шаг.
+export type { Pool }
 
 export type DataSource = 'manual' | 'ocr' | 'broker'
 export type AssetGroupType = 'deposit' | 'bond' | 'share' | 'fund' | 'cash' | 'other'
@@ -856,6 +860,98 @@ export async function updateBrokerConnectionSync(
        status = $3, last_sync_at = COALESCE($4, last_sync_at), last_error = $5
      WHERE user_id = $1 AND broker_type = $2`,
     [userId, brokerType, update.status, update.lastSyncAt ?? null, update.lastError ?? null],
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Очередь загруженных документов (§11 UploadedDocument, §18/§34)
+// ---------------------------------------------------------------------------
+
+export type UploadedDocumentStatus = 'pending' | 'processing' | 'done' | 'failed'
+export type UploadedDocument = {
+  id: string
+  userId: string
+  fileName: string
+  filePath?: string
+  mimeType?: string
+  status: UploadedDocumentStatus
+  extractedJson?: unknown
+  instrumentId?: string
+  errorMessage?: string
+  createdAt: string
+  processedAt?: string
+}
+
+const DOCUMENT_FIELDS = `id, user_id, file_name, file_path, mime_type, processing_status,
+  extracted_json, instrument_id, error_message, created_at, processed_at`
+
+function mapUploadedDocument(row: any): UploadedDocument {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    fileName: row.file_name,
+    filePath: text(row.file_path),
+    mimeType: text(row.mime_type),
+    status: row.processing_status,
+    extractedJson: row.extracted_json ?? undefined,
+    instrumentId: text(row.instrument_id),
+    errorMessage: text(row.error_message),
+    createdAt: new Date(row.created_at).toISOString(),
+    processedAt: row.processed_at ? new Date(row.processed_at).toISOString() : undefined,
+  }
+}
+
+export async function insertUploadedDocument(
+  db: Db, userId: string, document: { id: string; fileName: string; filePath: string; mimeType?: string },
+): Promise<UploadedDocument> {
+  const result = await db.query(
+    `INSERT INTO portfolio.uploaded_documents (id, user_id, file_name, file_path, mime_type)
+     VALUES ($1, $2, $3, $4, $5) RETURNING ${DOCUMENT_FIELDS}`,
+    [document.id, userId, document.fileName, document.filePath, document.mimeType ?? null],
+  )
+  return mapUploadedDocument(result.rows[0])
+}
+
+export async function findUploadedDocument(db: Db, userId: string, id: string): Promise<UploadedDocument | undefined> {
+  const result = await db.query(
+    `SELECT ${DOCUMENT_FIELDS} FROM portfolio.uploaded_documents WHERE user_id = $1 AND id = $2`,
+    [userId, id],
+  )
+  return result.rows[0] ? mapUploadedDocument(result.rows[0]) : undefined
+}
+
+// Забор задачи из очереди. FOR UPDATE SKIP LOCKED — чтобы второй воркер (или второй прогон
+// цикла, пока первый ещё занят) не взял тот же документ: строка помечается 'processing'
+// в той же атомарной операции, которой она выбирается.
+export async function claimPendingDocument(db: Db): Promise<UploadedDocument | undefined> {
+  const result = await db.query(
+    `UPDATE portfolio.uploaded_documents SET processing_status = 'processing'
+      WHERE id = (
+        SELECT id FROM portfolio.uploaded_documents
+         WHERE processing_status = 'pending'
+         ORDER BY created_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+      )
+      RETURNING ${DOCUMENT_FIELDS}`,
+  )
+  return result.rows[0] ? mapUploadedDocument(result.rows[0]) : undefined
+}
+
+export async function completeUploadedDocument(
+  db: Db, id: string,
+  update: { status: UploadedDocumentStatus; extractedJson?: unknown; instrumentId?: string; errorMessage?: string },
+): Promise<void> {
+  await db.query(
+    `UPDATE portfolio.uploaded_documents SET
+       processing_status = $2, extracted_json = $3, instrument_id = $4,
+       error_message = $5, processed_at = NOW(), file_path = NULL
+     WHERE id = $1`,
+    [
+      id, update.status,
+      update.extractedJson === undefined ? null : JSON.stringify(update.extractedJson),
+      update.instrumentId ?? null, update.errorMessage ?? null,
+    ],
   )
 }
 
