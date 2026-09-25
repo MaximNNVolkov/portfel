@@ -405,6 +405,36 @@ const typeColors: Record<AssetType, string> = {
   Деньги: "slate",
   Прочее: "pink",
 };
+// Те же цвета, что и .legend.* в App.css — держим строки в одном месте, чтобы сектор
+// диаграммы всегда совпадал по цвету с квадратом легенды (§7.2).
+const legendHexColors: Record<AssetType, string> = {
+  Облигации: "#65c4b1",
+  Акции: "#e7a05b",
+  Вклады: "#ebc677",
+  Фонды: "#7787ba",
+  Деньги: "#93a1a6",
+  Прочее: "#d98bbd",
+};
+// Строит conic-gradient из реальных долей групп (число секторов = числу групп, цвет —
+// как в легенде). Остаток до 100% (доли не покрывают весь портфель из-за недоступных
+// цен, §7.3) закрашивается нейтральным серым, а не растягивает реальные доли на весь круг.
+function donutGradient(groups: GroupSummary[]): string {
+  let cursor = 0;
+  const stops: string[] = [];
+  for (const groupSummary of groups) {
+    const share = Math.max(0, groupSummary.share ?? 0);
+    if (share <= 0) continue;
+    const start = cursor;
+    const end = Math.min(100, cursor + share);
+    const color = legendHexColors[groupSummary.group as AssetType] ?? "#93a1a6";
+    stops.push(`${color} ${start}% ${end}%`);
+    cursor = end;
+  }
+  if (cursor < 100) {
+    stops.push(`#e8edeb ${cursor}% 100%`);
+  }
+  return stops.length > 0 ? `conic-gradient(${stops.join(", ")})` : "conic-gradient(#e8edeb 0 100%)";
+}
 const payoutTypeLabels: Record<PayoutType, string> = {
   COUPON: "Купон",
   DIVIDEND: "Дивиденды",
@@ -1438,7 +1468,7 @@ function Dashboard({
       <section className="lower-grid">
         <article className="allocation-card">
           <div className="donut-wrap">
-            <div className="donut">
+            <div className="donut" style={{ background: donutGradient(groups) }}>
               <div>
                 <strong>
                   {hideAmounts
