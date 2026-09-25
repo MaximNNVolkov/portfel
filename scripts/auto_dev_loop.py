@@ -14,11 +14,12 @@
 - Останавливаемся к END_HOUR_MSK (передаём эстафету ночному крону 22:00+).
 """
 import subprocess, sys, time, json, os, datetime
+import re
 
 sys.path.insert(0, '/home/user1/.hermes/hermes-agent')
 from agent.account_usage import fetch_account_usage
 
-MIN_REMAINING_TO_RUN = 15.0   # % остатка сессии, при котором точно стоит запускать ещё раунд
+MIN_REMAINING_TO_RUN = 50.0   # % остатка сессии, при котором точно стоит запускать ещё раунд
 NEAR_RESET_MINUTES = 20       # если до сброса меньше — тоже можно попробовать успеть/дождаться
 POLL_INTERVAL_SEC = 300       # как часто перепроверять лимит, если решили подождать
 END_HOUR_MSK = 21
@@ -27,6 +28,8 @@ SESSION_ID = "4be6f868-b4f8-45ba-ae4e-abdbf236a67b"
 WORKDIR = "/home/user1/portfel"
 PROMPT_FILE = "/tmp/claude_continue_next2.txt"
 LOG = "/home/user1/portfel/.auto_dev_loop.log"
+FIX_PLAN = "/home/user1/portfel/docs/FIX_PLAN.md"
+NOTIFY_TARGET = "telegram"
 
 def log(msg):
     line = f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {msg}"
@@ -72,12 +75,68 @@ def safety_commit():
         else:
             log("safety_commit: tsc FAILED, leaving uncommitted for manual review")
 
+def count_open_items():
+    """Возвращает (done, total) по заголовкам '### ...' в FIX_PLAN.md.
+    Пункт считается закрытым, если в заголовке есть '✅'."""
+    try:
+        text = open(FIX_PLAN, encoding="utf-8").read()
+    except Exception:
+        return None, None
+    heads = re.findall(r"^### .*$", text, re.M)
+    done = sum(1 for h in heads if "✅" in h)
+    return done, len(heads)
+
+def git_new_commits(before_hash):
+    """Список (hash, subject) коммитов, появившихся после before_hash."""
+    rng = f"{before_hash}..HEAD" if before_hash else "-1"
+    cmd = ["git", "-C", WORKDIR, "log", "--reverse", "--pretty=%h %s"]
+    if before_hash:
+        cmd.append(rng)
+    else:
+        cmd = ["git", "-C", WORKDIR, "log", "-1", "--pretty=%h %s"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    lines = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    return lines
+
+def git_head():
+    r = subprocess.run(["git", "-C", WORKDIR, "rev-parse", "HEAD"], capture_output=True, text=True)
+    return r.stdout.strip()
+
+def notify_round(claude_summary, before_head, exit_code):
+    """Отправляет пользователю итог раунда: что сделано, что осталось."""
+    commits = git_new_commits(before_head)
+    done, total = count_open_items()
+    lines = ["🛠 portfel — раунд доработок завершён"]
+    if exit_code != 0:
+        lines[0] = "⚠️ portfel — раунд завершился с ошибкой (exit %d)" % exit_code
+    if commits:
+        lines.append("")
+        lines.append("Коммиты:")
+        for c in commits:
+            lines.append(f"• {c}")
+    else:
+        lines.append("")
+        lines.append("Коммитов в этом раунде не появилось.")
+    if claude_summary:
+        lines.append("")
+        lines.append("Резюме:")
+        lines.append(claude_summary.strip()[:1200])
+    if done is not None and total is not None:
+        lines.append("")
+        lines.append(f"Открыто пунктов FIX_PLAN.md: {total - done} из {total} (закрыто {done}).")
+    text = "\n".join(lines)
+    try:
+        subprocess.run(["hermes", "send", "--to", NOTIFY_TARGET, text], capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log(f"notify_round: hermes send failed: {e!r}")
+
 def run_claude_round():
     env = os.environ.copy()
     for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         env.pop(k, None)
     env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8787"
     prompt = open(PROMPT_FILE).read()
+    before_head = git_head()
     cmd = ["claude", "-p", prompt, "--resume", SESSION_ID, "--max-turns", "150", "--dangerously-skip-permissions"]
     log("run_claude_round: launching claude CLI round")
     result = subprocess.run(cmd, cwd=WORKDIR, env=env, capture_output=True, text=True)
@@ -85,6 +144,7 @@ def run_claude_round():
     if result.returncode != 0:
         log(f"stderr tail: {result.stderr[-800:]}")
     safety_commit()
+    notify_round(result.stdout, before_head, result.returncode)
 
 def main():
     log("=== auto_dev_loop start (5h-window mode, weekly limit ignored) ===")
