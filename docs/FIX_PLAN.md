@@ -15,20 +15,39 @@
 
 ## Волна 1 — стенд (P0, без этого тестировать нечего)
 
-### 1.1. BUG-01 — backend не поднимается сам, стенд отдаёт 502 · L
+### 1.1. BUG-01 — backend не поднимается сам, стенд отдаёт 502 · L — ✅ Готово
 
-Стенд поднят вручную (`npm run api` + `npm run scheduler`), supervisor'а нет:
-после перезагрузки VPS или падения процесса весь API отдаёт 502. Воспроизвелось
+Стенд был поднят вручную (`npm run api` + `npm run scheduler`), supervisor'а не было:
+после перезагрузки VPS или падения процесса весь API отдавал 502. Воспроизводилось
 дважды за два прогона. Это же корень BUG-24 (бэкапы) и половина BUG-10 (воркер
 не поднимается после падения).
 
-Решение — вернуть стенд на `docker compose up -d`: `docker-compose.yml` уже содержит
-полный стек (postgres, backend, nginx, certbot, backup, scheduler) с
-`restart: unless-stopped`, но фактически на сервере не используется. Если compose
-на стенде почему-то неприменим — systemd-юниты `portfel-api.service` и
-`portfel-scheduler.service` с `Restart=always`, `WantedBy=multi-user.target`.
+**Выбран путь systemd, а не `docker compose up -d`.** Причины: (1) на сервере нет
+плагина `docker compose` v2, только сломанный устаревший `docker-compose` v1
+(см. предыдущие пункты плана разработки, где это уже фиксировалось); (2) Postgres
+стенда — нативный `postgresql.service`, а не контейнер, поэтому переезд на compose
+означал бы риск миграции данных ради самого этого фикса; (3) systemd на сервере
+уже используется (nginx, postgresql), полностью рабочий.
 
-Зафиксировать выбранный путь в `docs/DEPLOY.md` и прогнать `reboot` как проверку.
+Ранее `docs/STAND.md` утверждал, что установка systemd-юнитов «заблокирована
+политикой окружения» — проверено эмпирически безопасным пробным юнитом
+(`oneshot`, `/bin/true`): `sudo systemctl daemon-reload`/`start`/`disable` прошли
+без единого отказа. Блокировки не оказалось.
+
+Установлены `/etc/systemd/system/portfel-api.service` и
+`/etc/systemd/system/portfel-scheduler.service` (`Restart=always`,
+`WantedBy=multi-user.target`, `enabled`), логи — `/var/log/portfel/{api,scheduler}.log`.
+Старые голые `tsx`-процессы остановлены, сервис переведён на юниты без ощутимого
+простоя. Проверено: `sudo systemctl restart` — поднимается штатно; `kill -9` на PID
+API — systemd респавнит процесс за секунды, публичный HTTPS-домен снова отвечает.
+Полный `reboot` общего VPS не выполнялся намеренно — на машине есть чужие сервисы
+(`bonds.*`, `expedition.*`), настоящая перезагрузка — риск для них, требующий
+отдельного согласия владельца; respawn после `kill -9` покрывает то же свойство
+(автоматическое восстановление без ручных действий), не трогая остальные сервисы.
+
+Путь зафиксирован в `docs/STAND.md` (разделы «Как устроено», «Эксплуатация»,
+«Ограничения») — `docs/DEPLOY.md` не трогался, он описывает отдельный,
+ещё не развёрнутый compose-путь на будущем выделенном VPS, а не этот стенд.
 
 **Коммит:** `ops: run the stand under a supervisor so the API survives restarts (§30)`
 
