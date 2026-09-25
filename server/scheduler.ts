@@ -5,9 +5,20 @@ import { decryptToken } from './token-crypto.ts'
 import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
 import { processNextDocument } from './ocr.ts'
 import {
-  findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
+  failStaleProcessingDocuments, findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
   updateBrokerConnectionSync, withTransaction,
 } from './repository.ts'
+
+// BUG-10: tesseract.js способен упасть необработанным исключением мимо try/catch внутри
+// recognizeText (например, из своего внутреннего воркер-скрипта) — без этих обработчиков
+// такое исключение убивало бы весь процесс планировщика, а вместе с ним и ocrLoop/dailyLoop
+// для всех пользователей, а не только сломанный документ.
+process.on('uncaughtException', (error) => {
+  logError('scheduler.uncaught-exception', error)
+})
+process.on('unhandledRejection', (error) => {
+  logError('scheduler.unhandled-rejection', error)
+})
 
 // Планировщик фоновых задач (§19/§21/§32) — раньше снимки портфеля, синхронизация брокера
 // и обновление цен MOEX происходили только по явному действию пользователя (кнопка/переход
@@ -26,6 +37,13 @@ const INTERVAL_SECONDS = Number(process.env.SCHEDULER_INTERVAL_SECONDS || 86400)
 // ожидание для загруженного скриншота, а суточные задачи, наоборот, нечего гонять каждые
 // две секунды. §34 требует именно асинхронного выполнения со статусом, а не быстрого.
 const OCR_POLL_SECONDS = Number(process.env.OCR_POLL_SECONDS || 2)
+
+// BUG-10: сколько документ может провисеть в processing (например, из-за падения процесса
+// между claimPendingDocument и completeUploadedDocument), прежде чем считать его зависшим
+// и пометить failed, чтобы очередь не блокировалась и пользователь увидел ошибку вместо
+// вечного «В очереди на распознавание…».
+const OCR_STALE_TIMEOUT_MINUTES = Number(process.env.OCR_STALE_TIMEOUT_MINUTES || 5)
+const OCR_STALE_CHECK_SECONDS = Number(process.env.OCR_STALE_CHECK_SECONDS || 60)
 
 // §19: MVP поддерживает единственного брокера (Т-Инвестиции) — интерфейс BrokerConnector
 // (server/brokers/types.ts) уже спроектирован под несколько коннекторов, но сам планировщик
@@ -98,5 +116,18 @@ async function ocrLoop(): Promise<void> {
   }
 }
 
+// Отдельный редкий цикл, а не проверка на каждом такте ocrLoop (2с) — сам таймаут (минуты)
+// на порядки больше такта опроса очереди, частая проверка только тратила бы запросы к БД.
+async function staleDocumentLoop(): Promise<void> {
+  for (;;) {
+    await failStaleProcessingDocuments(db, OCR_STALE_TIMEOUT_MINUTES).catch((error) => {
+      logError('scheduler.ocr-stale', error)
+      return 0
+    })
+    await sleep(OCR_STALE_CHECK_SECONDS)
+  }
+}
+
 dailyLoop()
 ocrLoop()
+staleDocumentLoop()

@@ -882,7 +882,7 @@ export type UploadedDocument = {
 }
 
 const DOCUMENT_FIELDS = `id, user_id, file_name, file_path, mime_type, processing_status,
-  extracted_json, instrument_id, error_message, created_at, processed_at`
+  extracted_json, instrument_id, error_message, created_at, processed_at, claimed_at`
 
 function mapUploadedDocument(row: any): UploadedDocument {
   return {
@@ -924,7 +924,7 @@ export async function findUploadedDocument(db: Db, userId: string, id: string): 
 // в той же атомарной операции, которой она выбирается.
 export async function claimPendingDocument(db: Db): Promise<UploadedDocument | undefined> {
   const result = await db.query(
-    `UPDATE portfolio.uploaded_documents SET processing_status = 'processing'
+    `UPDATE portfolio.uploaded_documents SET processing_status = 'processing', claimed_at = NOW()
       WHERE id = (
         SELECT id FROM portfolio.uploaded_documents
          WHERE processing_status = 'pending'
@@ -935,6 +935,23 @@ export async function claimPendingDocument(db: Db): Promise<UploadedDocument | u
       RETURNING ${DOCUMENT_FIELDS}`,
   )
   return result.rows[0] ? mapUploadedDocument(result.rows[0]) : undefined
+}
+
+// BUG-10: если процесс воркера падает между захватом документа (claimPendingDocument)
+// и его завершением (completeUploadedDocument) — например, необработанное исключение
+// из внутреннего обработчика события tesseract.js, минующее try/catch, — строка
+// остаётся в processing навсегда и блокирует очередь для всех пользователей, потому что
+// claimPendingDocument выбирает только pending. Эта функция находит такие зависшие строки
+// по claimed_at и переводит их в failed, чтобы пользователь увидел ошибку вместо вечного
+// «В очереди на распознавание…».
+export async function failStaleProcessingDocuments(db: Db, timeoutMinutes: number): Promise<number> {
+  const result = await db.query(
+    `UPDATE portfolio.uploaded_documents SET
+       processing_status = 'failed', error_message = $1, processed_at = NOW(), file_path = NULL
+     WHERE processing_status = 'processing' AND claimed_at < NOW() - ($2 || ' minutes')::INTERVAL`,
+    ['Обработка изображения заняла слишком много времени', timeoutMinutes],
+  )
+  return result.rowCount ?? 0
 }
 
 export async function completeUploadedDocument(

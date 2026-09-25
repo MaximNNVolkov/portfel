@@ -3323,7 +3323,7 @@ function ProductFormPage({
                 disabled={recognizing}
                 type="button"
               >
-                {recognizing ? ocrStage || "Распознаём и сохраняем..." : "Распознать и сохранить"}
+                {recognizing ? ocrStage || "Распознаём и сохраняем..." : error ? "Попробовать ещё раз" : "Распознать и сохранить"}
               </button>
             </>
           )}
