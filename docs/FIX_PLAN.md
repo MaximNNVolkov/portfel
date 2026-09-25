@@ -51,25 +51,50 @@ API — systemd респавнит процесс за секунды, публ�
 
 **Коммит:** `ops: run the stand under a supervisor so the API survives restarts (§30)`
 
-### 1.2. BUG-10 — битая картинка роняет OCR-воркер целиком · M
+### 1.2. BUG-10 — битая картинка роняет OCR-воркер целиком · M — ✅ Готово
 
 `server/scheduler.ts:ocrLoop` уже ловит ошибки через `.catch`, но tesseract.js
 бросает исключение из обработчика события — `process.nextTick(() => { throw err })`,
 мимо `await`. Процесс падает с кодом 1, и OCR встаёт у всех пользователей;
 в UI это вечное «В очереди на распознавание…» без ошибки и без отмены.
 
-1. `server/ocr.ts:recognizeText` — обернуть `worker.recognize` в try/catch,
-   гарантировать `worker.terminate()` в `finally`, пометить документ `failed`
+Реализовано (все 4 подпункта):
+
+1. `server/ocr.ts:recognizeText` — `worker.recognize` обёрнут в try/catch,
+   `worker.terminate()` гарантирован в `finally`, документ помечается `failed`
    с понятной причиной.
-2. `server/scheduler.ts` — `process.on('uncaughtException')` / `unhandledRejection`:
-   залогировать и продолжить цикл, а не умереть (страховка от следующей библиотеки,
-   которая сделает то же самое).
-3. Таймаут на обработку документа: висящий в `processing` дольше N минут —
-   переводится в `failed`, иначе он блокирует очередь навсегда.
-4. Фронт: если статус не меняется дольше таймаута — показать ошибку и кнопку
-   «Попробовать ещё раз» вместо бесконечной стадии.
+2. `server/scheduler.ts` — добавлены `process.on('uncaughtException')` /
+   `unhandledRejection`: логируют и не останавливают цикл.
+3. Добавлен таймаут обработки: миграция `006_ocr_claim_timeout.sql` (колонка
+   `claimed_at` + частичный индекс), `failStaleProcessingDocuments` в
+   `server/repository.ts` переводит документы, зависшие в `processing` дольше
+   `OCR_STALE_TIMEOUT_MINUTES` (по умолчанию 5 мин), в `failed`; вызывается из
+   `staleDocumentLoop` в `server/scheduler.ts` каждые `OCR_STALE_CHECK_SECONDS`
+   (по умолчанию 60 с).
+4. `src/AppMvp.tsx` — кнопка «Попробовать ещё раз» на экране загрузки скриншота
+   при ошибке.
+
+Код фактически landed раньше (коммит `7ea7ee5`, автоматический
+`chore: safety commit`), этот раунд — верификация на живом стенде и закрытие
+пункта в плане.
+
+**Проверено на живом стенде** (не только код): применена миграция 006 через
+рестарт `portfel-api.service`/`portfel-scheduler.service` (`Applied migration
+006_ocr_claim_timeout` в `api.log`, колонка и частичный индекс подтверждены
+`\d portfolio.uploaded_documents`). Живой e2e: вручную вставлен документ со
+статусом `processing` и `claimed_at` на 10 минут в прошлом → в течение одного
+цикла `staleDocumentLoop` строка перешла в `failed` с сообщением «Обработка
+изображения заняла слишком много времени» — подтверждает, что зависший
+документ больше не блокирует очередь навсегда. Тестовая строка удалена из БД
+после проверки. Устойчивость к необработанным ошибкам подтверждена косвенно:
+до применения миграции сервис уже жил через ошибки `column "claimed_at" does
+not exist` в `scheduler.ocr`/`scheduler.ocr-stale` без падения процесса
+(`daily run: done` отработал следом же). `npx tsx server/ocr.test.ts` (14/14) и
+`npx tsc -b` — чисто. Фронтенд с кнопкой «Попробовать ещё раз» пересобран и
+выложен на `/var/www/portfel/`.
 
 **Коммит:** `fix: isolate OCR failures so one broken image cannot kill the worker (§18/§34)`
+(код), плюс этот докс-коммит закрывает пункт.
 
 ### 1.3. BUG-24 — на стенде никто не снимает бэкапы · S
 
