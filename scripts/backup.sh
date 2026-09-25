@@ -1,7 +1,10 @@
 #!/bin/sh
-# Ежедневный backup БД (SPEC §31). Запускается как отдельный сервис в docker-compose
-# (образ postgres:16-alpine, у которого уже есть pg_dump); работает бесконечным циклом
-# по тому же паттерну, что и цикл обновления сертификата в сервисе certbot.
+# Ежедневный backup БД (SPEC §31). Два режима запуска:
+# 1. Отдельный сервис в docker-compose (образ postgres:16-alpine, у которого уже есть
+#    pg_dump) — бесконечный цикл по тому же паттерну, что и обновление сертификата
+#    в сервисе certbot.
+# 2. RUN_ONCE=1 — однократный запуск и выход, для окружений без docker-compose
+#    (стенд на systemd, см. docs/STAND.md), где периодичность уже задаёт cron.
 set -eu
 
 BACKUP_DIR=${BACKUP_DIR:-/backups}
@@ -26,6 +29,11 @@ run_backup() {
   # Хранение нескольких последних копий: оставляем только RETENTION_COUNT самых свежих файлов.
   ls -1t "$BACKUP_DIR"/portfel-*.sql.gz 2>/dev/null | tail -n +$((RETENTION_COUNT + 1)) | xargs -r rm -f
 }
+
+if [ "${RUN_ONCE:-}" = "1" ]; then
+  run_backup
+  exit 0
+fi
 
 trap exit TERM INT
 while :; do
