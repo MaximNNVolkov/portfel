@@ -19,7 +19,7 @@ import {
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
-  positionToWire, positiveNumber, requiredText, MANUAL_PROVIDER, type PositionBody,
+  positionToWire, positiveNumber, reconcileInvested, requiredText, MANUAL_PROVIDER, type PositionBody,
 } from './positions.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
@@ -376,15 +376,24 @@ app.patch('/api/positions/:id', async (request, response) => {
         provider,
         currency: instrument.currency,
       })
+      const quantity = body.quantity !== undefined ? optionalNumber(body.quantity) : existing.quantity
+      const averagePrice = body.averagePrice !== undefined ? optionalNumber(body.averagePrice) : existing.averagePrice
+      // Новое количество или цена без нового «вложено» — вложено выводится заново из них (BUG-08).
+      const investedInput = body.invested !== undefined
+        ? positiveNumber(body.invested, 'invested')
+        : (body.quantity !== undefined || body.averagePrice !== undefined ? undefined : existing.invested)
       const record = {
         id: existing.id,
         accountId: account.id,
         instrumentId: existing.instrumentId,
-        invested: body.invested !== undefined ? positiveNumber(body.invested, 'invested') : existing.invested,
+        // Правка, не касающаяся этих трёх полей, старые записи не перепроверяет.
+        invested: body.invested === undefined && body.quantity === undefined && body.averagePrice === undefined
+          ? existing.invested
+          : reconcileInvested(quantity, averagePrice, investedInput) ?? existing.invested,
         source: existing.source,
         value: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.value,
-        quantity: body.quantity !== undefined ? optionalNumber(body.quantity) : existing.quantity,
-        averagePrice: body.averagePrice !== undefined ? optionalNumber(body.averagePrice) : existing.averagePrice,
+        quantity,
+        averagePrice,
         currentPrice: body.currentPrice !== undefined ? optionalNumber(body.currentPrice) : existing.currentPrice,
         accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
         openedOn: body.date !== undefined ? requiredText(body.date, 'date') : existing.openedOn,

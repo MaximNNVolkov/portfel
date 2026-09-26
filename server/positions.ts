@@ -37,6 +37,20 @@ export function positiveNumber(value: unknown, field: string): number {
   return result
 }
 
+// BUG-08 (§17, §28 серверная валидация): «вложено» обязано сходиться с количеством ×
+// средней ценой, если заданы оба. Не задано вложено — оно выводится из них; задано и
+// расходится — запрос отклоняется, а не сохраняет два противоречащих числа в одной карточке.
+// Допуск — 1 ₽ или 0,1%: средняя цена брокера бывает с копейками и дробями копеек.
+export function reconcileInvested(quantity: number | undefined, averagePrice: number | undefined, invested: number | undefined): number | undefined {
+  if (!(quantity !== undefined && quantity > 0 && averagePrice !== undefined && averagePrice > 0)) return invested
+  const expected = Math.round(quantity * averagePrice * 100) / 100
+  if (invested === undefined) return expected
+  if (Math.abs(invested - expected) > Math.max(1, expected * 0.001)) {
+    throw new Error(`Вложено (${invested}) не совпадает с количеством × средней ценой (${quantity} × ${averagePrice} = ${expected})`)
+  }
+  return invested
+}
+
 export const GROUP_TYPES: Record<AssetGroup, AssetGroupType> = {
   'Вклады': 'deposit', 'Облигации': 'bond', 'Акции': 'share', 'Фонды': 'fund', 'Деньги': 'cash', 'Прочее': 'other',
 }
@@ -118,7 +132,12 @@ export function mergeInstrument(existing: Instrument, body: PositionBody): Instr
 export async function createPosition(client: Db, userId: string, body: PositionBody, source: DataSource): Promise<Position> {
   const instrument = instrumentFromBody(body, randomUUID(), source)
   const value = positiveNumber(body.amount, 'amount')
-  const invested = positiveNumber(body.invested ?? body.amount, 'invested')
+  const quantity = optionalNumber(body.quantity)
+  const averagePrice = optionalNumber(body.averagePrice)
+  const invested = reconcileInvested(
+    quantity, averagePrice,
+    body.invested !== undefined && body.invested !== null && body.invested !== '' ? positiveNumber(body.invested, 'invested') : undefined,
+  ) ?? value
   const openedOn = requiredText(body.date, 'date')
   const provider = optionalText(body.institution) || MANUAL_PROVIDER
 
@@ -136,8 +155,8 @@ export async function createPosition(client: Db, userId: string, body: PositionB
     invested,
     source,
     value,
-    quantity: optionalNumber(body.quantity),
-    averagePrice: optionalNumber(body.averagePrice),
+    quantity,
+    averagePrice,
     currentPrice: optionalNumber(body.currentPrice),
     accruedInterest: optionalNumber(body.accruedInterest),
     openedOn,

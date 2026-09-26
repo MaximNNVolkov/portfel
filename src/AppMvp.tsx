@@ -126,6 +126,51 @@ function productToDetails(product?: Product): ProductDetails {
     autoProlongation: product?.autoProlongation || false,
   };
 }
+// BUG-08 (§17): «вложено» должно сходиться с количеством × средней ценой. Это проверка
+// ввода, а не расчёт портфеля — сервер делает ту же проверку (reconcileInvested) и
+// отклоняет расхождение; здесь она нужна, чтобы показать его до сохранения.
+function investedCheck(details: ProductDetails, investedInput: string) {
+  const quantity = Number(details.quantity);
+  const averagePrice = Number(details.averagePrice);
+  if (!details.quantity.trim() || !details.averagePrice.trim()) return null;
+  if (!(quantity > 0 && averagePrice > 0)) return null;
+  const expected = Math.round(quantity * averagePrice * 100) / 100;
+  const typed = investedInput.trim() ? Number(investedInput) : null;
+  const mismatch =
+    typed !== null && Math.abs(typed - expected) > Math.max(1, expected * 0.001);
+  return { quantity, averagePrice, expected, typed, mismatch };
+}
+function InvestedCheckNote({
+  check,
+  amount,
+}: {
+  check: ReturnType<typeof investedCheck>;
+  amount: string;
+}) {
+  if (!check) return null;
+  if (check.mismatch) {
+    return (
+      <small className="form-error">
+        ⚠ Вложено {money(check.typed ?? 0)} не совпадает с количеством × средней ценой:{" "}
+        {check.quantity} × {money(check.averagePrice)} = {money(check.expected)}. Исправьте
+        одно из значений.
+      </small>
+    );
+  }
+  const amountValue = Number(amount);
+  const amountDiffers =
+    check.typed === null &&
+    amountValue > 0 &&
+    Math.abs(amountValue - check.expected) > Math.max(1, check.expected * 0.001);
+  return (
+    <small className={amountDiffers ? "danger-text" : "muted"}>
+      Вложено: {check.quantity} × {money(check.averagePrice)} = {money(check.expected)}
+      {amountDiffers
+        ? ` — отличается от введённой суммы ${money(amountValue)}. Вложенной суммой будет сохранено ${money(check.expected)}, текущей стоимостью — ${money(amountValue)}.`
+        : ""}
+    </small>
+  );
+}
 function detailsToPayload(details: ProductDetails) {
   return {
     isin: details.isin.trim() || undefined,
@@ -797,7 +842,10 @@ function AppMvp() {
         headers: authHeaders,
         body: JSON.stringify(product),
       });
-      if (!response.ok) throw new Error("Не удалось сохранить продукт");
+      if (!response.ok) {
+        const result = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(result.error || "Не удалось сохранить продукт");
+      }
       product = (await response.json()) as Product;
       await refreshSummary();
     }
@@ -893,7 +941,12 @@ function AppMvp() {
         headers: authHeaders,
         body: JSON.stringify(product),
       });
-      if (!response.ok) throw new Error("Не удалось сохранить изменения");
+      if (!response.ok) {
+        // Страница правки остаётся открытой: пользователь видит причину и исправляет ввод.
+        const result = (await response.json().catch(() => ({}))) as { error?: string };
+        setToast(result.error || "Не удалось сохранить изменения");
+        return;
+      }
       product = (await response.json()) as Product;
       await refreshSummary();
     }
@@ -3286,8 +3339,10 @@ function ProductFormPage({
     setError("");
     setStep(3);
   };
+  const reconciled = investedCheck(details, invested);
   const submit = async () => {
     if (!type) return;
+    if (reconciled?.mismatch) return;
     setSaving(true);
     setError("");
     try {
@@ -3296,7 +3351,9 @@ function ProductFormPage({
         name,
         type,
         amount: Number(amount),
-        invested: Number(invested || amount),
+        invested: reconciled
+          ? (reconciled.typed ?? reconciled.expected)
+          : Number(invested || amount),
         date,
         institution: institution || "Ручной ввод",
         currency,
@@ -3497,6 +3554,7 @@ function ProductFormPage({
                 {wizardTypeOptions.find((option) => option.value === type)?.label ?? type} ·{" "}
                 {amount} ₽ · {date}
               </p>
+              <InvestedCheckNote check={reconciled} amount={amount} />
               <details className="details-block">
                 <summary>Добавить дополнительные детали</summary>
                 <div className="details-fields">
@@ -3517,13 +3575,13 @@ function ProductFormPage({
                     </select>
                   </label>
                   <label>
-                    Первичная цена
+                    Вложено (сумма покупки)
                     <input
                       value={invested}
                       onChange={(event) => setInvested(event.target.value)}
                       type="number"
                       min="1"
-                      placeholder="100000"
+                      placeholder={reconciled ? String(reconciled.expected) : "100000"}
                     />
                   </label>
                   {InstrumentDetailsFieldset({ type, details, onChange: updateDetail })}
@@ -3543,7 +3601,7 @@ function ProductFormPage({
                   type="button"
                   className="primary-button"
                   onClick={() => void submit()}
-                  disabled={saving}
+                  disabled={saving || Boolean(reconciled?.mismatch)}
                 >
                   {saving ? "Сохраняем..." : "Добавить"}
                 </button>
@@ -3600,14 +3658,18 @@ function EditProductPage({
   if (!product) return <Navigate to="/products" replace />;
   const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
     setDetails((current) => ({ ...current, [key]: value }));
+  const reconciled = investedCheck(details, invested);
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (reconciled?.mismatch) return;
     onSubmit({
       ...product,
       name,
       type,
       amount: Number(amount),
-      invested: Number(invested || amount),
+      invested: reconciled
+        ? (reconciled.typed ?? reconciled.expected)
+        : Number(invested || amount),
       institution: institution || "Ручной ввод",
       currency,
       ...detailsToPayload(details),
@@ -3635,7 +3697,7 @@ function EditProductPage({
           />
         </label>
         <label>
-          Первичная цена
+          Вложено (сумма покупки)
           <input
             value={invested}
             onChange={(event) => setInvested(event.target.value)}
@@ -3670,7 +3732,8 @@ function EditProductPage({
           </select>
         </label>
         <InstrumentDetailsFields type={type} details={details} onChange={updateDetail} />
-        <button className="primary-button" type="submit">
+        <InvestedCheckNote check={reconciled} amount={amount} />
+        <button className="primary-button" type="submit" disabled={Boolean(reconciled?.mismatch)}>
           Сохранить изменения
         </button>
       </form>

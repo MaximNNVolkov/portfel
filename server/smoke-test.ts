@@ -148,6 +148,28 @@ async function run() {
       assert.equal(summary.json.total, 100000 + 31000)
     })
 
+    // BUG-08 (FIX_PLAN 2.5): вложено сходится с количеством × средней ценой.
+    await test('вложено выводится из количества × средней цены и не расходится с ними', async () => {
+      const derived = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест сверка', type: 'Акция', amount: 100000, date: '2026-01-15', quantity: 100, averagePrice: 800 },
+      })
+      assert.equal(derived.status, 201)
+      assert.equal(derived.json.invested, 80000)
+      const conflicting = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест сверка 2', type: 'Акция', amount: 100000, invested: 100000, date: '2026-01-15', quantity: 100, averagePrice: 800 },
+      })
+      assert.equal(conflicting.status, 400)
+      assert.match(conflicting.json.error, /не совпадает/)
+      const patched = await api(`/api/positions/${derived.json.id}`, { method: 'PATCH', token: tokenA, body: { quantity: 50 } })
+      assert.equal(patched.status, 200)
+      assert.equal(patched.json.invested, 40000)
+      const badPatch = await api(`/api/positions/${derived.json.id}`, { method: 'PATCH', token: tokenA, body: { invested: 12345 } })
+      assert.equal(badPatch.status, 400)
+      assert.equal((await api(`/api/positions/${derived.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     await test('удаление второй позиции', async () => {
       const { status } = await api(`/api/positions/${sharePositionId}`, { method: 'DELETE', token: tokenA })
       assert.equal(status, 204)
