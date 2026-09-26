@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -255,6 +255,8 @@ type OcrFailure = { filename: string; reason: string };
 // равно сохраняется, пользователь сам решает на экране-сводке), не персистится как поле Product.
 type OcrItem = Product & { possibleDuplicate?: boolean };
 type OcrUploadResult = {
+  // Документ очереди OCR — по нему сводка открывается по прямой ссылке (BUG-18).
+  documentId?: string;
   date: string;
   items: OcrItem[];
   failures: OcrFailure[];
@@ -731,6 +733,7 @@ function AppMvp() {
     () => localStorage.getItem(tokenKey) || "",
   );
   const [apiOnline, setApiOnline] = useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [brokerStatus, setBrokerStatus] = useState<BrokerStatus | null>(null);
@@ -820,6 +823,7 @@ function AppMvp() {
         setUserEmail((await meResponse.json()).email as string | null);
         setBrokerStatus((await brokerResponse.json()) as BrokerStatus);
         setApiOnline(true);
+        setDataLoaded(true);
       } catch {
         const saved = localStorage.getItem(storageKey);
         if (saved) {
@@ -832,6 +836,8 @@ function AppMvp() {
           setPayments(state.payments);
           setTransactions(state.transactions);
         }
+        // Офлайн-фолбэк тоже окончательный ответ: дальше данных не прибавится.
+        setDataLoaded(true);
       }
     }
     void loadPortfolio();
@@ -1026,7 +1032,7 @@ function AppMvp() {
     } else {
       setProducts((current) => [...current, ...result.items]);
     }
-    navigate("/ocr-summary");
+    navigate(result.documentId ? `/ocr-summary/${result.documentId}` : "/ocr-summary");
   }
   async function addTransaction(transaction: Transaction) {
     if (apiOnline) {
@@ -1155,6 +1161,7 @@ function AppMvp() {
   if (!token) return <Login onSubmit={signIn} />;
 
   return (
+    <DataLoadedContext.Provider value={dataLoaded}>
     <div className="app-shell">
       {menuOpen && (
         <div
@@ -1408,13 +1415,18 @@ function AppMvp() {
           />
           <Route
             path="/ocr-summary"
-            element={<OcrSummaryPage summary={ocrSummary} />}
+            element={<OcrSummaryPage summary={ocrSummary} token={token} />}
+          />
+          <Route
+            path="/ocr-summary/:documentId"
+            element={<OcrSummaryPage summary={ocrSummary} token={token} />}
           />
           <Route path="*" element={<Navigate to="/portfolio" replace />} />
         </Routes>
       </main>
       {toast && <div className="toast">{toast}</div>}
     </div>
+    </DataLoadedContext.Provider>
   );
 }
 
@@ -2444,7 +2456,7 @@ function ProductDetailPage({
 }) {
   const { id } = useParams();
   const product = products.find((item) => item.id === id);
-  if (!product) return <Navigate to="/products" replace />;
+  if (!product) return <MissingRecord to="/products" />;
   const relatedTransactions = transactions.filter(
     (transaction) => transaction.positionId === product.id,
   );
@@ -3148,6 +3160,19 @@ function ComingSoonPage({ title, text }: { title: string; text: string }) {
     </Page>
   );
 }
+// Загружены ли данные портфеля (BUG-18). Пока нет — страница записи по прямой ссылке
+// или после F5 показывает «Загружаем…», а не уводит на список: пустой массив в первый
+// момент означает «ещё не пришло», а не «такой записи нет».
+const DataLoadedContext = createContext(false);
+function MissingRecord({ to }: { to: string }) {
+  const loaded = useContext(DataLoadedContext);
+  if (loaded) return <Navigate to={to} replace />;
+  return (
+    <Page title="Загрузка…" subtitle="Получаем данные портфеля">
+      <p className="muted">Загружаем данные…</p>
+    </Page>
+  );
+}
 function Page({
   title,
   subtitle,
@@ -3590,6 +3615,7 @@ function ProductFormPage({
       setOcrStage("В очереди на распознавание...");
       const result = await waitForOcrResult(uploaded.documentId);
       onOcrComplete({
+        documentId: uploaded.documentId,
         date: result.date || new Date().toISOString().slice(0, 10),
         items: result.items || [],
         failures: result.failures || [],
@@ -3848,9 +3874,10 @@ function EditProductPage({
     setInstitution(product.institution);
     setCurrency(product.currency);
     setDetails(productToDetails(product));
+    // Перезаполняется и когда запись пришла позже первого рендера (прямая ссылка, BUG-18).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
-  if (!product) return <Navigate to="/products" replace />;
+  }, [id, Boolean(product)]);
+  if (!product) return <MissingRecord to="/products" />;
   const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
     setDetails((current) => ({ ...current, [key]: value }));
   const reconciled = investedCheck(details, invested);
@@ -3944,7 +3971,7 @@ function DeleteProductPage({
 }) {
   const { id } = useParams();
   const product = products.find((item) => item.id === id);
-  if (!product || !id) return <Navigate to="/products" replace />;
+  if (!product || !id) return <MissingRecord to="/products" />;
   return (
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
@@ -3992,8 +4019,59 @@ function DeleteAccountPage({ onConfirm }: { onConfirm: () => void }) {
     </Page>
   );
 }
-function OcrSummaryPage({ summary }: { summary: OcrUploadResult | null }) {
-  if (!summary) return <Navigate to="/products" replace />;
+function OcrSummaryPage({
+  summary: current,
+  token,
+}: {
+  summary: OcrUploadResult | null;
+  token: string;
+}) {
+  const { documentId } = useParams();
+  // Сводка в памяти есть только сразу после распознавания. По прямой ссылке или после F5
+  // (BUG-18) она перечитывается с бэкенда по id документа — тот же JSON результата.
+  const [loaded, setLoaded] = useState<OcrUploadResult | null>(null);
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "missing" | "pending">("idle");
+  const inMemory = current && (!documentId || current.documentId === documentId) ? current : null;
+  useEffect(() => {
+    if (inMemory || !documentId) return;
+    let cancelled = false;
+    setLoadState("loading");
+    void (async () => {
+      try {
+        const response = await fetch(`${apiUrl}/ocr/documents/${documentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = (await response.json()) as {
+          status?: string;
+          result?: OcrUploadResult;
+          createdAt?: string;
+        };
+        if (cancelled) return;
+        if (!response.ok || body.status === "failed") return setLoadState("missing");
+        if (body.status !== "done" || !body.result) return setLoadState("pending");
+        setLoaded({ ...body.result, documentId });
+        setLoadState("idle");
+      } catch {
+        if (!cancelled) setLoadState("missing");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId, inMemory, token]);
+  const summary = inMemory ?? loaded;
+  if (!summary) {
+    if (!documentId || loadState === "missing") return <Navigate to="/products" replace />;
+    return (
+      <Page title="Добавлено со скриншота" subtitle="Сводка распознавания" back>
+        <p className="muted">
+          {loadState === "pending"
+            ? "Скриншот ещё обрабатывается — обновите страницу через несколько секунд."
+            : "Загружаем результат распознавания…"}
+        </p>
+      </Page>
+    );
+  }
   const formattedDate = new Date(`${summary.date}T12:00:00`).toLocaleDateString("ru-RU");
   return (
     <Page
@@ -4090,8 +4168,8 @@ function EditPaymentPage({
     setType(payment.type);
     setStatus(payment.status);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
-  if (!payment) return <Navigate to="/payments" replace />;
+  }, [id, Boolean(payment)]);
+  if (!payment) return <MissingRecord to="/payments" />;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({ ...payment, title, amount: Number(amount), date, type, status });
@@ -4168,7 +4246,7 @@ function DeletePaymentPage({
 }) {
   const { id } = useParams();
   const payment = payments.find((item) => item.id === id);
-  if (!payment || !id) return <Navigate to="/payments" replace />;
+  if (!payment || !id) return <MissingRecord to="/payments" />;
   return (
     <Page title="Удалить выплату" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
@@ -4399,8 +4477,8 @@ function EditTransactionPage({
     setDate(transaction.date);
     setPositionId(transaction.positionId || products[0]?.id || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
-  if (!transaction) return <Navigate to="/transactions" replace />;
+  }, [id, Boolean(transaction)]);
+  if (!transaction) return <MissingRecord to="/transactions" />;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -4492,7 +4570,7 @@ function DeleteTransactionPage({
 }) {
   const { id } = useParams();
   const transaction = transactions.find((item) => item.id === id);
-  if (!transaction || !id) return <Navigate to="/transactions" replace />;
+  if (!transaction || !id) return <MissingRecord to="/transactions" />;
   return (
     <Page title="Удалить операцию" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
