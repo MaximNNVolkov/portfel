@@ -349,6 +349,24 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "/api";
+// BUG-11: при обрыве связи fetch бросает TypeError с текстом браузера («Failed to fetch»,
+// «Load failed» в Safari) — в русском интерфейсе его показывать нельзя.
+class NetworkError extends Error {}
+const networkErrorText = "Нет связи с сервером. Проверьте подключение и попробуйте ещё раз";
+async function apiFetch(input: string, init?: RequestInit) {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new NetworkError(networkErrorText);
+  }
+}
+// Текст ошибки для пользователя. Свои ошибки фронт бросает по-русски; всё остальное
+// (сбой разбора JSON, внутренние исключения браузера) заменяется на понятный fallback.
+function errorText(error: unknown, fallback: string) {
+  if (error instanceof Error && /[а-яё]/i.test(error.message)) return error.message;
+  return fallback;
+}
 // Опрос статуса OCR (§34): интервал заметно больше такта воркера (OCR_POLL_SECONDS),
 // чтобы страница не долбила API, но результат появлялся почти сразу после обработки.
 const OCR_POLL_INTERVAL_MS = 1500;
@@ -845,13 +863,13 @@ function AppMvp() {
           meResponse,
           brokerResponse,
         ] = await Promise.all([
-          fetch(`${apiUrl}/positions`, { headers }),
-          fetch(`${apiUrl}/payouts`, { headers }),
-          fetch(`${apiUrl}/transactions`, { headers }),
-          fetch(`${apiUrl}/portfolio/history`, { headers }),
-          fetch(`${apiUrl}/portfolio/summary`, { headers }),
-          fetch(`${apiUrl}/auth/me`, { headers }),
-          fetch(`${apiUrl}/brokers/tinkoff`, { headers }),
+          apiFetch(`${apiUrl}/positions`, { headers }),
+          apiFetch(`${apiUrl}/payouts`, { headers }),
+          apiFetch(`${apiUrl}/transactions`, { headers }),
+          apiFetch(`${apiUrl}/portfolio/history`, { headers }),
+          apiFetch(`${apiUrl}/portfolio/summary`, { headers }),
+          apiFetch(`${apiUrl}/auth/me`, { headers }),
+          apiFetch(`${apiUrl}/brokers/tinkoff`, { headers }),
         ]);
         if (
           productsResponse.status === 401 ||
@@ -924,21 +942,35 @@ function AppMvp() {
     "content-type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+  // Страницы вызывают эти действия без своего try/catch: без обёртки сетевая ошибка
+  // уходит в unhandled rejection, и пользователь не видит вообще ничего (BUG-11).
+  function withErrorToast<A extends unknown[]>(
+    action: (...args: A) => Promise<void>,
+    fallback: string,
+  ) {
+    return async (...args: A) => {
+      try {
+        await action(...args);
+      } catch (error) {
+        setToast(errorText(error, fallback));
+      }
+    };
+  }
   async function refreshSummary() {
-    const response = await fetch(`${apiUrl}/portfolio/summary`, {
+    const response = await apiFetch(`${apiUrl}/portfolio/summary`, {
       headers: authHeaders,
     });
     if (response.ok) setSummary((await response.json()) as PortfolioSummary);
   }
   async function refreshBrokerStatus() {
-    const response = await fetch(`${apiUrl}/brokers/tinkoff`, {
+    const response = await apiFetch(`${apiUrl}/brokers/tinkoff`, {
       headers: authHeaders,
     });
     if (response.ok) setBrokerStatus((await response.json()) as BrokerStatus);
   }
   async function addProduct(product: Product) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/positions`, {
+      const response = await apiFetch(`${apiUrl}/positions`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(product),
@@ -955,7 +987,7 @@ function AppMvp() {
   }
   async function addPayment(payment: Payment) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payouts`, {
+      const response = await apiFetch(`${apiUrl}/payouts`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(payment),
@@ -970,7 +1002,7 @@ function AppMvp() {
   }
   async function updatePayment(payment: Payment) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payouts/${payment.id}`, {
+      const response = await apiFetch(`${apiUrl}/payouts/${payment.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify(payment),
@@ -990,7 +1022,7 @@ function AppMvp() {
   async function markPaymentReceived(payment: Payment) {
     let updated: Payment = { ...payment, status: "received", overdue: false };
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payouts/${payment.id}`, {
+      const response = await apiFetch(`${apiUrl}/payouts/${payment.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify({ status: "received" }),
@@ -1009,7 +1041,7 @@ function AppMvp() {
   }
   async function removePayment(id: string) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/payouts/${id}`, {
+      const response = await apiFetch(`${apiUrl}/payouts/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -1023,17 +1055,17 @@ function AppMvp() {
   // Прогнозные выплаты пересчитываются на бэкенде при любом изменении состава портфеля —
   // после удаления позиции календарь нужно забрать заново.
   async function refreshPayments() {
-    const response = await fetch(`${apiUrl}/payouts`, { headers: authHeaders });
+    const response = await apiFetch(`${apiUrl}/payouts`, { headers: authHeaders });
     if (response.ok) setPayments((await response.json()) as Payment[]);
   }
   async function refreshProducts() {
-    const response = await fetch(`${apiUrl}/positions`, {
+    const response = await apiFetch(`${apiUrl}/positions`, {
       headers: authHeaders,
     });
     if (response.ok) setProducts((await response.json()) as Product[]);
   }
   async function refreshMarketPrices() {
-    const response = await fetch(`${apiUrl}/market-data/refresh`, {
+    const response = await apiFetch(`${apiUrl}/market-data/refresh`, {
       method: "POST",
       headers: authHeaders,
     });
@@ -1052,7 +1084,7 @@ function AppMvp() {
   }
   async function deleteProductRecord(id: string) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/positions/${id}`, {
+      const response = await apiFetch(`${apiUrl}/positions/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -1070,7 +1102,7 @@ function AppMvp() {
       setToast("Продукт удалён");
       navigate(returnTo);
     } catch (error) {
-      setToast(error instanceof Error ? error.message : "Не удалось удалить продукт");
+      setToast(errorText(error, "Не удалось удалить продукт"));
     }
   }
   // «Удалить всё распознанное» со сводки OCR (BUG-14).
@@ -1093,7 +1125,7 @@ function AppMvp() {
   }
   async function updateProduct(product: Product) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/positions/${product.id}`, {
+      const response = await apiFetch(`${apiUrl}/positions/${product.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify(product),
@@ -1130,7 +1162,7 @@ function AppMvp() {
   }
   async function addTransaction(transaction: Transaction) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/transactions`, {
+      const response = await apiFetch(`${apiUrl}/transactions`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(transaction),
@@ -1155,7 +1187,7 @@ function AppMvp() {
   }
   async function updateTransaction(transaction: Transaction) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/transactions/${transaction.id}`, {
+      const response = await apiFetch(`${apiUrl}/transactions/${transaction.id}`, {
         method: "PATCH",
         headers: authHeaders,
         body: JSON.stringify(transaction),
@@ -1176,7 +1208,7 @@ function AppMvp() {
   }
   async function removeTransaction(id: string) {
     if (apiOnline) {
-      const response = await fetch(`${apiUrl}/transactions/${id}`, {
+      const response = await apiFetch(`${apiUrl}/transactions/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -1198,7 +1230,7 @@ function AppMvp() {
   ): Promise<LoginError | null> {
     let response: Response;
     try {
-      response = await fetch(`${apiUrl}/auth/${mode}`, {
+      response = await apiFetch(`${apiUrl}/auth/${mode}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1231,7 +1263,7 @@ function AppMvp() {
   }
   async function signOut() {
     if (apiOnline) {
-      await fetch(`${apiUrl}/auth/logout`, {
+      await apiFetch(`${apiUrl}/auth/logout`, {
         method: "POST",
         headers: authHeaders,
       }).catch(() => undefined);
@@ -1243,7 +1275,7 @@ function AppMvp() {
     setUserEmail(null);
   }
   async function deleteAccount() {
-    const response = await fetch(`${apiUrl}/auth/me`, {
+    const response = await apiFetch(`${apiUrl}/auth/me`, {
       method: "DELETE",
       headers: authHeaders,
     });
@@ -1379,7 +1411,7 @@ function AppMvp() {
           />
           <Route
             path="/products"
-            element={<ProductsPage products={products} onRefreshPrices={refreshMarketPrices} />}
+            element={<ProductsPage products={products} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
           />
           <Route
             path="/products/:id"
@@ -1404,7 +1436,7 @@ function AppMvp() {
           />
           <Route
             path="/products/:id/edit"
-            element={<EditProductPage products={products} onSubmit={updateProduct} />}
+            element={<EditProductPage products={products} onSubmit={withErrorToast(updateProduct, "Не удалось сохранить изменения")} />}
           />
           <Route
             path="/products/:id/delete"
@@ -1421,7 +1453,7 @@ function AppMvp() {
           <Route
             path="/transactions/new"
             element={
-              <TransactionFormPage products={products} onSubmit={addTransaction} />
+              <TransactionFormPage products={products} onSubmit={withErrorToast(addTransaction, "Не удалось сохранить операцию")} />
             }
           />
           <Route
@@ -1430,7 +1462,7 @@ function AppMvp() {
               <EditTransactionPage
                 transactions={transactions}
                 products={products}
-                onSubmit={updateTransaction}
+                onSubmit={withErrorToast(updateTransaction, "Не удалось сохранить изменения")}
               />
             }
           />
@@ -1439,7 +1471,7 @@ function AppMvp() {
             element={
               <DeleteTransactionPage
                 transactions={transactions}
-                onConfirm={removeTransaction}
+                onConfirm={withErrorToast(removeTransaction, "Не удалось удалить операцию")}
               />
             }
           />
@@ -1449,24 +1481,24 @@ function AppMvp() {
               <PaymentsPage
                 payments={payments}
                 products={products}
-                onMarkReceived={markPaymentReceived}
+                onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
               />
             }
           />
           <Route
             path="/payments/new"
-            element={<PaymentFormPage products={products} onSubmit={addPayment} />}
+            element={<PaymentFormPage products={products} onSubmit={withErrorToast(addPayment, "Не удалось сохранить выплату")} />}
           />
           <Route
             path="/payments/:id/edit"
             element={
-              <EditPaymentPage payments={payments} products={products} onSubmit={updatePayment} />
+              <EditPaymentPage payments={payments} products={products} onSubmit={withErrorToast(updatePayment, "Не удалось сохранить изменения")} />
             }
           />
           <Route
             path="/payments/:id/delete"
             element={
-              <DeletePaymentPage payments={payments} onConfirm={removePayment} />
+              <DeletePaymentPage payments={payments} onConfirm={withErrorToast(removePayment, "Не удалось удалить выплату")} />
             }
           />
           <Route
@@ -1482,7 +1514,7 @@ function AppMvp() {
           <Route
             path="/integrations"
             element={
-              <Integrations token={token} onStatusChange={refreshBrokerStatus} />
+              <Integrations token={token} onStatusChange={withErrorToast(refreshBrokerStatus, "Не удалось обновить статус брокера")} />
             }
           />
           <Route
@@ -1532,7 +1564,7 @@ function AppMvp() {
                 summary={ocrSummary}
                 products={products}
                 token={token}
-                onConfirm={removeProducts}
+                onConfirm={withErrorToast(removeProducts, "Не удалось удалить записи")}
               />
             }
           />
@@ -2880,7 +2912,7 @@ function AnalyticsPage({
     let cancelled = false;
     async function load() {
       try {
-        const response = await fetch(`${apiUrl}/portfolio/structure`, {
+        const response = await apiFetch(`${apiUrl}/portfolio/structure`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) throw new Error("Не удалось загрузить структуру портфеля");
@@ -2980,7 +3012,7 @@ function Recommendations({ token }: { token: string }) {
     let cancelled = false;
     async function load() {
       try {
-        const response = await fetch(`${apiUrl}/recommendations`, {
+        const response = await apiFetch(`${apiUrl}/recommendations`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) throw new Error("Не удалось загрузить рекомендации");
@@ -3054,7 +3086,7 @@ function Settings({
 
   useEffect(() => {
     (async () => {
-      const response = await fetch(`${apiUrl}/settings`, {
+      const response = await apiFetch(`${apiUrl}/settings`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) return;
@@ -3068,7 +3100,7 @@ function Settings({
       if (result.availableCurrencies) {
         setAvailableCurrencies(result.availableCurrencies);
       }
-    })();
+    })().catch((error) => setMessage(errorText(error, "Не удалось загрузить настройки")));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3077,7 +3109,7 @@ function Settings({
     setSaving(true);
     setMessage("");
     try {
-      const response = await fetch(`${apiUrl}/settings`, {
+      const response = await apiFetch(`${apiUrl}/settings`, {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
@@ -3097,6 +3129,8 @@ function Settings({
       setPortfolioName(result.portfolioName || "");
       setBaseCurrency(result.baseCurrency || "RUB");
       setMessage("Настройки сохранены");
+    } catch (error) {
+      setMessage(errorText(error, "Не удалось сохранить настройки"));
     } finally {
       setSaving(false);
     }
@@ -3165,7 +3199,7 @@ function Integrations({
   const [syncing, setSyncing] = useState(false);
 
   const loadStatus = async () => {
-    const response = await fetch(`${apiUrl}/brokers/tinkoff`, {
+    const response = await apiFetch(`${apiUrl}/brokers/tinkoff`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const result = (await response.json()) as {
@@ -3182,13 +3216,22 @@ function Integrations({
   };
 
   useEffect(() => {
-    loadStatus();
+    loadStatus().catch((error) =>
+      setMessage(errorText(error, "Не удалось получить статус подключения")),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const connect = async (event: FormEvent) => {
     event.preventDefault();
-    const response = await fetch(`${apiUrl}/brokers/tinkoff/connect`, {
+    try {
+      await connectBroker();
+    } catch (error) {
+      setMessage(errorText(error, "Не удалось подключить Т-Инвестиции"));
+    }
+  };
+  const connectBroker = async () => {
+    const response = await apiFetch(`${apiUrl}/brokers/tinkoff/connect`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3213,7 +3256,7 @@ function Integrations({
   const sync = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${apiUrl}/brokers/tinkoff/sync`, {
+      const response = await apiFetch(`${apiUrl}/brokers/tinkoff/sync`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -3223,6 +3266,8 @@ function Integrations({
       };
       setMessage(result.message || result.error || "");
       await loadStatus();
+    } catch (error) {
+      setMessage(errorText(error, "Не удалось синхронизировать портфель"));
     } finally {
       setSyncing(false);
     }
@@ -3763,7 +3808,7 @@ function ProductFormPage({
       });
       setSaved(true);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Не удалось сохранить продукт");
+      setError(errorText(submitError, "Не удалось сохранить продукт"));
     } finally {
       setSaving(false);
     }
@@ -3776,7 +3821,7 @@ function ProductFormPage({
     setOcrStage("Загружаем скриншот...");
     setError("");
     try {
-      const uploadResponse = await fetch(`${apiUrl}/ocr/upload`, {
+      const uploadResponse = await apiFetch(`${apiUrl}/ocr/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
@@ -3803,7 +3848,11 @@ function ProductFormPage({
         alreadyUploadedAt: uploaded.alreadyUploadedAt,
       });
     } catch (recognitionError) {
-      setError(recognitionError instanceof Error ? recognitionError.message : "Не удалось распознать изображение");
+      setError(
+        recognitionError instanceof NetworkError
+          ? "Не удалось загрузить изображение, попробуйте ещё раз"
+          : errorText(recognitionError, "Не удалось распознать изображение"),
+      );
     } finally {
       setRecognizing(false);
       setOcrStage("");
@@ -3816,7 +3865,7 @@ function ProductFormPage({
     const deadline = Date.now() + OCR_WAIT_LIMIT_MS;
     for (;;) {
       await new Promise((wake) => setTimeout(wake, OCR_POLL_INTERVAL_MS));
-      const response = await fetch(`${apiUrl}/ocr/documents/${documentId}`, {
+      const response = await apiFetch(`${apiUrl}/ocr/documents/${documentId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (response.status === 401) {
@@ -4218,7 +4267,7 @@ function useOcrSummary(current: OcrUploadResult | null, token: string) {
     setLoadState("loading");
     void (async () => {
       try {
-        const response = await fetch(`${apiUrl}/ocr/documents/${documentId}`, {
+        const response = await apiFetch(`${apiUrl}/ocr/documents/${documentId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const body = (await response.json()) as { status?: string; result?: OcrUploadResult };
