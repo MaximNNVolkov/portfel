@@ -49,6 +49,8 @@ type Product = {
   // Оценка Portfolio Engine (§10) в базовой валюте — приходит с каждой позицией
   // из /api/positions. amount — введённая сумма (её правит форма), а не оценка.
   valuation?: ProductValuation;
+  // Почему прогноз купонов не построен (BUG-20) — текст приходит с бэкенда.
+  forecastNote?: string;
 };
 type ProductValuation = {
   value: number | null;
@@ -2237,6 +2239,16 @@ function PaymentsPage({
           <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
         </label>
       </div>
+      {products
+        .filter((product) => product.forecastNote)
+        .map((product) => (
+          <div className="demo-note" key={product.id}>
+            ⚠ «{product.name}»: {product.forecastNote?.toLowerCase()}.{" "}
+            {product.source !== "broker" && (
+              <Link to={`/products/${product.id}/edit`}>Заполнить</Link>
+            )}
+          </div>
+        ))}
       {overduePayments.length > 0 && (
         <section className="overdue-block">
           <div className="section-heading compact">
@@ -2387,6 +2399,14 @@ function ProductDetailPage({
   const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
   return (
     <Page title={product.name} subtitle="Карточка инструмента" back>
+      {product.forecastNote && (
+        <div className="demo-note">
+          ⚠ {product.forecastNote}.{" "}
+          {product.source !== "broker" && (
+            <Link to={`/products/${product.id}/edit`}>Заполнить в карточке</Link>
+          )}
+        </div>
+      )}
       <div className="confirm-card">
         <div className="detail-line">
           <span>Тип</span>

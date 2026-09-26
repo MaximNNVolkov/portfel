@@ -126,6 +126,63 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument, today
   return payouts
 }
 
+// Даты купонов при двух выплатах в год. Если дата выплаты купона задана — ряд идёт
+// вперёд от неё, как и раньше. Если нет (BUG-20: поле спрятано в доп. деталях и его
+// почти никто не заполняет) — даты выводятся с проговорённым в описании допущением:
+// решено автономно: от чего отсчитывать купоны без «Даты выплаты купона» → сначала назад
+// от даты погашения, и только без неё — вперёд от даты покупки → купонный график ОФЗ
+// и корпоративных выпусков привязан к погашению (последний купон приходит в день
+// погашения), поэтому такой ряд почти всегда совпадает с настоящим; ряд от даты покупки
+// (вариант из плана) верен лишь случайно и остаётся запасным.
+type CouponSchedule = { dates: string[]; basis: 'coupon-date' | 'maturity' | 'purchase' }
+function couponSchedule(position: PositionRecord, instrument: Instrument, horizon: string | undefined, today: string): CouponSchedule | null {
+  const step = 12 / COUPONS_PER_YEAR
+  const forward = (anchor: string, firstIndex: number) => {
+    const dates: string[] = []
+    for (let index = firstIndex; index < MAX_PERIODS; index += 1) {
+      const date = addMonths(anchor, step * index)
+      if (horizon && daysBetween(date, horizon) < 0) break
+      if (!horizon && index > firstIndex) break
+      dates.push(date)
+    }
+    return dates
+  }
+  if (instrument.couponDate) return { dates: forward(instrument.couponDate, 0), basis: 'coupon-date' }
+  if (instrument.maturityDate) {
+    // Назад от погашения, но не раньше покупки: купоны до неё получал прежний владелец.
+    const floor = position.openedOn && daysBetween(position.openedOn, today) > 0 ? position.openedOn : today
+    const dates: string[] = []
+    for (let index = 0; index < MAX_PERIODS; index += 1) {
+      const date = addMonths(instrument.maturityDate, -step * index)
+      if (daysBetween(floor, date) <= 0) break
+      if (!horizon || daysBetween(date, horizon) >= 0) dates.unshift(date)
+    }
+    return { dates, basis: 'maturity' }
+  }
+  if (position.openedOn) return { dates: forward(position.openedOn, 1), basis: 'purchase' }
+  return null
+}
+
+const COUPON_BASIS_NOTE: Record<CouponSchedule['basis'], string> = {
+  'coupon-date': '',
+  maturity: ', даты отсчитаны от даты погашения — уточните дату выплаты купона',
+  purchase: ', даты отсчитаны от даты покупки — уточните дату выплаты купона',
+}
+
+// Почему по облигации не посчитаны купоны — для честной пометки на карточке и в
+// календаре (§7.3: ноль без объяснения запрещён). null — прогноз купонов строится
+// или купонов у инструмента нет по определению (не облигация).
+export function couponForecastGap(position: PositionRecord, instrument: Instrument): string | null {
+  if (instrument.groupType !== 'bond') return null
+  if (!instrument.couponRate || instrument.couponRate <= 0) return 'Купоны не рассчитаны: не указана ставка купона'
+  if (!position.quantity || position.quantity <= 0) return 'Купоны не рассчитаны: не указано количество облигаций'
+  if (!instrument.nominal || instrument.nominal <= 0) return 'Купоны не рассчитаны: не указан номинал'
+  if (!instrument.couponDate && !instrument.maturityDate && !position.openedOn) {
+    return 'Купоны не рассчитаны: не указана дата выплаты купона'
+  }
+  return null
+}
+
 // §14/§22: купоны и погашение номинала. Номинал и количество обязательны — без них сумма
 // выплаты неизвестна, а подставлять вместо неё ноль запрещено (§7.3).
 function forecastBond(position: PositionRecord, instrument: Instrument, today: string): ForecastPayout[] {
@@ -139,20 +196,19 @@ function forecastBond(position: PositionRecord, instrument: Instrument, today: s
   // прогноз обрывается на ней, а не продолжается до формального погашения.
   const horizon = [instrument.ofertaDate, instrument.maturityDate].filter(Boolean).sort()[0]
 
-  if (instrument.couponRate && instrument.couponRate > 0 && instrument.couponDate) {
-    const amount = round2((faceValue * (instrument.couponRate / 100)) / COUPONS_PER_YEAR)
-    const step = 12 / COUPONS_PER_YEAR
-    for (let index = 0; index < MAX_PERIODS; index += 1) {
-      const date = addMonths(instrument.couponDate, step * index)
-      if (horizon && daysBetween(date, horizon) < 0) break
-      if (!horizon && index > 0) break
+  const schedule = instrument.couponRate && instrument.couponRate > 0
+    ? couponSchedule(position, instrument, horizon, today)
+    : null
+  if (schedule) {
+    const amount = round2((faceValue * (instrument.couponRate! / 100)) / COUPONS_PER_YEAR)
+    for (const date of schedule.dates) {
       if (daysBetween(today, date) > 0) {
         payouts.push({
           date,
           type: 'COUPON',
           amount,
           currency,
-          description: `Купон «${instrument.name}» (прогноз, ${COUPONS_PER_YEAR} раза в год)`,
+          description: `Купон «${instrument.name}» (прогноз, ${COUPONS_PER_YEAR} раза в год${COUPON_BASIS_NOTE[schedule.basis]})`,
         })
       }
     }

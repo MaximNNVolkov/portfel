@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { resolveAssetGroup, type AssetGroup, type PositionValuation } from './portfolio-engine.ts'
 import { GROUP_LABELS } from './daily-tasks.ts'
+import { couponForecastGap } from './payout-forecast.ts'
 import {
   ensureAccount, ensurePortfolio, insertInstrument, insertPosition,
   type AccountType, type AssetGroupType, type DataSource, type Db, type Instrument, type Position,
@@ -214,6 +215,9 @@ export function positionToWire(position: Position, valuation?: PositionValuation
     replenishable: instrument.replenishable,
     partialWithdrawal: instrument.partialWithdrawal,
     autoProlongation: instrument.autoProlongation,
+    // Почему по облигации нет прогноза купонов (BUG-20, §7.3) — показывается на карточке
+    // и в календаре вместо молчаливого отсутствия выплат.
+    forecastNote: couponForecastGap(position, instrument) ?? undefined,
     valuation: valuation ? {
       // null = оценки нет (нет цены или курса); ноль вместо неё не подставляется (§7.3).
       value: valuation.valueBase,

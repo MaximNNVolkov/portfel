@@ -3,7 +3,7 @@
 // `npx tsx server/payout-forecast.test.ts`. Ненулевой код возврата = провал.
 
 import assert from 'node:assert/strict'
-import { addMonths, forecastPayouts } from './payout-forecast.ts'
+import { addMonths, couponForecastGap, forecastPayouts } from './payout-forecast.ts'
 import type { Instrument, PositionRecord } from './repository.ts'
 
 let failed = 0
@@ -133,6 +133,41 @@ test('облигация без количества или номинала н�
     TODAY,
   )
   assert.deepEqual(noNominal, [])
+})
+
+// BUG-20 (FIX_PLAN 2.7): без «Даты выплаты купона» купоны всё равно прогнозируются.
+test('купоны без даты купона отсчитываются назад от погашения', () => {
+  const result = forecastPayouts(
+    position({ quantity: 120, openedOn: '2026-09-01' }),
+    instrument({ groupType: 'bond', name: 'ОФЗ 26238', nominal: 1000, couponRate: 9.5, maturityDate: '2032-05-19' }),
+    TODAY,
+  )
+  const coupons = result.filter((payout) => payout.type === 'COUPON')
+  assert.equal(coupons.length, 12)
+  assert.equal(coupons[0].date, '2026-11-19')
+  assert.equal(coupons.at(-1)!.date, '2032-05-19')
+  assert.equal(coupons[0].amount, 5700)
+  assert.match(coupons[0].description, /от даты погашения/)
+  assert.equal(result.filter((payout) => payout.type === 'REDEMPTION').length, 1)
+})
+
+test('без даты купона и погашения купон отсчитывается от даты покупки', () => {
+  const result = forecastPayouts(
+    position({ quantity: 10, openedOn: '2026-09-01' }),
+    instrument({ groupType: 'bond', nominal: 1000, couponRate: 8 }),
+    TODAY,
+  )
+  assert.deepEqual(result.map((payout) => payout.date), ['2027-03-01'])
+  assert.match(result[0].description, /от даты покупки/)
+})
+
+test('причина, по которой купоны не рассчитаны, называется явно', () => {
+  const bond = (overrides: Partial<Instrument>) => instrument({ groupType: 'bond', nominal: 1000, couponRate: 8, ...overrides })
+  assert.equal(couponForecastGap(position({ quantity: 10, openedOn: '2026-01-01' }), bond({})), null)
+  assert.match(couponForecastGap(position({ quantity: 10 }), bond({}))!, /не указана дата выплаты купона/)
+  assert.match(couponForecastGap(position({ quantity: 10 }), bond({ couponRate: undefined }))!, /ставка купона/)
+  assert.match(couponForecastGap(position({}), bond({ maturityDate: '2030-01-01' }))!, /количество/)
+  assert.equal(couponForecastGap(position({}), instrument({ groupType: 'share' })), null)
 })
 
 test('акции и фонды не прогнозируются', () => {

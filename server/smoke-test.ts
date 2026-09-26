@@ -197,6 +197,23 @@ async function run() {
       assert.equal(summary.json.total, 100000)
     })
 
+    // BUG-20 (FIX_PLAN 2.7): облигация без «Даты выплаты купона» получает прогноз купонов.
+    await test('купоны облигации прогнозируются без даты купона', async () => {
+      const bond = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест ОФЗ', type: 'Облигация', amount: 120000, date: '2026-09-01', quantity: 120, nominal: 1000, couponRate: 9.5, maturityDate: '2032-05-19' },
+      })
+      assert.equal(bond.status, 201)
+      assert.equal(bond.json.forecastNote, undefined)
+      const payouts = await api('/api/payouts', { token: tokenA })
+      const coupons = payouts.json.filter((payout: { instrumentId: string; type: string }) => payout.instrumentId === bond.json.instrumentId && payout.type === 'COUPON')
+      assert.ok(coupons.length >= 11, `купонов: ${coupons.length}`)
+      assert.equal(coupons[0].amount, 5700)
+      const noCoupon = await api(`/api/positions/${bond.json.id}`, { method: 'PATCH', token: tokenA, body: { couponRate: '' } })
+      assert.match(noCoupon.json.forecastNote, /ставка купона/)
+      assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // BUG-22 (FIX_PLAN 2.6): ожидаемая выплата с прошедшей датой — «просрочено»,
     // в «Ожидается» не входит.
     await test('просроченная выплата отделена от ожидаемых', async () => {
