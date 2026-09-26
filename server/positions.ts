@@ -200,6 +200,7 @@ export function positionToWire(position: Position, valuation?: PositionValuation
     quantity: position.quantity,
     averagePrice: position.averagePrice,
     currentPrice: position.currentPrice,
+    priceUpdatedAt: position.priceUpdatedAt,
     accruedInterest: position.accruedInterest,
     nominal: instrument.nominal,
     couponRate: instrument.couponRate,

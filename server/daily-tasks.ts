@@ -5,7 +5,7 @@
 // и ежедневным автоматическим запуском одной и той же операции.
 import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
-import { getCbrRateTable, getMoexLastPrice } from './market-data.ts'
+import { getCbrRateTable, getMoexQuote } from './market-data.ts'
 import { aggregateByGroup, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 import { forecastPayouts } from './payout-forecast.ts'
 import {
@@ -254,26 +254,59 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
   await recordSnapshot(client, userId)
 }
 
-// §20: обновление текущей цены акций/фондов по данным MOEX ISS. Раньше было исключительно
-// явным действием пользователя (кнопка «Обновить цены») именно потому, что в проекте
-// сознательно нет Celery/Redis (см. «Решение (контекст)» в истории плана) — теперь эта же
-// логика используется и планировщиком (§19/§21/§32), и осталась доступна по кнопке: оба
-// пути вызывают одну и ту же функцию, а не два независимых куска кода.
-export async function refreshMarketPrices(client: Db, userId: string): Promise<{ checked: number; updated: number }> {
+// §20: обновление текущей цены акций, фондов и облигаций по данным MOEX ISS. Раньше было
+// исключительно явным действием пользователя (кнопка «Обновить цены») именно потому, что
+// в проекте сознательно нет Celery/Redis (см. «Решение (контекст)» в истории плана) — теперь
+// эта же логика используется и планировщиком (§19/§21/§32), и осталась доступна по кнопке:
+// оба пути вызывают одну и ту же функцию, а не два независимых куска кода.
+//
+// По каждой бумаге возвращается итог и время последнего удачного обновления (BUG-19):
+// «Обновлено цен: 0 из 1» без причины не отличает закрытую биржу от опечатки в тикере.
+export type PriceRefreshStatus = 'updated' | 'not_found' | 'no_price' | 'unavailable' | 'no_quantity'
+export type PriceRefreshItem = {
+  positionId: string
+  name: string
+  code: string
+  status: PriceRefreshStatus
+  priceUpdatedAt?: string
+}
+const QUOTED_GROUPS: AssetGroupType[] = ['share', 'fund', 'bond']
+
+export async function refreshMarketPrices(client: Db, userId: string): Promise<{ checked: number; updated: number; items: PriceRefreshItem[] }> {
   const positions = await listPositions(client, userId)
+  // Облигацию на MOEX ищем по тикеру, а если его нет — по ISIN: у ОФЗ и большинства
+  // корпоративных выпусков SECID совпадает с ISIN-подобным кодом (SU26241RMFS8).
   const eligible = positions.filter((position) =>
     position.source !== 'broker'
-    && Boolean(position.quantity)
-    && Boolean(position.instrument.ticker)
-    && (position.instrument.groupType === 'share' || position.instrument.groupType === 'fund'),
+    && QUOTED_GROUPS.includes(position.instrument.groupType)
+    && Boolean(position.instrument.ticker || (position.instrument.groupType === 'bond' && position.instrument.isin)),
   )
+  const items: PriceRefreshItem[] = []
   let updated = 0
   for (const position of eligible) {
-    const price = await getMoexLastPrice(position.instrument.ticker!)
-    if (price === null) continue
-    await updatePositionMarketPrice(client, userId, { id: position.id, currentPrice: price, value: price * position.quantity! })
+    const code = (position.instrument.ticker || position.instrument.isin)!
+    const item: PriceRefreshItem = {
+      positionId: position.id, name: position.instrument.name, code, status: 'no_quantity',
+      priceUpdatedAt: position.priceUpdatedAt,
+    }
+    items.push(item)
+    // Без количества цену за бумагу не во что умножить — спрашивать биржу незачем.
+    if (!position.quantity) continue
+    const quote = await getMoexQuote(code)
+    if (quote.status !== 'ok') {
+      item.status = quote.status
+      continue
+    }
+    await updatePositionMarketPrice(client, userId, {
+      id: position.id,
+      currentPrice: quote.price,
+      value: quote.price * position.quantity,
+      accruedInterest: quote.accruedInterest === null ? undefined : quote.accruedInterest * position.quantity,
+    })
+    item.status = 'updated'
+    item.priceUpdatedAt = new Date().toISOString()
     updated += 1
   }
   if (updated > 0) await recordSnapshot(client, userId)
-  return { checked: eligible.length, updated }
+  return { checked: eligible.length, updated, items }
 }

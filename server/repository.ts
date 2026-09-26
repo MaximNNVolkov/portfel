@@ -75,6 +75,8 @@ export type PositionRecord = {
   openedOn?: string
 }
 export type Position = PositionRecord & {
+  // Когда цена последний раз пришла с биржи (BUG-19); пишется только обновлением котировок.
+  priceUpdatedAt?: string
   instrument: Instrument
   account: { id: string; type: AccountType; provider: string; currency: string }
 }
@@ -394,7 +396,7 @@ export async function deleteOrphanInstrument(db: Db, userId: string, id: string)
 
 const POSITION_FIELDS = `
   p.id, p.account_id, p.quantity, p.average_price, p.current_price, p.current_value,
-  p.invested, p.accrued_interest, p.opened_on, p.source,
+  p.invested, p.accrued_interest, p.opened_on, p.price_updated_at, p.source,
   a.type AS account_type, a.provider AS account_provider, a.currency AS account_currency,
   ${INSTRUMENT_FIELDS}`
 
@@ -422,6 +424,7 @@ function mapPosition(row: any): Position {
     currentPrice: num(row.current_price),
     accruedInterest: num(row.accrued_interest),
     openedOn: text(row.opened_on),
+    priceUpdatedAt: row.price_updated_at ? new Date(row.price_updated_at).toISOString() : undefined,
     instrument: mapInstrument(row),
     account: {
       id: row.account_id,
@@ -512,11 +515,15 @@ export async function updatePositionValue(db: Db, userId: string, position: Pick
 
 // Обновление котировки (§20): трогает только цену и пересчитанную от неё стоимость —
 // не задевает invested/quantity/остальные поля, которые сюда не относятся.
-export async function updatePositionMarketPrice(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'currentPrice' | 'value'>): Promise<void> {
+// НКД передаётся только для облигаций; undefined оставляет введённое значение как есть.
+export async function updatePositionMarketPrice(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'currentPrice' | 'value' | 'accruedInterest'>): Promise<void> {
   await db.query(
-    `UPDATE portfolio.positions p SET current_price = $3, current_value = $4, updated_at = NOW()
+    `UPDATE portfolio.positions p SET current_price = $3, current_value = $4,
+       accrued_interest = CASE WHEN $5::boolean THEN $6 ELSE accrued_interest END,
+       price_updated_at = NOW(), updated_at = NOW()
       WHERE p.id = $1 AND ${OWNED_POSITION}`,
-    [position.id, userId, position.currentPrice ?? null, position.value ?? null],
+    [position.id, userId, position.currentPrice ?? null, position.value ?? null,
+      position.accruedInterest !== undefined, position.accruedInterest ?? null],
   )
 }
 

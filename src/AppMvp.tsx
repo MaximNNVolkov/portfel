@@ -30,6 +30,7 @@ type Product = {
   quantity?: number;
   averagePrice?: number;
   currentPrice?: number;
+  priceUpdatedAt?: string;
   nominal?: number;
   accruedInterest?: number;
   couponRate?: number;
@@ -346,6 +347,22 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     valuation: { incomplete: false, unavailable: [] },
   };
 }
+
+// Итог «Обновить цены» по каждой бумаге (BUG-19): без причины «0 из 1» ничего не объясняет.
+type PriceRefreshItem = {
+  positionId: string;
+  name: string;
+  code: string;
+  status: "updated" | "not_found" | "no_price" | "unavailable" | "no_quantity";
+  priceUpdatedAt?: string;
+};
+type PriceRefreshResult = { checked: number; updated: number; items: PriceRefreshItem[] };
+const priceRefreshReasons: Record<Exclude<PriceRefreshItem["status"], "updated">, string> = {
+  not_found: "Мосбиржа не знает такого тикера — проверьте тикер или ISIN",
+  no_price: "на Мосбирже нет цены: по бумаге не было сделок",
+  unavailable: "Мосбиржа не ответила, попробуйте позже",
+  no_quantity: "не указано количество бумаг — цену не на что умножить",
+};
 
 const storageKey = "capital-mvp-state";
 const apiUrl = "/api";
@@ -806,6 +823,7 @@ function AppMvp() {
   const [transactions, setTransactions] =
     useState<Transaction[]>(initialTransactions);
   const [toast, setToast] = useState("");
+  const [priceRefresh, setPriceRefresh] = useState<PriceRefreshResult | null>(null);
   const [hideAmounts, setHideAmounts] = useState(false);
   const [token, setToken] = useState(
     () => localStorage.getItem(tokenKey) || "",
@@ -1073,12 +1091,13 @@ function AppMvp() {
       setToast("Не удалось обновить цены");
       return;
     }
-    const result = (await response.json()) as { checked: number; updated: number };
+    const result = (await response.json()) as PriceRefreshResult;
+    setPriceRefresh(result);
     await refreshProducts();
     await refreshSummary();
     setToast(
       result.checked === 0
-        ? "Нет инструментов с тикером для обновления цены"
+        ? "Нет акций, фондов или облигаций с тикером для обновления цены"
         : `Обновлено цен: ${result.updated} из ${result.checked}`,
     );
   }
@@ -1411,7 +1430,7 @@ function AppMvp() {
           />
           <Route
             path="/products"
-            element={<ProductsPage products={products} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
+            element={<ProductsPage products={products} lastRefresh={priceRefresh} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
           />
           <Route
             path="/products/:id"
@@ -1965,7 +1984,16 @@ function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
   return withIndex.map((entry) => entry.product);
 }
 
-function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRefreshPrices: () => Promise<void> }) {
+function ProductsPage({
+  products,
+  lastRefresh,
+  onRefreshPrices,
+}: {
+  products: Product[];
+  lastRefresh: PriceRefreshResult | null;
+  onRefreshPrices: () => Promise<void>;
+}) {
+  const failedRefresh = lastRefresh?.items.filter((item) => item.status !== "updated") ?? [];
   const [refreshing, setRefreshing] = useState(false);
   async function handleRefreshPrices() {
     setRefreshing(true);
@@ -2022,6 +2050,21 @@ function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRe
           </select>
         </label>
       </div>
+      {failedRefresh.length > 0 && (
+        <div className="demo-note price-refresh-note">
+          <strong>Не обновлено цен: {failedRefresh.length}</strong>
+          <ul>
+            {failedRefresh.map((item) => (
+              <li key={item.positionId}>
+                {item.name} ({item.code}) — {priceRefreshReasons[item.status as keyof typeof priceRefreshReasons]}.{" "}
+                {item.priceUpdatedAt
+                  ? `Последняя цена с биржи — ${new Date(item.priceUpdatedAt).toLocaleString("ru-RU")}.`
+                  : "С биржи цена ещё ни разу не приходила."}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {sorted.length === 0 ? (
         <p className="muted">
           {products.length === 0
@@ -2694,6 +2737,8 @@ function ProductDetailPage({
             {product.currentPrice !== undefined
               ? money(product.currentPrice)
               : "Актуальная цена недоступна"}
+            {product.priceUpdatedAt &&
+              ` · с биржи ${new Date(product.priceUpdatedAt).toLocaleString("ru-RU")}`}
           </span>
         </div>
         <div className="detail-line">

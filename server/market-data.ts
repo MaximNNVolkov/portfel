@@ -68,7 +68,7 @@ export async function getCbrRateTable(): Promise<RateTable> {
 }
 
 // ---------------------------------------------------------------------------
-// Котировки MOEX ISS (§20) — только текущая цена акций/фондов по тикеру.
+// Котировки MOEX ISS (§20) — текущая цена акций, фондов и облигаций.
 //
 // Решено автономно (см. план, «MOEX ISS — коммерческие ограничения»): открытый вопрос
 // CLAUDE.md о лицензионных условиях MOEX ISS при публичном/многопользовательском сценарии
@@ -77,18 +77,24 @@ export async function getCbrRateTable(): Promise<RateTable> {
 // только публичные бесплатные JSON-эндпоинты ISS, без служебных/платных продуктов вроде
 // Algopack. Вопрос переоткрывается перед любым переходом к многопользовательскому v2.
 //
-// Решено автономно: цена — только для «Акции»/«Фонды», не для облигаций → обоснование:
-// у облигаций MOEX отдаёт цену в процентах от номинала, а не в валюте позиции напрямую —
-// корректный пересчёт требует отдельной, более сложной логики (номинал + НКД, §14),
-// которую нецелесообразно смешивать с этим более простым и самодостаточным пунктом;
-// зафиксировано как известное ограничение, а не потерянный без объяснения кейс.
+// Облигации (BUG-19): MOEX отдаёт их цену в процентах от номинала, поэтому цена
+// в валюте позиции — процент × FACEVALUE / 100 (номинал берётся с биржи, а не из карточки:
+// у амортизируемых выпусков он уменьшается), а НКД на одну бумагу — ACCRUEDINT (§14).
 const MOEX_PRICE_CACHE_TTL_MS = 15 * 60 * 1000
-const moexPriceCache = new Map<string, { price: number | null; fetchedAt: number }>()
+const moexQuoteCache = new Map<string, { quote: MoexQuote; fetchedAt: number }>()
 
 type MoexBoardRef = { engine: string; market: string; boardid: string }
 
-async function findPrimaryBoard(ticker: string): Promise<MoexBoardRef | null> {
-  const url = `https://iss.moex.com/iss/securities/${encodeURIComponent(ticker)}.json?iss.only=boards&boards.columns=secid,boardid,market,engine,is_primary`
+// Итог запроса котировки. Причина отказа возвращается явно, чтобы пользователь видел,
+// почему цена не обновилась, а не безликое «0 из 1» (BUG-19).
+export type MoexQuote =
+  | { status: 'ok'; price: number; accruedInterest: number | null }
+  | { status: 'not_found' }
+  | { status: 'no_price' }
+  | { status: 'unavailable' }
+
+async function findPrimaryBoard(secid: string): Promise<MoexBoardRef | null> {
+  const url = `https://iss.moex.com/iss/securities/${encodeURIComponent(secid)}.json?iss.only=boards&boards.columns=secid,boardid,market,engine,is_primary`
   const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
   if (!response.ok) throw new Error(`MOEX ISS (securities) ответил ${response.status}`)
   const body = await response.json() as { boards?: { columns: string[]; data: unknown[][] } }
@@ -103,39 +109,59 @@ async function findPrimaryBoard(ticker: string): Promise<MoexBoardRef | null> {
   return null
 }
 
-async function fetchMoexLastPrice(ticker: string): Promise<number | null> {
-  const board = await findPrimaryBoard(ticker)
-  if (!board) return null
-  const url = `https://iss.moex.com/iss/engines/${board.engine}/markets/${board.market}/boards/${board.boardid}/securities/${encodeURIComponent(ticker)}.json?iss.only=marketdata&marketdata.columns=SECID,LAST,MARKETPRICE`
+function positive(value: unknown): number | null {
+  const number = Number(value)
+  return value !== null && Number.isFinite(number) && number > 0 ? number : null
+}
+
+async function fetchMoexQuote(secid: string): Promise<MoexQuote> {
+  const board = await findPrimaryBoard(secid)
+  if (!board) return { status: 'not_found' }
+  const url = `https://iss.moex.com/iss/engines/${board.engine}/markets/${board.market}/boards/${board.boardid}/securities/${encodeURIComponent(secid)}.json`
+    + '?iss.only=marketdata,securities&marketdata.columns=SECID,LAST,MARKETPRICE&securities.columns=SECID,PREVPRICE,FACEVALUE,ACCRUEDINT'
   const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
   if (!response.ok) throw new Error(`MOEX ISS (marketdata) ответил ${response.status}`)
-  const body = await response.json() as { marketdata?: { columns: string[]; data: unknown[][] } }
-  const columns = body.marketdata?.columns ?? []
-  const row = body.marketdata?.data?.[0]
-  if (!row) return null
-  const idx = (name: string) => columns.indexOf(name)
-  const last = Number(row[idx('LAST')])
-  if (Number.isFinite(last) && last > 0) return last
-  const marketPrice = Number(row[idx('MARKETPRICE')])
-  return Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : null
+  const body = await response.json() as {
+    marketdata?: { columns: string[]; data: unknown[][] }
+    securities?: { columns: string[]; data: unknown[][] }
+  }
+  const field = (block: { columns: string[]; data: unknown[][] } | undefined, name: string) => {
+    const row = block?.data?.[0]
+    return row ? row[(block?.columns ?? []).indexOf(name)] : null
+  }
+  // Сделок сегодня может не быть (выходной, до открытия) — тогда рыночная цена,
+  // а за ней цена закрытия прошлой сессии: это тоже рыночная оценка, не цена покупки.
+  const quoted = positive(field(body.marketdata, 'LAST'))
+    ?? positive(field(body.marketdata, 'MARKETPRICE'))
+    ?? positive(field(body.securities, 'PREVPRICE'))
+  if (quoted === null) return { status: 'no_price' }
+  if (board.market !== 'bonds') return { status: 'ok', price: quoted, accruedInterest: null }
+  const faceValue = positive(field(body.securities, 'FACEVALUE'))
+  if (faceValue === null) return { status: 'no_price' }
+  const accrued = Number(field(body.securities, 'ACCRUEDINT'))
+  return {
+    status: 'ok',
+    price: quoted * faceValue / 100,
+    accruedInterest: Number.isFinite(accrued) ? accrued : null,
+  }
 }
 
 /**
- * Текущая цена акции/фонда по тикеру (§20), с кэшем 15 минут в памяти процесса.
- * Возвращает null, если тикер не найден или источник недоступен — вызывающий код
- * обязан просто пропустить обновление этой позиции, а не превращать это в ошибку (§7.3/§40.2).
+ * Котировка бумаги по коду MOEX (тикер акции/фонда или SECID облигации, §20), с кэшем
+ * 15 минут в памяти процесса. Сбой источника не превращается в ошибку вызывающего кода
+ * (§7.3/§40.2): возвращается status 'unavailable' (или прошлая удачная котировка из кэша).
  */
-export async function getMoexLastPrice(ticker: string): Promise<number | null> {
-  const key = ticker.trim().toUpperCase()
-  if (!key) return null
-  const cached = moexPriceCache.get(key)
-  if (cached && Date.now() - cached.fetchedAt < MOEX_PRICE_CACHE_TTL_MS) return cached.price
+export async function getMoexQuote(secid: string): Promise<MoexQuote> {
+  const key = secid.trim().toUpperCase()
+  if (!key) return { status: 'not_found' }
+  const cached = moexQuoteCache.get(key)
+  if (cached && Date.now() - cached.fetchedAt < MOEX_PRICE_CACHE_TTL_MS) return cached.quote
   try {
-    const price = await fetchMoexLastPrice(key)
-    moexPriceCache.set(key, { price, fetchedAt: Date.now() })
-    return price
+    const quote = await fetchMoexQuote(key)
+    moexQuoteCache.set(key, { quote, fetchedAt: Date.now() })
+    return quote
   } catch (error) {
     logError('moex-price', error)
-    return cached ? cached.price : null
+    return cached?.quote.status === 'ok' ? cached.quote : { status: 'unavailable' }
   }
 }
