@@ -220,6 +220,8 @@ type Payment = {
   instrumentId?: string;
   accountId?: string;
   transactionId?: string;
+  /** Только в запросе: позиция, к инструменту которой привязать выплату; "" — отвязать (BUG-23). */
+  positionId?: string;
   /** Ожидалась, но дата уже прошла (BUG-22) — считается на бэкенде по его часам. */
   overdue?: boolean;
 };
@@ -1441,12 +1443,12 @@ function AppMvp() {
           />
           <Route
             path="/payments/new"
-            element={<PaymentFormPage onSubmit={addPayment} />}
+            element={<PaymentFormPage products={products} onSubmit={addPayment} />}
           />
           <Route
             path="/payments/:id/edit"
             element={
-              <EditPaymentPage payments={payments} onSubmit={updatePayment} />
+              <EditPaymentPage payments={payments} products={products} onSubmit={updatePayment} />
             }
           />
           <Route
@@ -2723,7 +2725,14 @@ function ProductDetailPage({
         </div>
       </div>
       {relatedPayments.length === 0 ? (
-        <p className="muted">Выплат по этому инструменту пока нет.</p>
+        <p className="muted">
+          Выплат по этому инструменту пока нет.{" "}
+          {product.type !== "Деньги" && (
+            <Link to={`/payments/new?position=${encodeURIComponent(product.id)}`}>
+              Добавить выплату
+            </Link>
+          )}
+        </p>
       ) : (
         <div className="list-card">
           {relatedPayments.map((payment) => (
@@ -4407,9 +4416,11 @@ function DeleteOcrItemsPage({
 }
 function EditPaymentPage({
   payments,
+  products,
   onSubmit,
 }: {
   payments: Payment[];
+  products: Product[];
   onSubmit: (payment: Payment) => void;
 }) {
   const { id } = useParams();
@@ -4421,6 +4432,9 @@ function EditPaymentPage({
   const [status, setStatus] = useState<PayoutStatus>(
     payment?.status || "expected",
   );
+  const [positionId, setPositionId] = useState(
+    payment ? payoutPositionId(payment, products) : "",
+  );
   useEffect(() => {
     if (!payment) return;
     setTitle(payment.title);
@@ -4428,12 +4442,24 @@ function EditPaymentPage({
     setDate(payment.date);
     setType(payment.type);
     setStatus(payment.status);
+    setPositionId(payoutPositionId(payment, products));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, Boolean(payment)]);
   if (!payment) return <MissingRecord to="/payments" />;
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSubmit({ ...payment, title, amount: Number(amount), date, type, status });
+    // Привязку отправляем, только если её поменяли: у выплаты по уже удалённой позиции
+    // список показывает «Без привязки», и сохранение других полей не должно её отвязать.
+    const linkChanged = positionId !== payoutPositionId(payment, products);
+    onSubmit({
+      ...payment,
+      title,
+      amount: Number(amount),
+      date,
+      type,
+      status,
+      ...(linkChanged ? payoutLinkFields(positionId, products) : {}),
+    });
   };
   return (
     <Page title="Редактировать выплату" subtitle={payment.title} back>
@@ -4446,6 +4472,7 @@ function EditPaymentPage({
             required
           />
         </label>
+        <PayoutInstrumentField products={products} value={positionId} onChange={setPositionId} />
         <label>
           Сумма
           <input
@@ -4531,9 +4558,54 @@ function DeletePaymentPage({
     </Page>
   );
 }
+// Выбор инструмента для выплаты (§22, BUG-23). Необязательный, но видимый: без него
+// дивиденд по акции остаётся «ничьим» и не попадает ни в карточку, ни в фильтр.
+function PayoutInstrumentField({
+  products,
+  value,
+  onChange,
+}: {
+  products: Product[];
+  value: string;
+  onChange: (positionId: string) => void;
+}) {
+  return (
+    <label>
+      Инструмент
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Без привязки к инструменту</option>
+        {products
+          .filter((product) => product.type !== "Деньги")
+          .map((product) => (
+            <option value={product.id} key={product.id}>
+              {product.name}
+              {product.institution ? ` · ${product.institution}` : ""}
+            </option>
+          ))}
+      </select>
+    </label>
+  );
+}
+// Позиция, к инструменту которой уже привязана выплата: на том же счёте, если такая есть.
+function payoutPositionId(payment: Payment, products: Product[]) {
+  if (!payment.instrumentId) return "";
+  const candidates = products.filter((product) => product.instrumentId === payment.instrumentId);
+  return (
+    candidates.find((product) => product.accountId === payment.accountId) ?? candidates[0]
+  )?.id ?? "";
+}
+// Поля привязки для запроса: positionId — бэкенду, instrumentId — офлайн-режиму без бэкенда.
+function payoutLinkFields(positionId: string, products: Product[]) {
+  return {
+    positionId,
+    instrumentId: products.find((product) => product.id === positionId)?.instrumentId,
+  };
+}
 function PaymentFormPage({
+  products,
   onSubmit,
 }: {
+  products: Product[];
   onSubmit: (payment: Payment) => void;
 }) {
   const [title, setTitle] = useState("");
@@ -4541,6 +4613,12 @@ function PaymentFormPage({
   const [date, setDate] = useState("");
   const [type, setType] = useState<PayoutType>("OTHER");
   const [status, setStatus] = useState<PayoutStatus>("expected");
+  // ?position= — переход «Добавить выплату» из карточки инструмента.
+  const [searchParams] = useSearchParams();
+  const [positionId, setPositionId] = useState(() => {
+    const requested = searchParams.get("position") ?? "";
+    return products.some((product) => product.id === requested) ? requested : "";
+  });
   // Задним числом вводить выплаты законно — предупреждаем, но не запрещаем (BUG-22).
   const pastExpected = Boolean(date) && date < todayIsoDate() && status === "expected";
   const submit = (event: FormEvent) => {
@@ -4553,6 +4631,7 @@ function PaymentFormPage({
       type,
       status,
       currency: "RUB",
+      ...payoutLinkFields(positionId, products),
     });
   };
   return (
@@ -4567,6 +4646,7 @@ function PaymentFormPage({
             required
           />
         </label>
+        <PayoutInstrumentField products={products} value={positionId} onChange={setPositionId} />
         <label>
           Сумма
           <input

@@ -170,6 +170,30 @@ async function run() {
       assert.equal((await api(`/api/positions/${derived.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // BUG-23 (FIX_PLAN 3.7): ручную выплату можно привязать к инструменту и отвязать.
+    await test('ручная выплата привязывается к инструменту', async () => {
+      const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      const created = await api('/api/payouts', {
+        method: 'POST', token: tokenA,
+        body: { title: 'Смоук-тест дивиденд', amount: 3400, date: '2026-03-01', type: 'DIVIDEND', status: 'received', positionId: sharePositionId },
+      })
+      assert.equal(created.status, 201)
+      assert.equal(created.json.instrumentId, share.json.instrumentId)
+      const unknown = await api('/api/payouts', {
+        method: 'POST', token: tokenA,
+        body: { title: 'Смоук-тест дивиденд', amount: 1, date: '2026-03-01', positionId: '00000000-0000-0000-0000-000000000000' },
+      })
+      assert.equal(unknown.status, 400)
+      const untouched = await api(`/api/payouts/${created.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 3500 } })
+      assert.equal(untouched.json.instrumentId, share.json.instrumentId)
+      const unlinked = await api(`/api/payouts/${created.json.id}`, { method: 'PATCH', token: tokenA, body: { positionId: '' } })
+      assert.equal(unlinked.status, 200)
+      assert.equal(unlinked.json.instrumentId, undefined)
+      const relinked = await api(`/api/payouts/${created.json.id}`, { method: 'PATCH', token: tokenA, body: { positionId: sharePositionId } })
+      assert.equal(relinked.json.instrumentId, share.json.instrumentId)
+      assert.equal((await api(`/api/payouts/${created.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     await test('удаление второй позиции', async () => {
       const { status } = await api(`/api/positions/${sharePositionId}`, { method: 'DELETE', token: tokenA })
       assert.equal(status, 204)

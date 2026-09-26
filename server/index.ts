@@ -636,6 +636,17 @@ app.get('/api/payouts', async (request, response) => {
   const payouts = await listPayouts(db, userId, listOptions(request))
   response.json(payouts.map((payout) => payoutToWire(payout)))
 })
+// Привязка выплаты к инструменту (§22, BUG-23): клиент передаёт позицию, из неё берутся
+// инструмент, счёт и валюта. undefined — поле не прислано; null — выплата «ничья».
+// Несуществующая или чужая позиция — ошибка, а не молчаливая выплата без инструмента.
+async function payoutPosition(client: Db, userId: string, value: unknown) {
+  if (value === undefined) return undefined
+  const positionId = optionalText(value)
+  if (!positionId) return null
+  const position = await findPosition(client, userId, positionId)
+  if (!position) throw new Error('Инструмент для выплаты не найден')
+  return position
+}
 app.post('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -646,7 +657,7 @@ app.post('/api/payouts', async (request, response) => {
     const type = payoutType(body.type, 'OTHER')
     const status = payoutStatus(body.status, 'expected')
     const payout = await withTransaction(db, async (client) => {
-      const position = optionalText(body.positionId) ? await findPosition(client, userId, String(body.positionId)) : undefined
+      const position = await payoutPosition(client, userId, body.positionId) ?? undefined
       const record: Payout = {
         id: randomUUID(),
         accountId: position?.accountId ?? await defaultAccountId(client, userId),
@@ -673,8 +684,13 @@ app.patch('/api/payouts/:id', async (request, response) => {
     const existing = await findPayout(db, userId, request.params.id)
     if (!existing) return response.status(404).json({ error: 'Payout not found' })
     const body = (request.body ?? {}) as PositionBody
+    const position = await payoutPosition(db, userId, body.positionId)
+    const link = position === undefined ? {}
+      : position === null ? { instrumentId: undefined }
+      : { instrumentId: position.instrumentId, accountId: position.accountId, currency: position.instrument.currency }
     const updated: Payout = {
       ...existing,
+      ...link,
       description: body.title !== undefined ? requiredText(body.title, 'title') : existing.description,
       amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
