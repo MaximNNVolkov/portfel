@@ -36,7 +36,7 @@ SPEC §28 о размещении персональных данных граж
    DATABASE_URL=postgresql://portfel:<тот же пароль>@postgres:5432/portfel
    SESSION_TTL_DAYS=30
    TOKEN_ENCRYPTION_KEY=<openssl rand -hex 32>
-   TINKOFF_API_MODE=sandbox
+   TINKOFF_API_MODE=production
    ```
    Отличия от локального `.env` для разработки: внутри docker-compose backend обращается
    к базе по имени сервиса `postgres`, а не `localhost`, и все секреты обязательны.

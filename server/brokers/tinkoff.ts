@@ -22,6 +22,9 @@
 // а наполнить его тестовыми позициями пользователь может через собственный интерфейс
 // Т-Инвестиций в режиме песочницы — это находится за пределами задачи «синхронизировать
 // существующий портфель».
+import { readFileSync } from 'node:fs'
+import { request } from 'node:https'
+import { rootCertificates } from 'node:tls'
 import type { BrokerConnector, BrokerInstrument, BrokerOperation, BrokerPosition, BrokerSyncResult } from './types.ts'
 
 const BASE_URL = 'https://invest-public-api.tbank.ru/rest/tinkoff.public.invest.api.contract.v1'
@@ -33,20 +36,46 @@ class TinkoffApiError extends Error {
   }
 }
 
-async function call<T>(service: string, method: string, token: string, body: Record<string, unknown> = {}): Promise<T> {
-  const response = await fetch(`${BASE_URL}.${service}/${method}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
+// Сертификат invest-public-api.tbank.ru выпущен Russian Trusted Root CA (Минцифры), которого нет
+// в наборе корневых сертификатов Node.js: без него любой запрос падал с «fetch failed» ещё до
+// проверки токена, и пользователь видел «Проверьте токен». Корень доверяем только здесь, а не
+// всему процессу (NODE_EXTRA_CA_CERTS), — остальные исходящие запросы проверяются как раньше.
+// Файл взят с gosuslugi.ru, SHA-256 D2:6D:2D:02:…:CA:8E:CF:31 совпал с цепочкой сервера Т-Банка.
+const TRUSTED_CA = [
+  ...rootCertificates,
+  readFileSync(new URL('./certs/russian_trusted_root_ca.pem', import.meta.url), 'utf8'),
+]
+const REQUEST_TIMEOUT_MS = 30_000
+
+function post(url: string, token: string, payload: string): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(url, {
+      method: 'POST',
+      ca: TRUSTED_CA,
+      timeout: REQUEST_TIMEOUT_MS,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }))
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error(`T-Invest API: нет ответа за ${REQUEST_TIMEOUT_MS / 1000} с`)))
+    req.on('error', reject)
+    req.end(payload)
   })
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new TinkoffApiError(response.status, `T-Invest API ${service}/${method}: ${response.status} ${text.slice(0, 200)}`)
+}
+
+async function call<T>(service: string, method: string, token: string, body: Record<string, unknown> = {}): Promise<T> {
+  const { status, text } = await post(`${BASE_URL}.${service}/${method}`, token, JSON.stringify(body))
+  if (status < 200 || status >= 300) {
+    throw new TinkoffApiError(status, `T-Invest API ${service}/${method}: ${status} ${text.slice(0, 200)}`)
   }
-  return (await response.json()) as T
+  return JSON.parse(text) as T
 }
 
 interface Quotation { units?: string | number; nano?: number }

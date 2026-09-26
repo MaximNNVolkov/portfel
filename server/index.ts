@@ -290,8 +290,10 @@ app.post('/api/brokers/tinkoff/connect', async (request, response) => {
       message: 'Токен подтверждён. Запустите синхронизацию, чтобы загрузить портфель.',
     })
   } catch (error) {
+    // Неверный токен отсекается выше (401/403 → «Токен не подошёл»). Сюда попадают сбои связи
+    // и ответы 5xx: советовать «проверьте токен» здесь — отправлять пользователя не туда.
     logError('brokers.tinkoff.connect', error)
-    response.status(400).json({ error: 'Не удалось подключить Т-Инвестиции. Проверьте токен и повторите попытку.' })
+    response.status(502).json({ error: 'Не удалось связаться с Т-Инвестициями. Токен не сохранён — повторите попытку позже.' })
   }
 })
 app.post('/api/brokers/tinkoff/sync', async (request, response) => {
