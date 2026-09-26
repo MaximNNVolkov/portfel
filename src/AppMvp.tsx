@@ -608,6 +608,39 @@ const isOverdue = (payment: Payment) =>
   (payment.status === "expected" && payment.date < todayIsoDate());
 const isUpcoming = (payment: Payment) =>
   payment.status === "expected" && !isOverdue(payment);
+// Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
+// доходов», поэтому крупно идёт ожидаемое; полученное — подписью и только если оно есть.
+// Иначе у нового пользователя весь календарь состоял из строк «+₽ 0».
+function PayoutGroupValue({
+  expected,
+  received,
+  overdue,
+}: {
+  expected: number;
+  received: number;
+  overdue: number;
+}) {
+  if (expected > 0)
+    return (
+      <>
+        <strong>+{money(expected)}</strong>
+        <small>{received > 0 ? `ожидается · получено ${money(received)}` : "ожидается"}</small>
+      </>
+    );
+  if (received > 0)
+    return (
+      <>
+        <strong>+{money(received)}</strong>
+        <small>{overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено"}</small>
+      </>
+    );
+  return (
+    <>
+      <strong>{money(overdue)}</strong>
+      <small>не отмечено полученным</small>
+    </>
+  );
+}
 const fullDate = (date: string) =>
   new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
 // Показ готового P&L из Portfolio Engine (§10): фронт ничего не вычитает сам.
@@ -2292,6 +2325,7 @@ function PaymentsPage({
       items,
       expected: items.filter(isUpcoming).reduce((sum, item) => sum + item.amount, 0),
       received: items.filter((item) => item.status === "received").reduce((sum, item) => sum + item.amount, 0),
+      overdue: items.filter(isOverdue).reduce((sum, item) => sum + item.amount, 0),
     }));
   }, [sorted, viewMode]);
 
@@ -2480,8 +2514,7 @@ function PaymentsPage({
                     <strong>{group.label}</strong>
                   </span>
                   <span className="list-row-value">
-                    <strong>+{money(group.received)}</strong>
-                    <small>ожидается {money(group.expected)}</small>
+                    <PayoutGroupValue {...group} />
                   </span>
                   <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
