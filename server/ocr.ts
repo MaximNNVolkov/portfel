@@ -42,10 +42,36 @@ export function inferAssetType(text: string): AssetGroup {
   if (/(деньг|cash|налич|остаток)/.test(haystack)) return 'Деньги'
   return 'Прочее'
 }
+// BUG-12: идентификаторы инструмента внутри строки — номер выпуска ОФЗ («ОФЗ 26238»,
+// «ОФЗ-ПД 26238»), ISIN («RU000A0JX0J2», «SU26238RMFS4») и номер через «№». Это часть
+// названия, а не деньги: без их исключения «ОФЗ 26238» распознавалась как 26 238 ₽.
+const IDENTIFIER_PATTERN = /(?:офз|ofz)(?:[\s-]*пд)?[\s-]*\d{5}|\b[A-Z]{2}[A-Z0-9]{9}\d\b|№\s*\d+/giu
+export function stripIdentifiers(line: string): string {
+  return line.replace(IDENTIFIER_PATTERN, ' ')
+}
+// Итоговые строки приложений банков/брокеров — сумма уже учтённых активов, а не актив:
+// сохранённая как есть (§40.4), такая строка удваивала бы стоимость портфеля (BUG-12).
+const TOTAL_LINE_PATTERN = /^[\s*•·-]*(?:итого|всего|баланс|total|сумма портфеля)(?![а-яёa-z])/iu
+export function isTotalLine(line: string): boolean {
+  return TOTAL_LINE_PATTERN.test(line)
+}
+// Есть ли в строке название, а не только количество/цена/сумма: слова из двух и более
+// букв, кроме единиц и валют («шт», «руб», «RUB»…). OCR часто читает «₽» как «Р»/«P» —
+// одиночные буквы названием не считаются.
+const UNIT_WORDS = new Set(['шт', 'штук', 'лот', 'лотов', 'pcs', 'руб', 'rub', 'usd', 'eur', 'cny'])
+export function hasNameText(line: string): boolean {
+  const words = line.match(/[a-zа-яё]{2,}/giu) ?? []
+  return words.some((word) => !UNIT_WORDS.has(word.toLowerCase()))
+}
 export function toCandidateName(raw: string): string {
-  const cleaned = raw
+  // Идентификаторы прячутся на время чистки, иначе хвостовая чистка сумм отрезала бы
+  // номер выпуска от «ОФЗ 26238» вместе с суммой.
+  const identifiers: string[] = []
+  const masked = raw.replace(IDENTIFIER_PATTERN, (match) => `\u0000${identifiers.push(match) - 1}\u0000`)
+  const cleaned = masked
     .replace(/^(название|инструмент|product|asset|сумма|стоимость|цена)\s*[:\-]*/i, '')
     .replace(/\s*(?:₽|руб|RUB|USD|EUR|%|\d[\d\s.,]*)+$/g, '')
+    .replace(/\u0000(\d+)\u0000/g, (_match, index: string) => identifiers[Number(index)])
     .replace(/[|•\n\t]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()
@@ -64,20 +90,51 @@ const NUMBER_PATTERN = /\d{1,3}(?:[ \u00a0\u2009]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[
 export function extractNumbers(block: string): number[] {
   return [...block.matchAll(NUMBER_PATTERN)].map((match) => parseNumber(match[0]))
 }
-export function buildOcrCandidates(text: string) {
-  const blocks = text
+// Строки скриншота → блоки «название + цифры». Приложения часто выводят название
+// инструмента отдельной строкой, а количество/цену/сумму — следующей («ОФЗ 26238» /
+// «120 шт · 567,30 ₽ · 68 076 ₽»): такая пара склеивается в один блок (BUG-12).
+// Итоговые строки отбрасываются вовсе.
+export type OcrBlock = { text: string; name?: string }
+export function groupOcrLines(text: string): OcrBlock[] {
+  const lines = text
     .split(/\n|\r|\|\s*\|/)
     .map((line) => line.trim())
-    .filter((line) => line.length > 4)
+    .filter((line) => line.length > 1)
+  const blocks: OcrBlock[] = []
+  let pendingName: string | null = null
+  for (const line of lines) {
+    if (isTotalLine(line)) { pendingName = null; continue }
+    const hasAmount = /\d/.test(stripIdentifiers(line))
+    if (!hasAmount) {
+      // Строка без сумм — кандидат в название для следующей строки с цифрами.
+      pendingName = hasNameText(line) ? line : null
+      continue
+    }
+    if (pendingName && !hasNameText(stripIdentifiers(line))) {
+      // Название — из строки-названия: в строке с цифрами его нет, а чистка хвоста
+      // склеенного блока оставила бы в названии количество и цену.
+      blocks.push({ text: `${pendingName} ${line}`, name: pendingName })
+    } else {
+      blocks.push({ text: line })
+    }
+    pendingName = null
+  }
+  return blocks
+}
+
+export function buildOcrCandidates(text: string) {
+  const blocks = groupOcrLines(text).filter((block) => block.text.length > 4)
 
   const candidates: Array<{ name: string; type: AssetGroup; amount: number; invested: number; currency: string; deltaPercent: number; confidence: number; missingFields: string[] }> = []
 
-  for (const block of blocks) {
-    const hasNumbers = /\d/.test(block)
-    const hasMoney = /(₽|руб|RUB|USD|EUR|\$|€)/i.test(block) || /\d{2,}.*\d{2,}/.test(block)
+  for (const { text: block, name: blockName } of blocks) {
+    // Суммы ищутся в строке без идентификаторов: номер выпуска не сумма (BUG-12).
+    const amountText = stripIdentifiers(block)
+    const hasNumbers = /\d/.test(amountText)
+    const hasMoney = /(₽|руб|RUB|USD|EUR|\$|€)/i.test(amountText) || /\d{2,}.*\d{2,}/.test(amountText)
     if (!hasNumbers || !hasMoney) continue
 
-    const digits = extractNumbers(block)
+    const digits = extractNumbers(amountText)
     if (!digits.length) continue
 
     const amount = digits.filter((value) => value > 0).sort((a, b) => b - a)[0] || 0
@@ -87,7 +144,7 @@ export function buildOcrCandidates(text: string) {
     // (§7.3: лучше честное «результат неизвестен», чем выдуманная цифра).
     const candidateInvested = digits.filter((value) => value > 0 && value !== amount).sort((a, b) => b - a)[0]
     const invested = candidateInvested !== undefined && candidateInvested >= amount * 0.5 ? candidateInvested : amount
-    const name = toCandidateName(block)
+    const name = toCandidateName(blockName ?? block)
     const type = inferAssetType(block)
     const currency = normalizeCurrency(block)
     const deltaPercent = amount > 0 && invested > 0 ? ((amount - invested) / invested) * 100 : 0
@@ -115,6 +172,8 @@ export function buildOcrCandidates(text: string) {
   })
 
   if (!unique.length) {
+    // Итоговые строки не должны вернуться через запасной путь разбора всего текста.
+    text = text.split(/\n|\r/).filter((line) => !isTotalLine(line.trim())).join('\n')
     const amountMatch = text.match(/(?:₽|руб(?:лей|\.)?|RUB|USD|EUR)\s*([\d\s,\.]+)/i) || text.match(/([\d\s]{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|USD|EUR)/i)
     const amount = amountMatch ? parseNumber(amountMatch[1]) : 0
     return [{

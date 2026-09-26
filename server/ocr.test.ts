@@ -6,7 +6,7 @@
 // в БД и в tesseract, поэтому проверяется вручную на живом стенде.
 
 import assert from 'node:assert/strict'
-import { buildOcrCandidates, extractNumbers, inferAssetType, normalizeCurrency, normalizeOcrName, parseNumber, toCandidateName } from './ocr.ts'
+import { buildOcrCandidates, extractNumbers, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
 
 let failed = 0
 function test(name: string, run: () => void) {
@@ -113,6 +113,64 @@ test('нераспознаваемый текст помечается недо�
   const [candidate] = buildOcrCandidates('какой-то текст без цифр')
   assert.equal(candidate.amount, 0)
   assert.deepEqual(candidate.missingFields, ['name', 'amount', 'invested'])
+})
+
+// BUG-12: текст скриншота из отчёта тестировщика (прогон 17.09.2026), включая
+// типичные ошибки OCR — «Р»/«P» вместо «₽».
+const BROKER_SCREEN = [
+  'Мои активы',
+  'Вклад Надёжный 450 000 ₽',
+  'ОФЗ 26238',
+  '120 шт · 567,30 Р · 68 076,00 Р',
+  'SBER',
+  '50 шт -312,45P - 15 622,50 Р',
+  'Итого: 533 698,50 Р',
+].join('\n')
+
+test('итоговые строки не считаются активом', () => {
+  assert.equal(isTotalLine('Итого: 533 698,50 ₽'), true)
+  assert.equal(isTotalLine('Всего 10 000'), true)
+  assert.equal(isTotalLine('Total 1 000 USD'), true)
+  assert.equal(isTotalLine('Сумма портфеля 1 000 ₽'), true)
+  assert.equal(isTotalLine('Баланс: 12 000 ₽'), true)
+  assert.equal(isTotalLine('Вклад Итоговый 10 000 ₽'), false)
+  assert.equal(isTotalLine('Итоговая доходность 12%'), false)
+  const [only] = buildOcrCandidates('Итого: 533 698,50 ₽')
+  assert.equal(only.amount, 0, 'запасной разбор всего текста тоже не должен подхватить итог')
+})
+
+test('номер выпуска и ISIN не принимаются за сумму', () => {
+  assert.deepEqual(extractNumbers(stripIdentifiers('ОФЗ 26238')), [])
+  assert.deepEqual(extractNumbers(stripIdentifiers('ОФЗ-ПД 26238 120 000 ₽')), [120000])
+  assert.deepEqual(extractNumbers(stripIdentifiers('SU26238RMFS4 68 076 ₽')), [68076])
+  assert.equal(toCandidateName('ОФЗ 26238 120 000 ₽'), 'ОФЗ 26238')
+})
+
+test('строка из одних цифр и единиц названием не считается', () => {
+  assert.equal(hasNameText('120 шт · 567,30 Р · 68 076,00 Р'), false)
+  assert.equal(hasNameText('50 шт -312,45P - 15 622,50 Р'), false)
+  assert.equal(hasNameText('SBER'), true)
+})
+
+test('название склеивается со следующей строкой количества и цены', () => {
+  assert.deepEqual(groupOcrLines(BROKER_SCREEN), [
+    { text: 'Вклад Надёжный 450 000 ₽' },
+    { text: 'ОФЗ 26238 120 шт · 567,30 Р · 68 076,00 Р', name: 'ОФЗ 26238' },
+    { text: 'SBER 50 шт -312,45P - 15 622,50 Р', name: 'SBER' },
+  ])
+})
+
+test('скриншот из отчёта BUG-12 даёт ровно три актива с верными суммами', () => {
+  const candidates = buildOcrCandidates(BROKER_SCREEN)
+  assert.equal(candidates.length, 3)
+  const byType = Object.fromEntries(candidates.map((candidate) => [candidate.type, candidate]))
+  assert.equal(byType['Вклады'].amount, 450000)
+  assert.equal(byType['Облигации'].amount, 68076)
+  assert.equal(byType['Облигации'].name, 'ОФЗ 26238')
+  assert.equal(byType['Облигации'].invested, 68076)
+  assert.equal(byType['Акции'].amount, 15622.5)
+  assert.equal(byType['Акции'].name, 'SBER')
+  assert.equal(candidates.some((candidate) => /итого/i.test(candidate.name)), false)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
