@@ -648,6 +648,27 @@ export async function sumTransactionCosts(db: Db, userId: string): Promise<{ com
   return { commissions: Number(result.rows[0]?.commissions ?? 0), taxes: Number(result.rows[0]?.taxes ?? 0) }
 }
 
+// Денежный остаток (§12, BUG-05): сальдо денежных движений по операциям, по валютам.
+// Пополнения, продажи и выплаты зачисляются, выводы, покупки, комиссии и налоги
+// списываются. Брокерские операции не учитываются: состояние брокерского счёта целиком
+// приходит из его позиций при синхронизации, и сальдо по ним посчитало бы деньги дважды.
+export async function sumCashBalances(db: Db, userId: string): Promise<{ currency: string; balance: number }[]> {
+  const result = await db.query(
+    `SELECT t.currency,
+       COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('DEPOSIT', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION')), 0)
+       - COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('WITHDRAW', 'BUY', 'FEE', 'TAX')), 0)
+       - COALESCE(SUM(t.commission), 0) - COALESCE(SUM(t.tax), 0) AS balance
+     FROM portfolio.transactions t
+     JOIN portfolio.accounts a ON a.id = t.account_id
+     JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+     WHERE f.user_id = $1 AND t.source <> 'broker'
+     GROUP BY t.currency
+     ORDER BY t.currency`,
+    [userId],
+  )
+  return result.rows.map((row) => ({ currency: row.currency as string, balance: Number(row.balance) }))
+}
+
 // ---------------------------------------------------------------------------
 // Выплаты (§11 Payout, §22 календарь выплат)
 // ---------------------------------------------------------------------------

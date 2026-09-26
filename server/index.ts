@@ -23,6 +23,7 @@ import {
 } from './positions.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
+  portfolioEngineInputs, isCashInput,
   performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts,
 } from './daily-tasks.ts'
 import {
@@ -480,7 +481,13 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
   const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(baseCurrency))
+  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), await engineContext(baseCurrency))
+  // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
+  // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
+  const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
+  const cash = cashValuations.some((item) => item.valueBase === null)
+    ? null
+    : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
   const returns = calculateReturns({
     currentValue: aggregate.value,
     invested: aggregate.invested,
@@ -495,6 +502,7 @@ app.get('/api/portfolio/summary', async (request, response) => {
     profitPercent: aggregate.pnlPercent,
     expected: payouts.expected,
     paid: payouts.received,
+    cash,
     positions: positions.length,
     baseCurrency: aggregate.baseCurrency,
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
@@ -522,7 +530,12 @@ app.get('/api/portfolio/structure', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
   const context = await engineContext(await resolveBaseCurrency(db, userId))
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), context)
+  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  // Денежный остаток не принадлежит ни брокеру, ни банку, ни эмитенту — входит
+  // только в разрезы по валютам и по инструментам (§12, §23).
+  const cashKeyed = (keyOf: (currency: string) => string): KeyedValuation[] => aggregate.positions
+    .filter((valuation) => isCashInput(valuation.id))
+    .map((valuation) => ({ key: keyOf(valuation.currency), investedBase: valuation.investedBase, valueBase: valuation.valueBase, priceUnavailable: valuation.priceUnavailable }))
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   const keyed = (keyOf: (position: Position) => string | null): KeyedValuation[] =>
     positions
@@ -536,10 +549,10 @@ app.get('/api/portfolio/structure', async (request, response) => {
       }))
   const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf))
   response.json({
-    byCurrency: breakdown((position) => position.instrument.currency || 'RUB'),
+    byCurrency: aggregateByKey([...keyed((position) => position.instrument.currency || 'RUB'), ...cashKeyed((currency) => currency)]),
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
-    byInstrument: breakdown((position) => position.instrument.name),
+    byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
 })
@@ -549,7 +562,9 @@ app.get('/api/portfolio/structure', async (request, response) => {
 app.get('/api/recommendations', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const [positions, payouts, baseCurrency] = await Promise.all([listPositions(db, userId), listPayouts(db, userId), resolveBaseCurrency(db, userId)])
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(baseCurrency))
+  // Доли считаются от всего портфеля, включая свободные деньги (§12); правила
+  // применяются к инструментам — сам денежный остаток инструментом не является.
+  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), await engineContext(baseCurrency))
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   const positionSnapshots: PositionSnapshot[] = positions.map((position) => {
     const valuation = valuationById.get(position.id)
@@ -664,9 +679,8 @@ app.delete('/api/payouts/:id', async (request, response) => {
 // ---------------------------------------------------------------------------
 
 const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRAW', 'COUPON', 'DIVIDEND', 'INTEREST', 'FEE', 'TAX', 'REDEMPTION', 'OTHER']
-// Операции, деньги по которым зачисляются на денежную позицию или списываются с неё (§12).
-const CASH_CREDIT: TransactionType[] = ['DEPOSIT', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION']
-const CASH_DEBIT: TransactionType[] = ['WITHDRAW', 'FEE', 'TAX']
+// Денежные операции позиции не меняют: остаток считается из самих операций
+// (sumCashBalances → portfolioEngineInputs, §12, BUG-05).
 const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
 
 function transactionType(value: unknown): TransactionType {
@@ -681,7 +695,6 @@ function transactionType(value: unknown): TransactionType {
 function createPositionCache(client: Db, userId: string) {
   const loaded = new Map<string, Position>()
   const touched = new Set<string>()
-  let cashId: string | null | undefined
   return {
     async byId(id: string): Promise<Position | undefined> {
       const cached = loaded.get(id)
@@ -689,15 +702,6 @@ function createPositionCache(client: Db, userId: string) {
       const position = await findPosition(client, userId, id)
       if (position) loaded.set(id, position)
       return position
-    },
-    // Денежная позиция, на которую ложатся пополнения и выплаты (§12).
-    async cash(): Promise<Position | undefined> {
-      if (cashId === undefined) {
-        const position = await findCashPosition(client, userId)
-        cashId = position ? position.id : null
-        if (position && !loaded.has(position.id)) loaded.set(position.id, position)
-      }
-      return cashId ? loaded.get(cashId) : undefined
     },
     mark(position: Position) { touched.add(position.id) },
     async flush() {
@@ -722,17 +726,6 @@ async function applyTransactionEffect(positions: PositionCache, transaction: Pic
   const position = transaction.positionId ? await positions.byId(transaction.positionId) : undefined
   if (transaction.type === 'BUY' && position) { shiftPosition(position, amount); positions.mark(position) }
   if (transaction.type === 'SELL' && position) { shiftPosition(position, -amount); positions.mark(position) }
-  // Выплата зачисляется на денежную позицию вместе с вложенной суммой: сам доход уже
-  // учтён в финансовом результате как полученные выплаты (§10.3, §10.6), и рост остатка
-  // не должен посчитать его второй раз как прибыль денежной позиции.
-  if (CASH_CREDIT.includes(transaction.type)) {
-    const cash = await positions.cash()
-    if (cash) { shiftPosition(cash, amount); positions.mark(cash) }
-  }
-  if (CASH_DEBIT.includes(transaction.type)) {
-    const cash = await positions.cash()
-    if (cash) { shiftPosition(cash, -amount); positions.mark(cash) }
-  }
 }
 
 // syncPayoutForTransaction — импортирован из daily-tasks.ts (используется и планировщиком).

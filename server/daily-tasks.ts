@@ -10,7 +10,7 @@ import { aggregateByGroup, type AssetGroup, type EngineContext, type PositionInp
 import { forecastPayouts } from './payout-forecast.ts'
 import {
   ensureAccount, ensurePortfolio, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
-  findTransactionByExternalId, insertInstrument, insertPayout, insertPosition, insertTransaction,
+  findTransactionByExternalId, insertInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
   updatePositionMarketPrice, upsertSnapshot,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
@@ -48,15 +48,46 @@ export function toEngineInput(position: Position): PositionInput {
   }
 }
 
+// Свободные деньги (§12, §7.1, BUG-05; решение Р-2 в docs/FIX_PLAN.md) — часть портфеля:
+// сальдо денежных операций подаётся в Portfolio Engine отдельной позицией группы «Деньги»
+// на каждую валюту, поэтому входит в общую стоимость, структуру и снимки истории наравне
+// с остальными активами. Вложено = остатку: сами деньги не приносят P&L, а доход, который
+// в них превратился, уже учтён в финансовом результате как полученные выплаты (§10.3).
+export const CASH_POSITION_PREFIX = 'cash:'
+export const CASH_POSITION_NAME = 'Денежные средства'
+export function isCashInput(id: string): boolean {
+  return id.startsWith(CASH_POSITION_PREFIX)
+}
+// решено автономно: отрицательное сальдо (покупки записаны, а пополнения — нет) → в портфель
+// не попадает → такие покупки оплачены деньгами, о которых система не знает; «минус» в
+// свободных деньгах уменьшил бы стоимость портфеля на сумму, которой пользователь не должен.
+export function cashEngineInputs(balances: { currency: string; balance: number }[]): PositionInput[] {
+  return balances
+    .filter((item) => item.balance >= 0.005)
+    .map((item) => ({
+      id: `${CASH_POSITION_PREFIX}${item.currency}`,
+      name: CASH_POSITION_NAME,
+      type: GROUP_LABELS.cash,
+      currency: item.currency,
+      value: item.balance,
+      invested: item.balance,
+    }))
+}
+// Полный вход движка: позиции плюс денежный остаток. Все расчёты портфеля целиком
+// (сводка, структура, рекомендации, снимки) идут через эту функцию.
+export async function portfolioEngineInputs(client: Db, userId: string, positions: Position[]): Promise<PositionInput[]> {
+  return [...positions.map(toEngineInput), ...cashEngineInputs(await sumCashBalances(client, userId))]
+}
+
 // Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается
 // уже после точечной записи и внутри той же транзакции, что и само изменение —
 // либо, для планировщика, как самостоятельный ежедневный шаг.
 export async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {
   const portfolio = await findPortfolio(client, userId)
   if (!portfolio) return
-  const positions = await listPositions(client, userId)
-  if (!positions.length) return
-  const aggregate = aggregateByGroup(positions.map(toEngineInput), await engineContext(portfolio.baseCurrency))
+  const inputs = await portfolioEngineInputs(client, userId, await listPositions(client, userId))
+  if (!inputs.length) return
+  const aggregate = aggregateByGroup(inputs, await engineContext(portfolio.baseCurrency))
   await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
 }
 

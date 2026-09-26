@@ -153,6 +153,28 @@ async function run() {
       assert.equal(status, 204)
     })
 
+    // BUG-05 (FIX_PLAN 2.4): пополнение — часть портфеля, покупка перекладывает деньги
+    // в бумагу, не меняя общую стоимость.
+    await test('пополнение попадает в свободные деньги и общую стоимость', async () => {
+      const deposit = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 500000, date: '2026-02-01' } })
+      assert.equal(deposit.status, 201)
+      let summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.cash, 500000)
+      assert.equal(summary.json.total, 600000)
+      assert.ok(summary.json.groups.some((group: { group: string; value: number }) => group.group === 'Деньги' && group.value === 500000))
+      const buy = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'BUY', amount: 50000, date: '2026-02-02', positionId } })
+      assert.equal(buy.status, 201)
+      summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.cash, 450000)
+      assert.equal(summary.json.total, 600000)
+      for (const id of [deposit.json.id, buy.json.id]) {
+        assert.equal((await api(`/api/transactions/${id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      }
+      summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.cash, 0)
+      assert.equal(summary.json.total, 100000)
+    })
+
     // BUG-15 (FIX_PLAN 2.3): тот же файл повторно не обрабатывается — сервер возвращает
     // прошлый документ. Воркер OCR в тесте не запущен, первый документ остаётся в очереди,
     // этого достаточно: совпадение ищется и среди ещё не обработанных загрузок.

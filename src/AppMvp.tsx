@@ -230,6 +230,9 @@ type PortfolioSummary = {
   profitPercent: number | null;
   expected: number;
   paid: number;
+  // Свободные деньги (§7.1, §12) — сальдо денежных операций, посчитанное на бэкенде.
+  // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
+  cash: number | null;
   groups: GroupSummary[];
   valuation: {
     incomplete: boolean;
@@ -262,6 +265,9 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     paid: payments
       .filter((item) => item.status === "received")
       .reduce((sum, item) => sum + item.amount, 0),
+    cash: products
+      .filter((product) => product.type === "Деньги")
+      .reduce((sum, product) => sum + product.amount, 0),
     groups: Object.entries(groupTotals)
       .sort((a, b) => b[1] - a[1])
       .map(([group, value]) => ({
@@ -1307,7 +1313,7 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, invested, profit, profitPercent, paid, expected, groups, valuation } =
+  const { total, invested, profit, profitPercent, paid, expected, cash, groups, valuation } =
     summary ?? localSummary(products, payments);
   const todayLabel = new Intl.DateTimeFormat("ru-RU", {
     weekday: "long",
@@ -1320,7 +1326,8 @@ function Dashboard({
   const displayName = userEmail?.split("@")[0] || "";
   const brokerDegraded = brokerStatus?.status === "error";
   const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
-  if (products.length === 0) {
+  // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
+  if (products.length === 0 && !cash) {
     return (
       <div className="content-wrap">
         <section className="empty-portfolio">
@@ -1487,10 +1494,7 @@ function Dashboard({
           <div className="metric-row">
             <span>Свободные деньги</span>
             <strong>
-              {display(
-                products.find((product) => product.type === "Деньги")?.amount ||
-                  0,
-              )}
+              {cash === null ? "Оценка недоступна" : display(cash)}
             </strong>
           </div>
           <button
