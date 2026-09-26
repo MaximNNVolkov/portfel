@@ -960,6 +960,12 @@ function AppMvp() {
     setToast("Выплата удалена");
     navigate("/payments");
   }
+  // Прогнозные выплаты пересчитываются на бэкенде при любом изменении состава портфеля —
+  // после удаления позиции календарь нужно забрать заново.
+  async function refreshPayments() {
+    const response = await fetch(`${apiUrl}/payouts`, { headers: authHeaders });
+    if (response.ok) setPayments((await response.json()) as Payment[]);
+  }
   async function refreshProducts() {
     const response = await fetch(`${apiUrl}/positions`, {
       headers: authHeaders,
@@ -984,18 +990,46 @@ function AppMvp() {
         : `Обновлено цен: ${result.updated} из ${result.checked}`,
     );
   }
-  async function removeProduct(id: string) {
+  async function deleteProductRecord(id: string) {
     if (apiOnline) {
       const response = await fetch(`${apiUrl}/positions/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
       if (!response.ok) throw new Error("Не удалось удалить продукт");
-      await refreshSummary();
     }
     setProducts((current) => current.filter((product) => product.id !== id));
-    setToast("Продукт удалён");
-    navigate("/products");
+  }
+  async function removeProduct(id: string, returnTo = "/products") {
+    try {
+      await deleteProductRecord(id);
+      if (apiOnline) {
+        await refreshSummary();
+        await refreshPayments();
+      }
+      setToast("Продукт удалён");
+      navigate(returnTo);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Не удалось удалить продукт");
+    }
+  }
+  // «Удалить всё распознанное» со сводки OCR (BUG-14).
+  async function removeProducts(ids: string[], returnTo: string) {
+    let removed = 0;
+    try {
+      for (const id of ids) {
+        await deleteProductRecord(id);
+        removed += 1;
+      }
+      setToast(`Удалено записей: ${removed}`);
+    } catch {
+      setToast(`Удалено ${removed} из ${ids.length} — остальные удалить не удалось`);
+    }
+    if (apiOnline) {
+      await refreshSummary();
+      await refreshPayments();
+    }
+    navigate(returnTo);
   }
   async function updateProduct(product: Product) {
     if (apiOnline) {
@@ -1415,11 +1449,22 @@ function AppMvp() {
           />
           <Route
             path="/ocr-summary"
-            element={<OcrSummaryPage summary={ocrSummary} token={token} />}
+            element={<OcrSummaryPage summary={ocrSummary} products={products} token={token} />}
           />
           <Route
             path="/ocr-summary/:documentId"
-            element={<OcrSummaryPage summary={ocrSummary} token={token} />}
+            element={<OcrSummaryPage summary={ocrSummary} products={products} token={token} />}
+          />
+          <Route
+            path="/ocr-summary/:documentId/delete-all"
+            element={
+              <DeleteOcrItemsPage
+                summary={ocrSummary}
+                products={products}
+                token={token}
+                onConfirm={removeProducts}
+              />
+            }
           />
           <Route path="*" element={<Navigate to="/portfolio" replace />} />
         </Routes>
@@ -3967,11 +4012,16 @@ function DeleteProductPage({
   onConfirm,
 }: {
   products: Product[];
-  onConfirm: (id: string) => void;
+  onConfirm: (id: string, returnTo: string) => void;
 }) {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  // Куда вернуться после удаления или отмены — например, на сводку OCR (BUG-14). Только
+  // внутренние пути приложения: внешний адрес в параметре — открытый редирект.
+  const requested = searchParams.get("return") || "";
+  const returnTo = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/products";
   const product = products.find((item) => item.id === id);
-  if (!product || !id) return <MissingRecord to="/products" />;
+  if (!product || !id) return <MissingRecord to={returnTo} />;
   return (
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
@@ -3980,12 +4030,12 @@ function DeleteProductPage({
           из портфеля?
         </p>
         <div className="confirm-actions">
-          <Link className="outline-button" to="/products">
+          <Link className="outline-button" to={returnTo}>
             Отмена
           </Link>
           <button
             className="delete-button primary"
-            onClick={() => onConfirm(id)}
+            onClick={() => onConfirm(id, returnTo)}
             type="button"
           >
             Удалить безвозвратно
@@ -4019,16 +4069,10 @@ function DeleteAccountPage({ onConfirm }: { onConfirm: () => void }) {
     </Page>
   );
 }
-function OcrSummaryPage({
-  summary: current,
-  token,
-}: {
-  summary: OcrUploadResult | null;
-  token: string;
-}) {
+// Сводка распознавания (§40.4). Сразу после загрузки берётся из памяти, по прямой ссылке
+// или после F5 (BUG-18) перечитывается с бэкенда по id документа — тот же JSON результата.
+function useOcrSummary(current: OcrUploadResult | null, token: string) {
   const { documentId } = useParams();
-  // Сводка в памяти есть только сразу после распознавания. По прямой ссылке или после F5
-  // (BUG-18) она перечитывается с бэкенда по id документа — тот же JSON результата.
   const [loaded, setLoaded] = useState<OcrUploadResult | null>(null);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "missing" | "pending">("idle");
   const inMemory = current && (!documentId || current.documentId === documentId) ? current : null;
@@ -4041,11 +4085,7 @@ function OcrSummaryPage({
         const response = await fetch(`${apiUrl}/ocr/documents/${documentId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const body = (await response.json()) as {
-          status?: string;
-          result?: OcrUploadResult;
-          createdAt?: string;
-        };
+        const body = (await response.json()) as { status?: string; result?: OcrUploadResult };
         if (cancelled) return;
         if (!response.ok || body.status === "failed") return setLoadState("missing");
         if (body.status !== "done" || !body.result) return setLoadState("pending");
@@ -4059,20 +4099,48 @@ function OcrSummaryPage({
       cancelled = true;
     };
   }, [documentId, inMemory, token]);
-  const summary = inMemory ?? loaded;
-  if (!summary) {
-    if (!documentId || loadState === "missing") return <Navigate to="/products" replace />;
-    return (
-      <Page title="Добавлено со скриншота" subtitle="Сводка распознавания" back>
-        <p className="muted">
-          {loadState === "pending"
-            ? "Скриншот ещё обрабатывается — обновите страницу через несколько секунд."
-            : "Загружаем результат распознавания…"}
-        </p>
-      </Page>
-    );
-  }
+  return { documentId, summary: inMemory ?? loaded, loadState };
+}
+function OcrSummaryPlaceholder({ documentId, loadState }: { documentId?: string; loadState: string }) {
+  if (!documentId || loadState === "missing") return <Navigate to="/products" replace />;
+  return (
+    <Page title="Добавлено со скриншота" subtitle="Сводка распознавания" back>
+      <p className="muted">
+        {loadState === "pending"
+          ? "Скриншот ещё обрабатывается — обновите страницу через несколько секунд."
+          : "Загружаем результат распознавания…"}
+      </p>
+    </Page>
+  );
+}
+// Записи сводки, которые всё ещё есть в портфеле, — в актуальном виде (после правки
+// название и сумма уже другие, удалённые строки из списка уходят). До загрузки данных
+// портфеля показываются как распознаны.
+function currentOcrItems(summary: OcrUploadResult, products: Product[], loaded: boolean) {
+  if (!loaded) return summary.items;
+  return summary.items.flatMap((item) => {
+    const product = products.find((candidate) => candidate.id === item.id);
+    return product ? [{ ...product, possibleDuplicate: item.possibleDuplicate }] : [];
+  });
+}
+function OcrSummaryPage({
+  summary: current,
+  products,
+  token,
+}: {
+  summary: OcrUploadResult | null;
+  products: Product[];
+  token: string;
+}) {
+  const { documentId, summary, loadState } = useOcrSummary(current, token);
+  const dataLoaded = useContext(DataLoadedContext);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const items = summary ? currentOcrItems(summary, products, dataLoaded) : [];
+  const paging = usePagedList(items);
+  if (!summary) return <OcrSummaryPlaceholder documentId={documentId} loadState={loadState} />;
   const formattedDate = new Date(`${summary.date}T12:00:00`).toLocaleDateString("ru-RU");
+  const returnTo = documentId ? `/ocr-summary/${documentId}` : "/products";
+  const removedCount = summary.items.length - items.length;
   return (
     <Page
       title={`Добавлено со скриншота от ${formattedDate}`}
@@ -4085,61 +4153,159 @@ function OcrSummaryPage({
           он не обрабатывался, новые записи не созданы. Ниже — результат прошлой обработки.
         </div>
       )}
-      <div className="table-card">
-        {(summary.items.length > 0 || summary.failures.length > 0) && (
-          <div className="table-head">
-            <span>Название</span>
-            <span>Тип</span>
-            <span>Стоимость</span>
-            <span>Источник</span>
-            <span>Действия</span>
-          </div>
-        )}
-        {summary.items.map((item) => (
-          <div className="table-row" key={item.id}>
-            <div>
-              <strong>{item.name}</strong>
-              <small>
-                {item.institution} · {item.currency}
-              </small>
-              {item.possibleDuplicate && (
-                <small className="danger-text">
-                  ⚠ Похоже, такой инструмент уже есть в портфеле — проверьте, не дубликат ли это
-                </small>
+      {removedCount > 0 && (
+        <p className="muted">
+          Удалено из портфеля: {removedCount} из {summary.items.length} распознанных записей.
+        </p>
+      )}
+      <div className="list-card">
+        {paging.visible.map((item) => {
+          const expanded = expandedId === item.id;
+          return (
+            <div className="list-row" key={item.id}>
+              <button
+                type="button"
+                className="list-row-summary"
+                aria-expanded={expanded}
+                onClick={() => setExpandedId(expanded ? null : item.id)}
+              >
+                <span className="list-row-main">
+                  <strong>{item.name}</strong>
+                  <span className={`type-tag ${typeColors[item.type]}`}>{item.type}</span>
+                </span>
+                <span className="list-row-value">
+                  <strong>{money(item.amount)}</strong>
+                  {item.possibleDuplicate ? (
+                    <small className="danger-text">возможный дубликат</small>
+                  ) : (
+                    <small className="teal-text">со скриншота</small>
+                  )}
+                </span>
+                <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
+              </button>
+              {expanded && (
+                <div className="list-row-details">
+                  {item.possibleDuplicate && (
+                    <div className="detail-line">
+                      <span className="danger-text">
+                        ⚠ Похоже, такой инструмент уже есть в портфеле — проверьте, не дубликат ли это
+                      </span>
+                    </div>
+                  )}
+                  <div className="detail-line">
+                    <span>Банк / брокер</span>
+                    <span>{item.institution} · {item.currency}</span>
+                  </div>
+                  <div className="detail-line">
+                    <span>Вложено</span>
+                    <span>{money(item.invested)}</span>
+                  </div>
+                  <div className="list-row-actions">
+                    <Link className="outline-button" to={`/products/${item.id}/edit`}>
+                      Редактировать
+                    </Link>
+                    <Link
+                      className="delete-button"
+                      to={`/products/${item.id}/delete?return=${encodeURIComponent(returnTo)}`}
+                    >
+                      Удалить
+                    </Link>
+                  </div>
+                </div>
               )}
             </div>
-            <span className={`type-tag ${typeColors[item.type]}`}>
-              {item.type}
-            </span>
-            <strong>{money(item.amount)}</strong>
-            <span className="teal-text">Со скриншота</span>
-            <Link className="outline-button" to={`/products/${item.id}/edit`}>
-              Редактировать
-            </Link>
-          </div>
-        ))}
+          );
+        })}
+        <ListPagination
+          hasMore={paging.hasMore}
+          onLoadMore={paging.loadMore}
+          pageSize={paging.pageSize}
+          onPageSizeChange={paging.setPageSize}
+        />
         {summary.failures.map((failure) => (
-          <div className="table-row" key={failure.filename}>
-            <div>
-              <strong>Не удалось распознать {failure.filename}</strong>
-              <small>{failure.reason}</small>
+          <div className="list-row" key={failure.filename}>
+            <div className="list-row-summary list-row-static">
+              <span className="list-row-main">
+                <strong>Не удалось распознать {failure.filename}</strong>
+              </span>
+              <span className="list-row-value">
+                <small>{failure.reason}</small>
+              </span>
             </div>
-            <span />
-            <span />
-            <span>Требует ввода</span>
-            <Link className="outline-button" to="/products/new">
-              Добавить вручную
-            </Link>
+            <div className="list-row-details">
+              <div className="list-row-actions">
+                <Link className="outline-button" to="/products/new">
+                  Добавить вручную
+                </Link>
+              </div>
+            </div>
           </div>
         ))}
         {!summary.items.length && !summary.failures.length && (
           <p>На этом скриншоте не найдено ни одной записи.</p>
         )}
       </div>
-      <div style={{ marginTop: 24 }}>
+      <div className="confirm-actions" style={{ marginTop: 24 }}>
         <Link className="primary-button" to="/portfolio">
           Перейти к портфелю
         </Link>
+        {documentId && items.length > 0 && (
+          <Link className="delete-button" to={`/ocr-summary/${documentId}/delete-all`}>
+            Удалить всё распознанное
+          </Link>
+        )}
+      </div>
+    </Page>
+  );
+}
+// Подтверждение массового удаления — отдельной страницей, без модалок (§40.7).
+function DeleteOcrItemsPage({
+  summary: current,
+  products,
+  token,
+  onConfirm,
+}: {
+  summary: OcrUploadResult | null;
+  products: Product[];
+  token: string;
+  onConfirm: (ids: string[], returnTo: string) => Promise<void>;
+}) {
+  const { documentId, summary, loadState } = useOcrSummary(current, token);
+  const dataLoaded = useContext(DataLoadedContext);
+  const [deleting, setDeleting] = useState(false);
+  if (!summary || !dataLoaded) return <OcrSummaryPlaceholder documentId={documentId} loadState={loadState} />;
+  const items = currentOcrItems(summary, products, true);
+  const returnTo = `/ocr-summary/${documentId}`;
+  if (!items.length) return <Navigate to={returnTo} replace />;
+  return (
+    <Page title="Удалить всё распознанное" subtitle="Это действие нельзя отменить" back>
+      <div className="confirm-card">
+        <p>
+          Удалить из портфеля все записи, добавленные с этого скриншота ({items.length})?
+        </p>
+        <ul>
+          {items.map((item) => (
+            <li key={item.id}>
+              {item.name} — {money(item.amount)}
+            </li>
+          ))}
+        </ul>
+        <div className="confirm-actions">
+          <Link className="outline-button" to={returnTo}>
+            Отмена
+          </Link>
+          <button
+            className="delete-button primary"
+            disabled={deleting}
+            onClick={() => {
+              setDeleting(true);
+              void onConfirm(items.map((item) => item.id), returnTo).finally(() => setDeleting(false));
+            }}
+            type="button"
+          >
+            {deleting ? "Удаляем..." : `Удалить записи (${items.length})`}
+          </button>
+        </div>
       </div>
     </Page>
   );
