@@ -253,6 +253,34 @@ async function run() {
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Вклад, тело которого отмечено полученным, закрыт: не входит в стоимость портфеля,
+    // а тело не считается доходом — в результат идут только проценты.
+    await test('полученный возврат тела закрывает вклад без двойного счёта', async () => {
+      const before = await api('/api/portfolio/summary', { token: tokenA })
+      const deposit = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест закрытый вклад', type: 'Вклад', amount: 200000, date: '2020-01-01', rate: 10, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
+      })
+      assert.equal(deposit.status, 201)
+      const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
+      const open = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(open.json.total, before.json.total + 200000)
+      for (const payout of own) {
+        assert.equal((await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })).status, 200)
+      }
+      const interest = own.find((payout: { type: string }) => payout.type === 'INTEREST').amount
+      const closed = await api(`/api/positions/${deposit.json.id}`, { token: tokenA })
+      assert.equal(closed.json.closedOn, '2021-01-01')
+      assert.equal(closed.json.valuation.value, 0)
+      assert.equal(closed.json.valuation.pnl, 0)
+      const summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.total, before.json.total)
+      assert.equal(summary.json.invested, before.json.invested)
+      assert.equal(summary.json.paid, before.json.paid + interest)
+      assert.equal(Math.round(summary.json.financialResult), Math.round(before.json.financialResult + interest))
+      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // BUG-22 (FIX_PLAN 2.6): ожидаемая выплата с прошедшей датой — «просрочено»,
     // в «Ожидается» не входит.
     await test('просроченная выплата отделена от ожидаемых', async () => {

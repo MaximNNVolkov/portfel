@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexQuote } from './market-data.ts'
-import { aggregateByGroup, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
+import { aggregateByGroup, convertCurrency, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 import { forecastPayouts } from './payout-forecast.ts'
 import {
   ensureAccount, ensurePortfolio, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
@@ -75,8 +75,24 @@ export function cashEngineInputs(balances: { currency: string; balance: number }
 }
 // Полный вход движка: позиции плюс денежный остаток. Все расчёты портфеля целиком
 // (сводка, структура, рекомендации, снимки) идут через эту функцию.
+// Закрытая позиция (тело вклада вернулось, бумага погашена) в текущий портфель не входит:
+// иначе вернувшиеся деньги считались бы дважды — стоимостью позиции и выплатой.
 export async function portfolioEngineInputs(client: Db, userId: string, positions: Position[]): Promise<PositionInput[]> {
-  return [...positions.map(toEngineInput), ...cashEngineInputs(await sumCashBalances(client, userId))]
+  return [
+    ...positions.filter((position) => !position.closedOn).map(toEngineInput),
+    ...cashEngineInputs(await sumCashBalances(client, userId)),
+  ]
+}
+
+// Реализованный результат закрытых позиций (§10.2): вернувшееся тело минус вложенное.
+// У вклада обычно ноль (доход пришёл процентами), у облигации — разница между номиналом
+// и ценой покупки. Возвращается null, если у позиции нет курса к базовой валюте (§7.3).
+export function closedPositionResult(position: Position, context: EngineContext): number | null {
+  if (!position.closedOn) return null
+  const currency = position.instrument.currency || DEFAULT_BASE_CURRENCY
+  const returned = convertCurrency(position.principalReturned ?? 0, currency, context.baseCurrency, context.rates)
+  const invested = convertCurrency(position.invested, currency, context.baseCurrency, context.rates)
+  return returned === null || invested === null ? null : returned - invested
 }
 
 // Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается

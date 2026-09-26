@@ -23,7 +23,7 @@ import {
 } from './positions.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
-  portfolioEngineInputs, isCashInput,
+  portfolioEngineInputs, isCashInput, closedPositionResult,
   performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts,
 } from './daily-tasks.ts'
 import {
@@ -341,7 +341,24 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, service
 // показывали бы сохранённое при вводе значение, а сводка — quantity × currentPrice (BUG-17).
 async function valuedPositions(userId: string, positions: Position[]) {
   const context = await engineContext(await resolveBaseCurrency(db, userId))
-  return positions.map((position) => positionToWire(position, evaluatePosition(toEngineInput(position), context)))
+  return positions.map((position) => {
+    const valuation = evaluatePosition(toEngineInput(position), context)
+    if (!position.closedOn) return positionToWire(position, valuation)
+    // Закрытая позиция стоит ноль — деньги уже вернулись; результат по ней реализованный.
+    const result = closedPositionResult(position, context)
+    return positionToWire(position, {
+      ...valuation,
+      valueBase: 0,
+      fullValue: 0,
+      marketValue: 0,
+      accruedInterest: null,
+      pnl: result,
+      pnlPercent: result !== null && valuation.investedBase ? (result / valuation.investedBase) * 100 : null,
+      priceUnavailable: false,
+      priceUnavailableReason: null,
+      estimated: false,
+    })
+  })
 }
 
 app.get('/api/positions', async (request, response) => {
@@ -501,7 +518,9 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
   const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId, localToday()), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), await engineContext(baseCurrency))
+  const context = await engineContext(baseCurrency)
+  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
   // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
   // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
   const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
@@ -513,7 +532,8 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const returns = calculateReturns({
     currentValue: aggregate.pnlValue,
     invested: aggregate.pnlInvested,
-    payoutsReceived: payouts.received,
+    // Полученный доход плюс реализованный результат закрытых вкладов и погашенных бумаг (§10.2).
+    payoutsReceived: payouts.received + realized,
     commissions: costs.commissions,
     taxes: costs.taxes,
   })

@@ -219,6 +219,8 @@ export function positionToWire(position: Position, valuation?: PositionValuation
     // Почему по облигации нет прогноза купонов (BUG-20, §7.3) — показывается на карточке
     // и в календаре вместо молчаливого отсутствия выплат.
     forecastNote: couponForecastGap(position, instrument) ?? undefined,
+    // Дата возврата тела вклада / погашения бумаги: позиция закрыта и в стоимость не входит.
+    closedOn: position.closedOn,
     valuation: valuation ? {
       // null = оценки нет (нет цены или курса); ноль вместо неё не подставляется (§7.3).
       value: valuation.valueBase,

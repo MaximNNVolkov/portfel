@@ -53,6 +53,8 @@ type Product = {
   valuation?: ProductValuation;
   // Почему прогноз купонов не построен (BUG-20) — текст приходит с бэкенда.
   forecastNote?: string;
+  // Тело вклада вернулось / бумага погашена: позиция закрыта и в стоимость не входит.
+  closedOn?: string;
 };
 type ProductValuation = {
   value: number | null;
@@ -647,6 +649,12 @@ function todayIsoDate() {
 const isOverdue = (payment: Payment) =>
   payment.overdue ??
   (payment.status === "expected" && payment.date < todayIsoDate());
+// Группы с биржевой котировкой (зеркалит QUOTED_GROUPS движка). У вклада и «Прочего»
+// рыночной цены не бывает вовсе — строка «Актуальная цена недоступна» там только путает.
+const quotedTypes = new Set<AssetType>(["Облигации", "Акции", "Фонды"]);
+// Возврат тела вклада и погашение номинала — возврат вложенного, не доход (§10.3).
+const isPrincipalPayout = (payment: Payment) =>
+  payment.type === "DEPOSIT_PRINCIPAL" || payment.type === "REDEMPTION";
 const isUpcoming = (payment: Payment) =>
   payment.status === "expected" && !isOverdue(payment);
 // Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
@@ -1051,6 +1059,8 @@ function AppMvp() {
       }
       updated = (await response.json()) as Payment;
       await refreshSummary();
+      // Вернувшееся тело закрывает позицию — её стоимость и P&L пересчитаны на бэкенде.
+      if (isPrincipalPayout(payment)) await refreshProducts();
     }
     setPayments((current) =>
       current.map((item) => (item.id === payment.id ? updated : item)),
@@ -1439,6 +1449,7 @@ function AppMvp() {
                 products={products}
                 transactions={transactions}
                 payments={payments}
+                onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
               />
             }
           />
@@ -2090,6 +2101,7 @@ function ProductsPage({
                     <span className={`type-tag ${typeColors[product.type]}`}>
                       {product.type}
                     </span>
+                    {product.closedOn && <span className="type-tag slate">Закрыт</span>}
                   </span>
                   <span className="list-row-value">
                     <strong>{valueText(valuation.value)}</strong>
@@ -2683,11 +2695,14 @@ function ProductDetailPage({
   products,
   transactions,
   payments,
+  onMarkReceived,
 }: {
   products: Product[];
   transactions: Transaction[];
   payments: Payment[];
+  onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
+  const [markingId, setMarkingId] = useState<string | null>(null);
   const { id } = useParams();
   const product = products.find((item) => item.id === id);
   if (!product) return <MissingRecord to="/products" />;
@@ -2697,12 +2712,25 @@ function ProductDetailPage({
   const relatedPayments = product.instrumentId
     ? payments.filter((payment) => payment.instrumentId === product.instrumentId)
     : [];
+  // Возврат тела и погашение — возврат вложенного, а не доход (§10.3): в «получено» не идут.
   const received = relatedPayments
-    .filter((payment) => payment.status === "received")
+    .filter((payment) => payment.status === "received" && !isPrincipalPayout(payment))
     .reduce((sum, payment) => sum + payment.amount, 0);
+  // Просроченные не складываются с будущими (§22, BUG-22) — как в разделе «Выплаты».
   const expected = relatedPayments
-    .filter((payment) => payment.status === "expected")
+    .filter(isUpcoming)
     .reduce((sum, payment) => sum + payment.amount, 0);
+  const overdue = relatedPayments
+    .filter(isOverdue)
+    .reduce((sum, payment) => sum + payment.amount, 0);
+  async function markReceived(payment: Payment) {
+    setMarkingId(payment.id);
+    try {
+      await onMarkReceived(payment);
+    } finally {
+      setMarkingId(null);
+    }
+  }
   const valuation = valuationOf(product);
   const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
   return (
@@ -2713,6 +2741,18 @@ function ProductDetailPage({
           {product.source !== "broker" && (
             <Link to={`/products/${product.id}/edit`}>Заполнить в карточке</Link>
           )}
+        </div>
+      )}
+      {product.closedOn && (
+        <div className="demo-note">
+          {product.type === "Вклады" ? "Вклад закрыт" : "Позиция погашена"}{" "}
+          {fullDate(product.closedOn)}: деньги вернулись, в стоимость портфеля позиция больше не входит.
+        </div>
+      )}
+      {!product.closedOn && overdue > 0 && (
+        <div className="demo-note">
+          ⚠ Срок выплат прошёл, но они не отмечены полученными — {money(overdue)}. Если деньги
+          пришли, отметьте их в «Истории выплат» ниже.
         </div>
       )}
       <div className="confirm-card">
@@ -2752,6 +2792,7 @@ function ProductDetailPage({
             <span>{money(product.averagePrice)}</span>
           </div>
         )}
+        {quotedTypes.has(product.type) && (
         <div className="detail-line">
           <span>Текущая цена</span>
           <span>
@@ -2762,6 +2803,7 @@ function ProductDetailPage({
               ` · с биржи ${new Date(product.priceUpdatedAt).toLocaleString("ru-RU")}`}
           </span>
         </div>
+        )}
         <div className="detail-line">
           <span>Текущая стоимость</span>
           <span>
@@ -2772,7 +2814,7 @@ function ProductDetailPage({
           </span>
         </div>
         <div className="detail-line">
-          <span>Нереализованный P&L</span>
+          <span>{product.closedOn ? "Реализованный P&L" : "Нереализованный P&L"}</span>
           <span className={pnl.className}>
             {pnl.amountText} ({pnl.percentText})
           </span>
@@ -2785,6 +2827,12 @@ function ProductDetailPage({
           <span>Выплаты ожидается</span>
           <span>{money(expected)}</span>
         </div>
+        {overdue > 0 && (
+          <div className="detail-line">
+            <span>Просрочено, не отмечено полученным</span>
+            <span className="danger-text">{money(overdue)}</span>
+          </div>
+        )}
         <div className="detail-line">
           <span>Дата покупки / открытия</span>
           <span>{fullDate(product.date)}</span>
@@ -2871,14 +2919,31 @@ function ProductDetailPage({
                 <span className="list-row-main">
                   <strong>{payoutTypeLabels[payment.type]}</strong>
                   <span className="type-tag teal">
-                    {payoutStatusLabels[payment.status]}
+                    {isOverdue(payment) ? "Просрочено" : payoutStatusLabels[payment.status]}
                   </span>
                 </span>
                 <span className="list-row-value">
                   <strong>+{money(payment.amount)}</strong>
-                  <small>{dateLabel(payment.date)}</small>
+                  <small className={isOverdue(payment) ? "danger-text" : undefined}>
+                    {fullDate(payment.date)}
+                  </small>
                 </span>
               </div>
+              {isOverdue(payment) && (
+                <div className="list-row-actions">
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={markingId !== null}
+                    onClick={() => void markReceived(payment)}
+                  >
+                    {markingId === payment.id ? "Сохраняем..." : "Отметить полученной"}
+                  </button>
+                  <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
+                    Редактировать
+                  </Link>
+                </div>
+              )}
             </div>
           ))}
         </div>

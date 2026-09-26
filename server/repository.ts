@@ -77,6 +77,10 @@ export type PositionRecord = {
 export type Position = PositionRecord & {
   // Когда цена последний раз пришла с биржи (BUG-19); пишется только обновлением котировок.
   priceUpdatedAt?: string
+  // Дата, когда тело вклада вернулось или бумага погашена (полученная выплата
+  // DEPOSIT_PRINCIPAL/REDEMPTION), и сколько вернулось. Вычисляется из выплат, не хранится.
+  closedOn?: string
+  principalReturned?: number
   instrument: Instrument
   account: { id: string; type: AccountType; provider: string; currency: string }
 }
@@ -394,9 +398,15 @@ export async function deleteOrphanInstrument(db: Db, userId: string, id: string)
 // Позиции (§11 Position)
 // ---------------------------------------------------------------------------
 
+// Возврат тела вклада и погашение номинала (§22) — возврат вложенного, а не доход (§10.3):
+// полученная такая выплата закрывает позицию, а в «Выплаты получено» не складывается.
+export const PRINCIPAL_PAYOUT_TYPES: PayoutType[] = ['DEPOSIT_PRINCIPAL', 'REDEMPTION']
+const PRINCIPAL_PAYOUT_SQL = PRINCIPAL_PAYOUT_TYPES.map((type) => `'${type}'`).join(', ')
+
 const POSITION_FIELDS = `
   p.id, p.account_id, p.quantity, p.average_price, p.current_price, p.current_value,
   p.invested, p.accrued_interest, p.opened_on, p.price_updated_at, p.source,
+  closed.closed_on, closed.principal_returned,
   a.type AS account_type, a.provider AS account_provider, a.currency AS account_currency,
   ${INSTRUMENT_FIELDS}`
 
@@ -405,7 +415,14 @@ const POSITION_FROM = `
   JOIN portfolio.accounts a ON a.id = p.account_id
   JOIN portfolio.portfolios f ON f.id = a.portfolio_id
   JOIN portfolio.instruments i ON i.id = p.instrument_id
-  JOIN portfolio.asset_groups g ON g.id = i.asset_group_id`
+  JOIN portfolio.asset_groups g ON g.id = i.asset_group_id
+  LEFT JOIN LATERAL (
+    SELECT MAX(o.payout_date) AS closed_on, SUM(o.amount) AS principal_returned
+    FROM portfolio.payouts o
+    WHERE o.account_id = p.account_id AND o.instrument_id = p.instrument_id
+      AND o.status = 'received' AND o.type IN (${PRINCIPAL_PAYOUT_SQL})
+    HAVING COUNT(*) > 0
+  ) closed ON TRUE`
 
 // Порядок общий для всех выборок позиций: он же определяет, какая позиция считается
 // «первым денежным счётом» при разноске пополнений и выплат (§12).
@@ -425,6 +442,8 @@ function mapPosition(row: any): Position {
     accruedInterest: num(row.accrued_interest),
     openedOn: text(row.opened_on),
     priceUpdatedAt: row.price_updated_at ? new Date(row.price_updated_at).toISOString() : undefined,
+    closedOn: text(row.closed_on),
+    principalReturned: num(row.principal_returned),
     instrument: mapInstrument(row),
     account: {
       id: row.account_id,
@@ -792,7 +811,7 @@ export async function sumPayouts(db: Db, userId: string, today: string): Promise
     `SELECT
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date >= $2::date), 0) AS expected,
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date < $2::date), 0) AS overdue,
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received'), 0) AS received
+       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received' AND o.type NOT IN (${PRINCIPAL_PAYOUT_SQL})), 0) AS received
      ${PAYOUT_FROM} WHERE f.user_id = $1`,
     [userId, today],
   )
