@@ -12,7 +12,7 @@ import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import {
-  aggregateByGroup, aggregateByKey, calculateReturns,
+  aggregateByGroup, aggregateByKey, calculateReturns, evaluatePosition,
   type Breakdown, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
@@ -322,16 +322,24 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, service
 // ---------------------------------------------------------------------------
 
 
+// Каждая позиция уходит наружу вместе с оценкой Portfolio Engine (§10) — тем же
+// evaluatePosition, по которому считаются сводка и структура. Иначе список и карточка
+// показывали бы сохранённое при вводе значение, а сводка — quantity × currentPrice (BUG-17).
+async function valuedPositions(userId: string, positions: Position[]) {
+  const context = await engineContext(await resolveBaseCurrency(db, userId))
+  return positions.map((position) => positionToWire(position, evaluatePosition(toEngineInput(position), context)))
+}
+
 app.get('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId, listOptions(request))
-  response.json(positions.map(positionToWire))
+  response.json(await valuedPositions(userId, positions))
 })
 app.get('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const position = await findPosition(db, userId, request.params.id)
   if (!position) return response.status(404).json({ error: 'Position not found' })
-  response.json(positionToWire(position))
+  response.json((await valuedPositions(userId, [position]))[0])
 })
 app.post('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -342,7 +350,7 @@ app.post('/api/positions', async (request, response) => {
       await recordSnapshot(client, userId)
       return created
     })
-    response.status(201).json(positionToWire(position))
+    response.status(201).json((await valuedPositions(userId, [position]))[0])
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
 })
 app.patch('/api/positions/:id', async (request, response) => {
@@ -390,7 +398,7 @@ app.patch('/api/positions/:id', async (request, response) => {
         account: { id: account.id, type: account.type, provider: account.provider, currency: account.currency },
       } satisfies Position
     })
-    response.json(positionToWire(updated))
+    response.json((await valuedPositions(userId, [updated]))[0])
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
 })
 app.delete('/api/positions/:id', async (request, response) => {

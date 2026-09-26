@@ -3,7 +3,7 @@
 // Вынесено сюда по тому же принципу, что и daily-tasks.ts: CLAUDE.md §10 запрещает
 // дублировать бизнес-логику между явным действием пользователя и фоновым процессом.
 import { randomUUID } from 'node:crypto'
-import { resolveAssetGroup, type AssetGroup } from './portfolio-engine.ts'
+import { resolveAssetGroup, type AssetGroup, type PositionValuation } from './portfolio-engine.ts'
 import { GROUP_LABELS } from './daily-tasks.ts'
 import {
   ensureAccount, ensurePortfolio, insertInstrument, insertPosition,
@@ -153,7 +153,12 @@ export async function createPosition(client: Db, userId: string, body: PositionB
 // Позиция наружу — плоская запись: поля позиции (§11 Position) вместе с параметрами
 // её инструмента (§11 Instrument) и названием счёта, чтобы карточка инструмента (§9)
 // собиралась одним запросом.
-export function positionToWire(position: Position) {
+//
+// valuation — оценка Portfolio Engine (§10) в базовой валюте портфеля: единственный
+// источник стоимости и P&L для списка и карточки. Сырое amount — это введённое
+// пользователем значение (его правит форма редактирования), а не рыночная оценка:
+// на экранах показывается valuation.value, иначе список и сводка расходятся (BUG-17).
+export function positionToWire(position: Position, valuation?: PositionValuation) {
   const instrument = position.instrument
   return {
     id: position.id,
@@ -190,5 +195,14 @@ export function positionToWire(position: Position) {
     replenishable: instrument.replenishable,
     partialWithdrawal: instrument.partialWithdrawal,
     autoProlongation: instrument.autoProlongation,
+    valuation: valuation ? {
+      // null = оценки нет (нет цены или курса); ноль вместо неё не подставляется (§7.3).
+      value: valuation.valueBase,
+      invested: valuation.investedBase,
+      pnl: valuation.pnl,
+      pnlPercent: valuation.pnlPercent,
+      priceUnavailable: valuation.priceUnavailable,
+      priceUnavailableReason: valuation.priceUnavailableReason,
+    } : undefined,
   }
 }

@@ -46,6 +46,17 @@ type Product = {
   autoProlongation?: boolean;
   accountId?: string;
   instrumentId?: string;
+  // Оценка Portfolio Engine (§10) в базовой валюте — приходит с каждой позицией
+  // из /api/positions. amount — введённая сумма (её правит форма), а не оценка.
+  valuation?: ProductValuation;
+};
+type ProductValuation = {
+  value: number | null;
+  invested: number | null;
+  pnl: number | null;
+  pnlPercent: number | null;
+  priceUnavailable: boolean;
+  priceUnavailableReason: string | null;
 };
 type ProductDetails = {
   isin: string;
@@ -505,17 +516,41 @@ const dateLabel = (date: string) =>
     .replace(".", "");
 const fullDate = (date: string) =>
   new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
-function pnlDisplay(current: number, invested: number) {
-  const diff = current - invested;
-  const percent = pct(diff, invested);
-  const positive = diff >= 0;
+// Показ готового P&L из Portfolio Engine (§10): фронт ничего не вычитает сам.
+// null — результат неизвестен (нет цены или курса), выводится «—», а не «+0,0%» (§7.3).
+function pnlDisplay(pnl: number | null, pnlPercent: number | null) {
+  if (pnl === null) {
+    return { className: "muted", amountText: "—", percentText: "—" };
+  }
+  const positive = pnl >= 0;
   const sign = positive ? "+" : "";
   return {
     className: positive ? "teal-text" : "danger-text",
-    amountText: `${sign}${money(diff)}`,
-    percentText: `${sign}${percent.toFixed(1).replace(".", ",")}%`,
+    amountText: `${sign}${money(pnl)}`,
+    percentText:
+      pnlPercent === null
+        ? "—"
+        : `${sign}${pnlPercent.toFixed(1).replace(".", ",")}%`,
   };
 }
+// Оценка позиции для экранов. При живом API — valuation из ответа бэкенда. Без неё
+// (офлайн-режим, см. localSummary) — единственный случай, когда сохранённая сумма
+// показывается как есть, потому что Portfolio Engine недоступен вовсе.
+function valuationOf(product: Product): ProductValuation {
+  if (product.valuation) return product.valuation;
+  const pnl = product.amount - product.invested;
+  return {
+    value: product.amount,
+    invested: product.invested,
+    pnl,
+    pnlPercent: product.invested > 0 ? (pnl / product.invested) * 100 : null,
+    priceUnavailable: false,
+    priceUnavailableReason: null,
+  };
+}
+// Стоимость без оценки не выводится нулём (§7.3).
+const valueText = (value: number | null) =>
+  value === null ? "Оценка недоступна" : money(value);
 const sourceLabels: Record<string, string> = {
   manual: "Ручной ввод",
   ocr: "Со скриншота",
@@ -857,9 +892,15 @@ function AppMvp() {
     navigate(-1);
   }
   function applyOcrResult(result: OcrUploadResult) {
-    setProducts((current) => [...current, ...result.items]);
     setOcrSummary(result);
-    if (result.items.length > 0) void refreshSummary();
+    // Записи из результата OCR — снимок на момент распознавания, без оценки движка:
+    // список позиций перечитывается с бэкенда, чтобы стоимость пришла из Portfolio Engine.
+    if (apiOnline && result.items.length > 0) {
+      void refreshProducts();
+      void refreshSummary();
+    } else {
+      setProducts((current) => [...current, ...result.items]);
+    }
     navigate("/ocr-summary");
   }
   async function addTransaction(transaction: Transaction) {
@@ -1566,15 +1607,19 @@ type ProductSortKey = keyof typeof PRODUCT_SORT_OPTIONS;
 
 function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
   const withIndex = products.map((product, index) => ({ product, index }));
+  // Позиции без оценки (null) уходят в конец списка, а не сортируются как нулевые (§7.3).
+  const byNumber = (left: number | null, right: number | null, leftIndex: number, rightIndex: number) => {
+    if (left === null && right === null) return leftIndex - rightIndex;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  };
   withIndex.sort((a, b) => {
-    if (sortBy === "value") return b.product.amount - a.product.amount;
-    if (sortBy === "return") {
-      return pct(b.product.amount - b.product.invested, b.product.invested) -
-        pct(a.product.amount - a.product.invested, a.product.invested);
-    }
-    if (sortBy === "pnl") {
-      return (b.product.amount - b.product.invested) - (a.product.amount - a.product.invested);
-    }
+    const left = valuationOf(a.product);
+    const right = valuationOf(b.product);
+    if (sortBy === "value") return byNumber(left.value, right.value, a.index, b.index);
+    if (sortBy === "return") return byNumber(left.pnlPercent, right.pnlPercent, a.index, b.index);
+    if (sortBy === "pnl") return byNumber(left.pnl, right.pnl, a.index, b.index);
     // maturity: с ближайшей датой погашения впереди, без даты — в конец, исходный порядок сохраняется
     if (!a.product.maturityDate && !b.product.maturityDate) return a.index - b.index;
     if (!a.product.maturityDate) return 1;
@@ -1651,7 +1696,8 @@ function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRe
         <div className="list-card">
           {visible.map((product) => {
             const expanded = expandedId === product.id;
-            const pnl = pnlDisplay(product.amount, product.invested);
+            const valuation = valuationOf(product);
+            const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
             return (
               <div className="list-row" key={product.id}>
                 <button
@@ -1667,7 +1713,7 @@ function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRe
                     </span>
                   </span>
                   <span className="list-row-value">
-                    <strong>{money(product.amount)}</strong>
+                    <strong>{valueText(valuation.value)}</strong>
                     <small className={pnl.className}>{pnl.percentText}</small>
                   </span>
                   <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
@@ -2155,7 +2201,8 @@ function ProductDetailPage({
   const expected = relatedPayments
     .filter((payment) => payment.status === "expected")
     .reduce((sum, payment) => sum + payment.amount, 0);
-  const pnl = pnlDisplay(product.amount, product.invested);
+  const valuation = valuationOf(product);
+  const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
   return (
     <Page title={product.name} subtitle="Карточка инструмента" back>
       <div className="confirm-card">
@@ -2205,7 +2252,7 @@ function ProductDetailPage({
         </div>
         <div className="detail-line">
           <span>Текущая стоимость</span>
-          <span>{money(product.amount)}</span>
+          <span>{valueText(valuation.value)}</span>
         </div>
         <div className="detail-line">
           <span>Нереализованный P&L</span>
@@ -2356,7 +2403,7 @@ function BreakdownList({
       {items.length > 0 && (
         <div className="list-card">
           {visible.map((item) => {
-            const pnl = pnlDisplay(item.value, item.invested);
+            const pnl = pnlDisplay(item.pnl, item.pnlPercent);
             return (
               <div className="list-row" key={item.key}>
                 <div className="list-row-summary list-row-static">
@@ -3626,7 +3673,7 @@ function DeleteProductPage({
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
         <p>
-          Удалить <strong>{product.name}</strong> ({money(product.amount)})
+          Удалить <strong>{product.name}</strong> ({valueText(valuationOf(product).value)})
           из портфеля?
         </p>
         <div className="confirm-actions">

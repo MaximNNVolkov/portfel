@@ -172,7 +172,7 @@ not exist` в `scheduler.ocr`/`scheduler.ocr-stale` без падения про
 Вклады 20%, Акции 20%) подтвердил, что `group`/`share` из ответа ровно те значения, которые
 потребляет `donutGradient`.
 
-### 2.2. BUG-17 — список и карточка считают стоимость по цене покупки · M
+### 2.2. BUG-17 — список и карточка считают стоимость по цене покупки · M — ✅ Готово
 
 `server/positions.ts:166` отдаёт `amount: position.value` — сохранённое при вводе
 значение, тогда как `/api/portfolio/summary` и `/api/portfolio/structure` считают
@@ -187,6 +187,30 @@ not exist` в `scheduler.ocr`/`scheduler.ocr-stale` без падения про
 готовые поля.
 
 **Коммит:** `fix: value positions through the portfolio engine everywhere (§10)`
+
+Сделано: `server/positions.ts:positionToWire` принимает оценку движка и отдаёт её
+вложенным объектом `valuation` (`value` = `valueBase`, `invested` = `investedBase`, `pnl`,
+`pnlPercent`, `priceUnavailable`, `priceUnavailableReason`) — ровно тот же
+`evaluatePosition(toEngineInput(position))`, по которому считаются `/api/portfolio/summary`
+и `/structure`. В `server/index.ts` все четыре ответа с позицией (`GET /api/positions`,
+`GET /api/positions/:id`, `POST`, `PATCH`) идут через общий `valuedPositions`. Сырое
+`amount` осталось в ответе как введённое пользователем значение — его читает форма
+редактирования, на экранах стоимости оно больше не используется.
+Фронт (`src/AppMvp.tsx`): `pnlDisplay(pnl, pnlPercent)` только форматирует готовые числа
+движка (и печатает «—» для `null`, §7.3), `valuationOf(product)` берёт `valuation` из ответа;
+пересчёт `amount − invested` остался только в офлайн-фолбэке без бэкенда, по тому же
+принципу, что и `localSummary`. Переведены: строка списка «Инструменты», карточка
+инструмента («Текущая стоимость», «Нереализованный P&L»), страница удаления, сортировки
+«по стоимости / доходности / P&L» (позиции без оценки уходят в конец, а не сортируются
+как нулевые), разрезы структуры (§23 — берут `pnl`/`pnlPercent` из `aggregateByKey`).
+После OCR список позиций перечитывается с бэкенда, а не дополняется снимком из результата
+распознавания, у которого оценки нет.
+
+Проверено: `npx tsc -b`, `npm run build`, все `server/*.test.ts` — чисто. В
+`server/smoke-test.ts` добавлен регрессионный сценарий ровно из отчёта: акция 10 шт.,
+средняя 2 800, текущая 3 100, введённая сумма 28 000 → `POST`, `GET /api/positions` и
+`GET /api/positions/:id` отдают `valuation.value = 31 000` и `pnl = 3 000`, а сводка —
+`total`, включающий те же 31 000. Прогон зелёный.
 
 ### 2.3. BUG-15 + BUG-12 — OCR задваивает портфель и заводит «Итого» активом · L
 

@@ -125,6 +125,34 @@ async function run() {
       assert.equal(json.total, 100000)
     })
 
+    // BUG-17 (FIX_PLAN 2.2): список и карточка обязаны показывать оценку Portfolio Engine
+    // (quantity × currentPrice), а не сумму, сохранённую при вводе.
+    let sharePositionId = ''
+    await test('позиция отдаёт оценку движка, а не сохранённую сумму', async () => {
+      const created = await api('/api/positions', {
+        method: 'POST',
+        token: tokenA,
+        body: { name: 'Смоук-тест акция', type: 'Акция', amount: 28000, date: '2026-01-15', quantity: 10, averagePrice: 2800, currentPrice: 3100 },
+      })
+      assert.equal(created.status, 201)
+      sharePositionId = created.json.id
+      assert.equal(created.json.valuation.value, 31000)
+      assert.equal(created.json.valuation.pnl, 3000)
+      const list = await api('/api/positions', { token: tokenA })
+      const share = list.json.find((item: { id: string }) => item.id === sharePositionId)
+      assert.equal(share.valuation.value, 31000)
+      assert.equal(share.valuation.priceUnavailable, false)
+      const single = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(single.json.valuation.pnl, 3000)
+      const summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.total, 100000 + 31000)
+    })
+
+    await test('удаление второй позиции', async () => {
+      const { status } = await api(`/api/positions/${sharePositionId}`, { method: 'DELETE', token: tokenA })
+      assert.equal(status, 204)
+    })
+
     await test('регистрация пользователя B (для проверки изоляции)', async () => {
       const { status, json } = await api('/api/auth/register', { method: 'POST', body: { email: emailB, password } })
       assert.equal(status, 201)
