@@ -44,3 +44,4 @@
 /* BUG-03: ошибки входа — под полем, красным, а не серой подписью формы. */
 .login-card .form-error { color: var(--danger); text-align: left; font-size: 11px; }
 .price-refresh-note { margin: 0 0 16px; }.price-refresh-note strong { color: var(--ink); }.price-refresh-note ul { margin: 6px 0 0; padding-left: 18px; }.price-refresh-note li + li { margin-top: 4px; }
+.inline-link-button { padding: 0; border: 0; color: var(--mint); background: transparent; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }

@@ -358,10 +358,10 @@ type PriceRefreshItem = {
 };
 type PriceRefreshResult = { checked: number; updated: number; items: PriceRefreshItem[] };
 const priceRefreshReasons: Record<Exclude<PriceRefreshItem["status"], "updated">, string> = {
-  not_found: "Мосбиржа не знает такого тикера — проверьте тикер или ISIN",
+  not_found: "Мосбиржа не знает такого тикера, проверьте тикер или ISIN",
   no_price: "на Мосбирже нет цены: по бумаге не было сделок",
   unavailable: "Мосбиржа не ответила, попробуйте позже",
-  no_quantity: "не указано количество бумаг — цену не на что умножить",
+  no_quantity: "не указано количество бумаг, цену не на что умножить",
 };
 
 const storageKey = "capital-mvp-state";
@@ -2374,6 +2374,9 @@ function PaymentsPage({
     return Array.from(map.entries());
   }, [payments, products]);
 
+  // Замечание 24: перепутанные «С» и «По» дают пустой список, который выглядит как
+  // «выплаты пропали» — предупреждаем и предлагаем поменять границы местами.
+  const rangeInverted = Boolean(dateFrom && dateTo && dateFrom > dateTo);
   const filtered = payments.filter((payment) => {
     if (typeFilter !== "all" && payment.type !== typeFilter) return false;
     if (instrumentFilter !== "all" && payment.instrumentId !== instrumentFilter) return false;
@@ -2507,6 +2510,22 @@ function PaymentsPage({
           <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
         </label>
       </div>
+      {rangeInverted && (
+        <div className="demo-note" role="alert">
+          ⚠ Начало периода позже конца: {fullDate(dateFrom)} → {fullDate(dateTo)}. Под такие условия
+          не попадёт ни одна выплата.{" "}
+          <button
+            type="button"
+            className="inline-link-button"
+            onClick={() => {
+              setDateFrom(dateTo);
+              setDateTo(dateFrom);
+            }}
+          >
+            Поменять местами
+          </button>
+        </div>
+      )}
       {products
         .filter((product) => product.forecastNote)
         .map((product) => (
@@ -2583,7 +2602,9 @@ function PaymentsPage({
         <p className="muted">
           {payments.length === 0
             ? "Пока нет добавленных выплат."
-            : "Нет выплат, подходящих под выбранные условия."}
+            : rangeInverted
+              ? "Период задан наоборот — поменяйте «С» и «По» местами."
+              : "Нет выплат, подходящих под выбранные условия."}
         </p>
       ) : viewMode === "day" ? (
         <div className="list-card">
