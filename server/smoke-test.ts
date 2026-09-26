@@ -214,6 +214,21 @@ async function run() {
       assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Замечание 20 (FIX_PLAN 2.8): вклад с истёкшим сроком даёт проценты и возврат тела,
+    // и они приходят просроченными, а не пропадают.
+    await test('вклад с истёкшим сроком попадает в календарь просроченными выплатами', async () => {
+      const deposit = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест старый вклад', type: 'Вклад', amount: 500000, date: '2020-01-01', rate: 16, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
+      })
+      assert.equal(deposit.status, 201)
+      const payouts = await api('/api/payouts', { token: tokenA })
+      const own = payouts.json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
+      assert.deepEqual(own.map((payout: { type: string }) => payout.type).sort(), ['DEPOSIT_PRINCIPAL', 'INTEREST'])
+      assert.ok(own.every((payout: { overdue: boolean; status: string }) => payout.overdue && payout.status === 'expected'))
+      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // BUG-22 (FIX_PLAN 2.6): ожидаемая выплата с прошедшей датой — «просрочено»,
     // в «Ожидается» не входит.
     await test('просроченная выплата отделена от ожидаемых', async () => {

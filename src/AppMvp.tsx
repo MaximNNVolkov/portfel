@@ -2142,6 +2142,17 @@ function PaymentsPage({
       setMarkingId(null);
     }
   }
+  // Вклад, заведённый задним числом, приносит сразу пачку прошедших выплат (2.8) —
+  // отмечать их по одной было бы наказанием.
+  async function markAllReceived() {
+    setMarkingId("all");
+    try {
+      for (const payment of overduePayments) await onMarkReceived(payment);
+    } finally {
+      setMarkingId(null);
+    }
+  }
+  const overduePaging = usePagedList(overduePayments);
 
   const currentMonthKey = periodKey(todayIsoDate(), "month");
   const forecastAmount = payments
@@ -2261,7 +2272,7 @@ function PaymentsPage({
             </div>
           </div>
           <div className="list-card">
-            {overduePayments.map((payment) => (
+            {overduePaging.visible.map((payment) => (
               <div className="list-row" key={payment.id}>
                 <div className="list-row-summary list-row-static">
                   <span className="list-row-main">
@@ -2277,7 +2288,7 @@ function PaymentsPage({
                   <button
                     type="button"
                     className="outline-button"
-                    disabled={markingId === payment.id}
+                    disabled={markingId !== null}
                     onClick={() => void markReceived(payment)}
                   >
                     {markingId === payment.id ? "Сохраняем..." : "Отметить полученной"}
@@ -2288,7 +2299,27 @@ function PaymentsPage({
                 </div>
               </div>
             ))}
+            <ListPagination
+              hasMore={overduePaging.hasMore}
+              onLoadMore={overduePaging.loadMore}
+              pageSize={overduePaging.pageSize}
+              onPageSizeChange={overduePaging.setPageSize}
+            />
           </div>
+          {overduePayments.length > 1 && (
+            <div className="list-row-actions">
+              <button
+                type="button"
+                className="outline-button"
+                disabled={markingId !== null}
+                onClick={() => void markAllReceived()}
+              >
+                {markingId === "all"
+                  ? "Сохраняем..."
+                  : `Отметить все полученными (${overduePayments.length})`}
+              </button>
+            </div>
+          )}
         </section>
       )}
       {sorted.length === 0 ? (

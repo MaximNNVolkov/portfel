@@ -74,13 +74,27 @@ test('капитализация: одна выплата процентов в 
   assert.ok(interest[0].amount > 12000, `капитализация должна дать больше простых процентов: ${interest[0].amount}`)
 })
 
-test('прошедшие периоды в прогноз не попадают', () => {
+// Замечание 20 (FIX_PLAN 2.8): прогноз вклада — на весь срок, прошедшие даты не отбрасываются.
+test('прошедшие периоды вклада остаются в прогнозе, но не раньше даты открытия', () => {
   const result = forecastPayouts(
     position({ openedOn: '2025-09-01', invested: 100000 }),
     instrument({ rate: 12, termEndDate: '2026-12-01', interestPayoutFrequency: 'Ежемесячно' }),
     TODAY,
   )
-  assert.ok(result.every((payout) => payout.date > TODAY), 'все выплаты должны быть в будущем')
+  assert.equal(result.filter((payout) => payout.type === 'INTEREST').length, 15)
+  assert.ok(result.some((payout) => payout.date < TODAY), 'прошедшие выплаты должны остаться')
+  assert.ok(result.every((payout) => payout.date > '2025-09-01'), 'раньше открытия выплат нет')
+})
+
+test('вклад с истёкшим сроком: проценты и возврат тела с датой окончания', () => {
+  const result = forecastPayouts(
+    position({ openedOn: '2025-09-01', invested: 500000 }),
+    instrument({ rate: 16, termEndDate: '2026-09-01', interestPayoutFrequency: 'В конце срока' }),
+    TODAY,
+  )
+  assert.deepEqual(result.map((payout) => [payout.type, payout.date]), [['INTEREST', '2026-09-01'], ['DEPOSIT_PRINCIPAL', '2026-09-01']])
+  assert.equal(result[0].amount, 80000)
+  assert.equal(result[1].amount, 500000)
 })
 
 test('вклад без ставки или без даты окончания не прогнозируется', () => {

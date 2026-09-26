@@ -73,7 +73,12 @@ function periodBounds(start: string, end: string, months: number | null): string
 // §15: проценты по вкладу и возврат тела вклада. Капитализация не выплачивается по периодам,
 // а увеличивает базу начисления и уходит одной суммой в конце срока — поэтому оба режима
 // используют одни и те же границы периодов и отличаются только моментом выплаты.
-function forecastDeposit(position: PositionRecord, instrument: Instrument, today: string): ForecastPayout[] {
+//
+// Прогноз строится на весь срок вклада, от даты открытия, включая уже прошедшие даты
+// (Замечание 20, решение Р-1 в docs/FIX_PLAN.md): вклад с истёкшим сроком иначе молча
+// терял и проценты, и возврат тела. Прошедшие выплаты приходят как «ожидается» и в
+// календаре попадают в группу «Просрочено» — пользователь отмечает их полученными.
+function forecastDeposit(position: PositionRecord, instrument: Instrument): ForecastPayout[] {
   const principal = position.invested
   const rate = instrument.rate ?? instrument.effectiveRate
   const start = position.openedOn
@@ -94,7 +99,7 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument, today
     if (instrument.capitalization) {
       balance += interest
       capitalized += interest
-    } else if (daysBetween(today, to) > 0) {
+    } else {
       payouts.push({
         date: to,
         type: 'INTEREST',
@@ -105,7 +110,7 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument, today
     }
   }
 
-  if (instrument.capitalization && capitalized > 0 && daysBetween(today, end) > 0) {
+  if (instrument.capitalization && capitalized > 0) {
     payouts.push({
       date: end,
       type: 'INTEREST',
@@ -114,15 +119,13 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument, today
       description: `Проценты по вкладу «${instrument.name}» с капитализацией`,
     })
   }
-  if (daysBetween(today, end) > 0) {
-    payouts.push({
-      date: end,
-      type: 'DEPOSIT_PRINCIPAL',
-      amount: round2(principal),
-      currency,
-      description: `Возврат вклада «${instrument.name}»`,
-    })
-  }
+  payouts.push({
+    date: end,
+    type: 'DEPOSIT_PRINCIPAL',
+    amount: round2(principal),
+    currency,
+    description: `Возврат вклада «${instrument.name}»`,
+  })
   return payouts
 }
 
@@ -235,7 +238,7 @@ export function forecastPayouts(
   instrument: Instrument,
   today: string,
 ): ForecastPayout[] {
-  if (instrument.groupType === 'deposit') return forecastDeposit(position, instrument, today)
+  if (instrument.groupType === 'deposit') return forecastDeposit(position, instrument)
   if (instrument.groupType === 'bond') return forecastBond(position, instrument, today)
   return []
 }
