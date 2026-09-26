@@ -153,6 +153,27 @@ async function run() {
       assert.equal(status, 204)
     })
 
+    // BUG-15 (FIX_PLAN 2.3): тот же файл повторно не обрабатывается — сервер возвращает
+    // прошлый документ. Воркер OCR в тесте не запущен, первый документ остаётся в очереди,
+    // этого достаточно: совпадение ищется и среди ещё не обработанных загрузок.
+    await test('повторная загрузка того же скриншота не создаёт новый документ', async () => {
+      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+      const upload = async () => {
+        const form = new FormData()
+        form.append('image', new Blob([png], { type: 'image/png' }), 'smoke.png')
+        const response = await fetch(`${BASE_URL}/api/ocr/upload`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form })
+        return { status: response.status, json: await response.json() }
+      }
+      const first = await upload()
+      assert.equal(first.status, 202)
+      assert.ok(first.json.documentId)
+      assert.equal(first.json.alreadyUploadedAt, undefined)
+      const second = await upload()
+      assert.equal(second.status, 200)
+      assert.equal(second.json.documentId, first.json.documentId)
+      assert.ok(second.json.alreadyUploadedAt)
+    })
+
     await test('регистрация пользователя B (для проверки изоляции)', async () => {
       const { status, json } = await api('/api/auth/register', { method: 'POST', body: { email: emailB, password } })
       assert.equal(status, 201)

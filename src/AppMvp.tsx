@@ -204,7 +204,13 @@ type OcrFailure = { filename: string; reason: string };
 // possibleDuplicate — транзиентный флаг только этого ответа (§18, вариант А: запись всё
 // равно сохраняется, пользователь сам решает на экране-сводке), не персистится как поле Product.
 type OcrItem = Product & { possibleDuplicate?: boolean };
-type OcrUploadResult = { date: string; items: OcrItem[]; failures: OcrFailure[] };
+type OcrUploadResult = {
+  date: string;
+  items: OcrItem[];
+  failures: OcrFailure[];
+  // Тот же файл уже загружался (BUG-15): показывается сводка прошлой обработки.
+  alreadyUploadedAt?: string;
+};
 // Зеркалит GroupAggregate/PortfolioAggregate из server/portfolio-engine.ts — расчёт
 // (§10) целиком на бэкенде, фронт только отображает уже готовый результат.
 type GroupSummary = {
@@ -895,7 +901,10 @@ function AppMvp() {
     setOcrSummary(result);
     // Записи из результата OCR — снимок на момент распознавания, без оценки движка:
     // список позиций перечитывается с бэкенда, чтобы стоимость пришла из Portfolio Engine.
-    if (apiOnline && result.items.length > 0) {
+    if (result.alreadyUploadedAt) {
+      // Повторная загрузка того же файла ничего не создала — записи уже в списке.
+      if (apiOnline) void refreshProducts();
+    } else if (apiOnline && result.items.length > 0) {
       void refreshProducts();
       void refreshSummary();
     } else {
@@ -3314,7 +3323,11 @@ function ProductFormPage({
         onUnauthorized();
         return;
       }
-      const uploaded = (await uploadResponse.json()) as { error?: string; documentId?: string };
+      const uploaded = (await uploadResponse.json()) as {
+        error?: string;
+        documentId?: string;
+        alreadyUploadedAt?: string;
+      };
       if (!uploadResponse.ok || !uploaded.documentId) {
         throw new Error(uploaded.error || "Не удалось загрузить изображение");
       }
@@ -3324,6 +3337,7 @@ function ProductFormPage({
         date: result.date || new Date().toISOString().slice(0, 10),
         items: result.items || [],
         failures: result.failures || [],
+        alreadyUploadedAt: uploaded.alreadyUploadedAt,
       });
     } catch (recognitionError) {
       setError(recognitionError instanceof Error ? recognitionError.message : "Не удалось распознать изображение");
@@ -3724,6 +3738,13 @@ function OcrSummaryPage({ summary }: { summary: OcrUploadResult | null }) {
       title={`Добавлено со скриншота от ${formattedDate}`}
       subtitle="Данные сохранены как распознаны. Проверьте каждую запись и поправьте при необходимости."
     >
+      {summary.alreadyUploadedAt && (
+        <div className="demo-note">
+          ⚠ Этот скриншот уже загружался{" "}
+          {new Date(summary.alreadyUploadedAt).toLocaleDateString("ru-RU")} — повторно
+          он не обрабатывался, новые записи не созданы. Ниже — результат прошлой обработки.
+        </div>
+      )}
       <div className="table-card">
         {(summary.items.length > 0 || summary.failures.length > 0) && (
           <div className="table-head">

@@ -4,6 +4,7 @@ import helmet from 'helmet'
 import { rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
+import { readFile, unlink } from 'node:fs/promises'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import multer from 'multer'
 import { Pool, types } from 'pg'
@@ -29,7 +30,7 @@ import {
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
   findCashPosition, findPayout, findPortfolio, findPosition,
   findTransaction,
-  findUploadedDocument, insertUploadedDocument,
+  findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
   sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
@@ -206,7 +207,8 @@ app.get('/api/auth/me', async (request, response) => {
 })
 app.delete('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  await withTransaction(db, (client) => deleteUserData(client, userId))
+  const pendingFiles = await withTransaction(db, (client) => deleteUserData(client, userId))
+  await Promise.all(pendingFiles.map((path) => unlink(path).catch(() => {})))
   users.delete(userId)
   response.status(204).send()
 })
@@ -431,6 +433,19 @@ app.get('/api/instruments', async (request, response) => {
 app.post('/api/ocr/upload', upload.single('image'), async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   if (!request.file) return response.status(400).json({ error: 'Изображение не загружено или имеет неподдерживаемый формат' })
+  // BUG-15 (§18): тот же файл, загруженный повторно, не обрабатывается ещё раз — иначе
+  // каждая загрузка заново заводит полный комплект записей и умножает портфель. Клиент
+  // получает прошлый документ и показывает его экран-сводку с пометкой о повторе.
+  const contentHash = createHash('sha256').update(await readFile(request.file.path)).digest('hex')
+  const previous = await findProcessedDocumentByHash(db, userId, contentHash)
+  if (previous) {
+    await unlink(request.file.path).catch(() => {})
+    return response.status(200).json({
+      documentId: previous.id,
+      status: previous.status,
+      alreadyUploadedAt: previous.createdAt,
+    })
+  }
   // §34: тяжёлая операция не выполняется внутри запроса — документ только встаёт в очередь
   // (portfolio.uploaded_documents), распознаванием займётся воркер планировщика, а клиент
   // опрашивает статус через GET /api/ocr/documents/:id.
@@ -439,6 +454,7 @@ app.post('/api/ocr/upload', upload.single('image'), async (request, response) =>
     fileName: decodeUploadName(request.file.originalname),
     filePath: request.file.path,
     mimeType: request.file.mimetype,
+    contentHash,
   })
   response.status(202).json({ documentId: document.id, status: document.status })
 })

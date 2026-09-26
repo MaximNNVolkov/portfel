@@ -879,10 +879,11 @@ export type UploadedDocument = {
   errorMessage?: string
   createdAt: string
   processedAt?: string
+  contentHash?: string
 }
 
 const DOCUMENT_FIELDS = `id, user_id, file_name, file_path, mime_type, processing_status,
-  extracted_json, instrument_id, error_message, created_at, processed_at, claimed_at`
+  extracted_json, instrument_id, error_message, created_at, processed_at, claimed_at, content_hash`
 
 function mapUploadedDocument(row: any): UploadedDocument {
   return {
@@ -897,18 +898,44 @@ function mapUploadedDocument(row: any): UploadedDocument {
     errorMessage: text(row.error_message),
     createdAt: new Date(row.created_at).toISOString(),
     processedAt: row.processed_at ? new Date(row.processed_at).toISOString() : undefined,
+    contentHash: text(row.content_hash),
   }
 }
 
 export async function insertUploadedDocument(
-  db: Db, userId: string, document: { id: string; fileName: string; filePath: string; mimeType?: string },
+  db: Db, userId: string, document: { id: string; fileName: string; filePath: string; mimeType?: string; contentHash?: string },
 ): Promise<UploadedDocument> {
   const result = await db.query(
-    `INSERT INTO portfolio.uploaded_documents (id, user_id, file_name, file_path, mime_type)
-     VALUES ($1, $2, $3, $4, $5) RETURNING ${DOCUMENT_FIELDS}`,
-    [document.id, userId, document.fileName, document.filePath, document.mimeType ?? null],
+    `INSERT INTO portfolio.uploaded_documents (id, user_id, file_name, file_path, mime_type, content_hash)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${DOCUMENT_FIELDS}`,
+    [document.id, userId, document.fileName, document.filePath, document.mimeType ?? null, document.contentHash ?? null],
   )
   return mapUploadedDocument(result.rows[0])
+}
+
+// BUG-15 (§18): ранее загруженный документ с тем же содержимым. Упавшие обработки
+// не считаются — такой файл пользователь вправе загрузить ещё раз. Если от прошлой
+// обработки не осталось ни одной позиции (пользователь всё удалил), файл тоже
+// обрабатывается заново: показывать сводку из удалённых записей бессмысленно.
+export async function findProcessedDocumentByHash(db: Db, userId: string, contentHash: string): Promise<UploadedDocument | undefined> {
+  const result = await db.query(
+    `SELECT ${DOCUMENT_FIELDS} FROM portfolio.uploaded_documents d
+      WHERE d.user_id = $1 AND d.content_hash = $2
+        AND (
+          d.processing_status IN ('pending', 'processing')
+          OR (d.processing_status = 'done' AND EXISTS (
+            SELECT 1 FROM portfolio.positions p
+              JOIN portfolio.accounts a ON a.id = p.account_id
+              JOIN portfolio.portfolios pf ON pf.id = a.portfolio_id
+             WHERE pf.user_id = d.user_id
+               AND p.id::text IN (SELECT jsonb_array_elements(d.extracted_json->'items')->>'id')
+          ))
+        )
+      ORDER BY d.created_at DESC
+      LIMIT 1`,
+    [userId, contentHash],
+  )
+  return result.rows[0] ? mapUploadedDocument(result.rows[0]) : undefined
 }
 
 export async function findUploadedDocument(db: Db, userId: string, id: string): Promise<UploadedDocument | undefined> {
@@ -972,7 +999,13 @@ export async function completeUploadedDocument(
 }
 
 // Полное удаление аккаунта (§28): пользователь должен иметь возможность стереть себя целиком.
-export async function deleteUserData(db: Db, userId: string): Promise<void> {
+// Возвращает пути ещё не обработанных загрузок: файлы на диске тоже данные пользователя,
+// вызывающий удаляет их после коммита транзакции.
+export async function deleteUserData(db: Db, userId: string): Promise<string[]> {
+  const files = await db.query(
+    'SELECT file_path FROM portfolio.uploaded_documents WHERE user_id = $1 AND file_path IS NOT NULL',
+    [userId],
+  )
   // Каскад по portfolios снимает счета, позиции, операции, выплаты и снимки портфеля.
   await db.query('DELETE FROM portfolio.portfolios WHERE user_id = $1', [userId])
   await db.query('DELETE FROM portfolio.instruments WHERE owner_user_id = $1', [userId])
@@ -981,4 +1014,5 @@ export async function deleteUserData(db: Db, userId: string): Promise<void> {
   await db.query('DELETE FROM portfolio.recommendations WHERE user_id = $1', [userId])
   await db.query('DELETE FROM sessions WHERE user_id = $1', [userId])
   await db.query('DELETE FROM users WHERE id = $1', [userId])
+  return files.rows.map((row) => row.file_path as string)
 }
