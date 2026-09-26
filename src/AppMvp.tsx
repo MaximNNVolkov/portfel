@@ -579,10 +579,23 @@ const money = (value: number) =>
   `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
 const pct = (numerator: number, denominator: number) =>
   denominator ? (numerator / denominator) * 100 : 0;
-const dateLabel = (date: string) =>
-  new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" })
+// Короткие даты. Год добавляется, когда дата не в текущем году (BUG-07): иначе
+// полугодовые купоны на годы вперёд читались как одна выплата, повторённая 12 раз.
+const shortMonth = (date: string) =>
+  new Intl.DateTimeFormat("ru-RU", { month: "short" })
     .format(new Date(`${date}T12:00:00`))
     .replace(".", "");
+const dayOfMonth = (date: string) => date.slice(8, 10);
+const isCurrentYear = (date: string) => date.slice(0, 4) === todayIsoDate().slice(0, 4);
+const dateLabel = (date: string) =>
+  `${dayOfMonth(date)} ${shortMonth(date)}${isCurrentYear(date) ? "" : ` ${date.slice(0, 4)}`}`;
+// «Ближайшие выплаты» на главном экране — горизонт, заявленный в подписи блока (BUG-06).
+const UPCOMING_HORIZON_DAYS = 60;
+function addDaysIso(date: string, days: number) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
 // Сегодня по местному времени (toISOString дал бы дату по UTC — ночью это «вчера»).
 function todayIsoDate() {
   const now = new Date();
@@ -1524,6 +1537,11 @@ function Dashboard({
     .format(new Date())
     .toUpperCase();
   const displayName = userEmail?.split("@")[0] || "";
+  const horizonEnd = addDaysIso(todayIsoDate(), UPCOMING_HORIZON_DAYS);
+  const upcomingPayments = payments
+    .filter((payment) => isUpcoming(payment) && payment.date <= horizonEnd)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 3);
   const brokerDegraded = brokerStatus?.status === "error";
   const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
   // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
@@ -1667,8 +1685,8 @@ function Dashboard({
             )}
           </div>
           <div className="chart-footer">
-            <span>{history[0] ? dateLabel(history[0].date).split(" ")[1]?.toUpperCase() : "—"}</span>
-            <span>{lastSnapshot ? dateLabel(lastSnapshot.date).split(" ")[1]?.toUpperCase() : "—"}</span>
+            <span>{history[0] ? shortMonth(history[0].date).toUpperCase() : "—"}</span>
+            <span>{lastSnapshot ? shortMonth(lastSnapshot.date).toUpperCase() : "—"}</span>
             <div className="periods">
               <button className="selected" type="button">
                 1Г
@@ -1764,7 +1782,7 @@ function Dashboard({
           <div className="section-heading compact">
             <div>
               <h2>Ближайшие выплаты</h2>
-              <p>Прогноз на 60 дней</p>
+              <p>Прогноз на {UPCOMING_HORIZON_DAYS} дней</p>
             </div>
             <button
               className="round-arrow"
@@ -1776,16 +1794,19 @@ function Dashboard({
             </button>
           </div>
           <div className="payment-list">
-            {payments
-              .filter(isUpcoming)
-              .sort((a, b) => a.date.localeCompare(b.date))
-              .slice(0, 3)
-              .map((payment) => (
+            {upcomingPayments.length === 0 && (
+              <p className="muted">
+                В ближайшие {UPCOMING_HORIZON_DAYS} дней выплат не ожидается.{" "}
+                <Link to="/payments">Весь календарь</Link>
+              </p>
+            )}
+            {upcomingPayments.map((payment) => (
               <div className="payment-row" key={payment.id}>
                 <div className="date-box">
-                  <strong>{dateLabel(payment.date).split(" ")[0]}</strong>
+                  <strong>{dayOfMonth(payment.date)}</strong>
                   <small>
-                    {dateLabel(payment.date).split(" ")[1]?.toUpperCase()}
+                    {shortMonth(payment.date).toUpperCase()}
+                    {isCurrentYear(payment.date) ? "" : ` ${payment.date.slice(0, 4)}`}
                   </small>
                 </div>
                 <div className="payment-info">
