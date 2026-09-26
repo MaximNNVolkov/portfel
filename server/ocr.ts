@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createWorker } from 'tesseract.js'
 import { logError } from './logger.ts'
-import { recordSnapshot, regenerateForecastPayouts } from './daily-tasks.ts'
+import { GROUP_LABELS, recordSnapshot, regenerateForecastPayouts } from './daily-tasks.ts'
 import { createPosition, positionToWire } from './positions.ts'
 import { type AssetGroup } from './portfolio-engine.ts'
 import {
@@ -230,6 +230,22 @@ async function recognizeText(filePath: string): Promise<string> {
   }
 }
 
+// Пометка «похоже на дубль» на сводке OCR (§18, BUG-13). Сравниваются только позиции,
+// существовавшие до этой обработки: строки одного скриншота друг другу не дубли. Совпасть
+// должны название, группа (если OCR её определил — «Прочее» значит «не понял») и сумма —
+// текущая стоимость или вложенное, смотря что пользователь видел в приложении банка.
+export function isPossibleDuplicate(
+  candidate: { name: string; type: AssetGroup; amount: number },
+  existing: Array<Pick<Position, 'value' | 'invested'> & { instrument: Pick<Position['instrument'], 'name' | 'groupType'> }>,
+): boolean {
+  const key = normalizeOcrName(candidate.name)
+  return existing.some((position) =>
+    normalizeOcrName(position.instrument.name) === key
+    && (candidate.type === 'Прочее' || GROUP_LABELS[position.instrument.groupType] === candidate.type)
+    && [position.value, position.invested].some((amount) => amount !== undefined && Math.abs(amount - candidate.amount) < 0.01),
+  )
+}
+
 // §40.4: распознанное сохраняется как есть, без шага подтверждения полей.
 // §18 дедупликация (решено автономно: вариант А — см. план) — совпадение по названию+сумме
 // не блокирует сохранение, а лишь помечается, чтобы пользователь заметил его сам
@@ -243,14 +259,9 @@ export async function processDocument(db: Pool, document: UploadedDocument): Pro
   const positions = recognized.length
     ? await withTransaction(db, async (client: Db) => {
         const existing = await listPositions(client, document.userId)
-        const knownAmounts = new Map<string, number>(
-          existing.map((position) => [normalizeOcrName(position.instrument.name), position.value ?? position.invested]),
-        )
         const created: Position[] = []
         for (const candidate of recognized) {
-          const key = normalizeOcrName(candidate.name)
-          const knownAmount = knownAmounts.get(key)
-          duplicates.push(knownAmount !== undefined && Math.abs(knownAmount - candidate.amount) < 0.01)
+          duplicates.push(isPossibleDuplicate(candidate, existing))
           const position = await createPosition(client, document.userId, {
             name: candidate.name,
             type: candidate.type,
@@ -261,7 +272,6 @@ export async function processDocument(db: Pool, document: UploadedDocument): Pro
             currency: candidate.currency,
           }, 'ocr')
           created.push(position)
-          knownAmounts.set(key, position.value ?? position.invested)
         }
         await regenerateForecastPayouts(client, document.userId)
         await recordSnapshot(client, document.userId)

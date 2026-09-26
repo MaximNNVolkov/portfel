@@ -6,7 +6,7 @@
 // в БД и в tesseract, поэтому проверяется вручную на живом стенде.
 
 import assert from 'node:assert/strict'
-import { buildOcrCandidates, extractNumbers, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
+import { buildOcrCandidates, extractNumbers, isPossibleDuplicate, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
 
 let failed = 0
 function test(name: string, run: () => void) {
@@ -171,6 +171,21 @@ test('скриншот из отчёта BUG-12 даёт ровно три ак�
   assert.equal(byType['Акции'].amount, 15622.5)
   assert.equal(byType['Акции'].name, 'SBER')
   assert.equal(candidates.some((candidate) => /итого/i.test(candidate.name)), false)
+})
+
+test('дубль — только совпадение названия, группы и суммы с уже существующей позицией (BUG-13)', () => {
+  const existing = [
+    { value: 500000, invested: 500000, instrument: { name: 'Вклад Надёжный', groupType: 'deposit' as const } },
+    { value: 71000, invested: 68076, instrument: { name: 'ОФЗ 26238', groupType: 'bond' as const } },
+  ]
+  assert.equal(isPossibleDuplicate({ name: 'вклад надёжный', type: 'Вклады', amount: 500000 }, existing), true)
+  // сумма совпала с вложенным, а не с текущей стоимостью — всё равно тот же продукт
+  assert.equal(isPossibleDuplicate({ name: 'ОФЗ 26238', type: 'Облигации', amount: 68076 }, existing), true)
+  // группа OCR не определена — сравниваем без неё
+  assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Прочее', amount: 500000 }, existing), true)
+  assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Вклады', amount: 250000 }, existing), false)
+  assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Акции', amount: 500000 }, existing), false)
+  assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Вклады', amount: 500000 }, []), false)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
