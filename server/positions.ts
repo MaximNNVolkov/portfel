@@ -226,6 +226,7 @@ export function positionToWire(position: Position, valuation?: PositionValuation
       pnlPercent: valuation.pnlPercent,
       priceUnavailable: valuation.priceUnavailable,
       priceUnavailableReason: valuation.priceUnavailableReason,
+      estimated: valuation.estimated,
     } : undefined,
   }
 }

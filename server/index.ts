@@ -508,9 +508,11 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const cash = cashValuations.some((item) => item.valueBase === null)
     ? null
     : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
+  // База доходности — позиции с известным P&L: приблизительная оценка без котировки
+  // не должна выдавать себя за «0% изменения» (§7.3, BUG-09).
   const returns = calculateReturns({
-    currentValue: aggregate.value,
-    invested: aggregate.invested,
+    currentValue: aggregate.pnlValue,
+    invested: aggregate.pnlInvested,
     payoutsReceived: payouts.received,
     commissions: costs.commissions,
     taxes: costs.taxes,
@@ -534,7 +536,11 @@ app.get('/api/portfolio/summary', async (request, response) => {
     taxes: returns.taxes,
     groups: aggregate.groups,
     // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
-    valuation: { incomplete: aggregate.valuationIncomplete, unavailable: aggregate.unavailable },
+    valuation: {
+      incomplete: aggregate.valuationIncomplete,
+      unavailable: aggregate.unavailable,
+      estimated: aggregate.positions.filter((item) => item.estimated).map((item) => ({ id: item.id, name: item.name, group: item.group })),
+    },
   })
 })
 app.get('/api/portfolio/history', async (request, response) => {

@@ -60,6 +60,8 @@ type ProductValuation = {
   pnlPercent: number | null;
   priceUnavailable: boolean;
   priceUnavailableReason: string | null;
+  /** Котируемый инструмент без котировки: стоимость — введённая сумма, P&L нет (§7.3, BUG-09). */
+  estimated?: boolean;
 };
 type ProductDetails = {
   isin: string;
@@ -293,6 +295,8 @@ type PortfolioSummary = {
   valuation: {
     incomplete: boolean;
     unavailable: { id: string; name: string; group: string; reason: string }[];
+    /** Позиции с приблизительной оценкой: в стоимости есть, в P&L нет (BUG-09). */
+    estimated?: { id: string; name: string; group: string }[];
   };
 };
 type BrokerStatus = {
@@ -680,6 +684,14 @@ function valuationOf(product: Product): ProductValuation {
 // Стоимость без оценки не выводится нулём (§7.3).
 const valueText = (value: number | null) =>
   value === null ? "Оценка недоступна" : money(value);
+// Пометка к стоимости без котировки (§7.3, BUG-09): сумма совпадает с вложенным — значит,
+// это цена покупки, а не рынок; иначе — введённая оценка (например, со скриншота).
+const estimateNote = (valuation: ProductValuation) =>
+  !valuation.estimated
+    ? null
+    : valuation.value !== null && valuation.value === valuation.invested
+      ? "по цене покупки"
+      : "оценка приблизительна";
 const sourceLabels: Record<string, string> = {
   manual: "Ручной ввод",
   ocr: "Со скриншота",
@@ -1665,8 +1677,15 @@ function Dashboard({
             <p className="muted">Данные неполные — брокер недоступен.</p>
           )}
           <div className="profit-line">
-            <span className="positive-pill">↗ {display(profit)}</span>
-            <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
+            <span className={profit > 0 ? "positive-pill" : profit < 0 ? "negative-pill" : "neutral-pill"}>
+              {profit > 0 ? "↗ +" : profit < 0 ? "↘ " : ""}
+              {display(profit)}
+            </span>
+            <strong className={profitPercent === null ? "muted" : profit < 0 ? "danger-text" : ""}>
+              {profitPercent === null
+                ? "—"
+                : `${profitPercent > 0 ? "+" : ""}${profitPercent.toFixed(2).replace(".", ",")}%`}
+            </strong>
             <span className="muted">за всё время</span>
           </div>
           {brokerHasCache && (
@@ -1688,6 +1707,12 @@ function Dashboard({
             <div className="demo-note">
               ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
               инструмент(ов) — их стоимость не включена в общую сумму.
+            </div>
+          )}
+          {(valuation.estimated?.length ?? 0) > 0 && (
+            <div className="demo-note">
+              ⓘ Нет котировки для {valuation.estimated!.length} инструмент(ов) — они учтены
+              в стоимости по введённой сумме, но не в результате и доходности. Оценка приблизительна.
             </div>
           )}
           <div className="chart">
@@ -1993,7 +2018,9 @@ function ProductsPage({ products, onRefreshPrices }: { products: Product[]; onRe
                   </span>
                   <span className="list-row-value">
                     <strong>{valueText(valuation.value)}</strong>
-                    <small className={pnl.className}>{pnl.percentText}</small>
+                    <small className={pnl.className}>
+                      {estimateNote(valuation) ?? pnl.percentText}
+                    </small>
                   </span>
                   <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
@@ -2516,7 +2543,7 @@ function PaymentsPage({
                     <strong>{group.label}</strong>
                   </span>
                   <span className="list-row-value">
-                    <PayoutGroupValue {...group} />
+                    <PayoutGroupValue expected={group.expected} received={group.received} overdue={group.overdue} />
                   </span>
                   <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
@@ -2639,7 +2666,12 @@ function ProductDetailPage({
         </div>
         <div className="detail-line">
           <span>Текущая стоимость</span>
-          <span>{valueText(valuation.value)}</span>
+          <span>
+            {valueText(valuation.value)}
+            {estimateNote(valuation) && (
+              <small className="muted"> · {estimateNote(valuation)}</small>
+            )}
+          </span>
         </div>
         <div className="detail-line">
           <span>Нереализованный P&L</span>

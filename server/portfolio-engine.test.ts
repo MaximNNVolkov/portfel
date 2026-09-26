@@ -158,7 +158,8 @@ test('суммы по группам и доли считаются от оце�
   assert.equal(stocks.positions, 3)
   assert.equal(stocks.invested, 150000) // 25 000 + 120 000 + 5 000 (вложено в позицию без цены известно)
   assert.equal(stocks.value, 191000) // 31 000 + 160 000, позиция без цены не подмешивается нулём
-  assert.equal(stocks.pnl, 41000)
+  assert.equal(stocks.pnl, 46000) // только оценённые позиции: без цены — не «−5 000» (§7.3)
+  assert.equal(stocks.pnlPercent, 31.7241) // 46 000 / 145 000
   assert.equal(stocks.priceUnavailable, 1)
 
   const bonds = result.groups.find((group) => group.group === 'Облигации')!
@@ -175,9 +176,28 @@ test('итог портфеля и флаг неполной оценки (§7.3
   const result = aggregateByGroup(portfolio, rub)
   assert.equal(result.value, 721820) // 191 000 + 9 820 + 521 000
   assert.equal(result.invested, 659000) // 150 000 + 9 000 + 500 000
-  assert.equal(result.pnl, 62820)
+  assert.equal(result.pnl, 67820) // 46 000 + 820 + 21 000; позиция без цены не даёт «−вложено»
+  assert.equal(result.pnlInvested, 654000)
   assert.equal(result.valuationIncomplete, true)
   assert.deepEqual(result.unavailable, [{ id: 'ghost', name: 'Без цены', group: 'Акции', reason: 'no-price' }])
+})
+
+// BUG-09: акция без котировки, но с введённой суммой — стоимость есть (приблизительная),
+// P&L нет. Вклад с той же формой ввода остаётся точной оценкой.
+test('котируемый инструмент без котировки оценивается приблизительно, без P&L', () => {
+  const share = evaluatePosition({ id: 's', type: 'Акции', currency: 'RUB', invested: 100000, value: 100000, quantity: 10 }, rub)
+  assert.equal(share.valueBase, 100000)
+  assert.equal(share.estimated, true)
+  assert.equal(share.priceUnavailable, false)
+  assert.equal(share.pnl, null)
+  assert.equal(share.pnlPercent, null)
+  const deposit = evaluatePosition({ id: 'd', type: 'Вклады', currency: 'RUB', invested: 100000, value: 100000 }, rub)
+  assert.equal(deposit.estimated, false)
+  assert.equal(deposit.pnl, 0)
+  const result = aggregateByGroup([{ id: 's', type: 'Акции', currency: 'RUB', invested: 100000, value: 100000, quantity: 10 }], rub)
+  assert.equal(result.value, 100000)
+  assert.equal(result.groups[0].estimated, 1)
+  assert.equal(result.pnlPercent, null) // нечем мерить — не «+0,0%»
 })
 
 test('группы отсортированы по стоимости, неизвестный тип попадает в «Прочее»', () => {
@@ -225,7 +245,7 @@ test('нулевая база: доходность не считается (б�
 
 test('агрегация и доходность стыкуются между собой', () => {
   const aggregate = aggregateByGroup(portfolio, rub)
-  const result = calculateReturns({ currentValue: aggregate.value, invested: aggregate.invested, payoutsReceived: 0 })
+  const result = calculateReturns({ currentValue: aggregate.pnlValue, invested: aggregate.pnlInvested, payoutsReceived: 0 })
   assert.equal(result.valueChange, aggregate.pnl)
 })
 

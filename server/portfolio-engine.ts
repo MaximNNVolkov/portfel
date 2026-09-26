@@ -94,6 +94,11 @@ export type PositionInput = {
 
 export type PriceUnavailableReason = 'no-price' | 'no-rate'
 
+// Группы, у которых есть биржевая котировка. Без неё сохранённая сумма (обычно цена
+// покупки) — лишь приблизительная оценка, и P&L от неё не считается (§7.3, BUG-09).
+// У вкладов, денег и «Прочего» котировок нет — введённая сумма и есть оценка.
+const QUOTED_GROUPS: ReadonlySet<AssetGroup> = new Set(['Облигации', 'Акции', 'Фонды'])
+
 export type PositionValuation = {
   id: string
   name: string
@@ -115,6 +120,8 @@ export type PositionValuation = {
   pnlPercent: number | null
   priceUnavailable: boolean
   priceUnavailableReason: PriceUnavailableReason | null
+  /** Котируемый инструмент без котировки: стоимость — введённая сумма, P&L не считается (§7.3). */
+  estimated: boolean
 }
 
 export type EngineContext = { baseCurrency: string; rates?: RateTable }
@@ -146,7 +153,8 @@ export function evaluatePosition(position: PositionInput, context?: EngineContex
 
   const invested = finite(position.invested) ?? (quantity !== null && averagePrice !== null ? quantity * averagePrice : null)
 
-  const marketValue = quantity !== null && currentPrice !== null ? quantity * currentPrice : finite(position.value)
+  const quoted = quantity !== null && currentPrice !== null
+  const marketValue = quoted ? quantity * currentPrice : finite(position.value)
   const accruedInterest = marketValue === null ? null : finite(position.accruedInterest)
   const fullValue = marketValue === null ? null : marketValue + (accruedInterest ?? 0)
 
@@ -157,7 +165,8 @@ export function evaluatePosition(position: PositionInput, context?: EngineContex
   const priceUnavailable = valueBase === null
   const reason: PriceUnavailableReason | null = !priceUnavailable ? null : fullValue === null ? 'no-price' : 'no-rate'
 
-  const pnl = valueBase !== null && investedBase !== null ? valueBase - investedBase : null
+  const estimated = !quoted && valueBase !== null && QUOTED_GROUPS.has(group)
+  const pnl = !estimated && valueBase !== null && investedBase !== null ? valueBase - investedBase : null
   const pnlPercent = pnl !== null && investedBase !== null && investedBase > 0 ? (pnl / investedBase) * 100 : null
 
   return {
@@ -176,6 +185,7 @@ export function evaluatePosition(position: PositionInput, context?: EngineContex
     pnlPercent: round4(pnlPercent),
     priceUnavailable,
     priceUnavailableReason: reason,
+    estimated,
   }
 }
 
@@ -194,6 +204,8 @@ export type GroupAggregate = {
   positions: number
   /** Сколько позиций группы не удалось оценить — их суммы не входят в value (§7.3). */
   priceUnavailable: number
+  /** Сколько позиций оценено приблизительно — они в value, но не в pnl (§7.3). */
+  estimated: number
 }
 
 export type PortfolioAggregate = {
@@ -201,8 +213,12 @@ export type PortfolioAggregate = {
   groups: GroupAggregate[]
   invested: number
   value: number
+  /** Сумма P&L позиций, у которых он известен; pnlPercent — к их же вложениям. */
   pnl: number
   pnlPercent: number | null
+  /** Вложено и стоимость только по позициям с известным P&L — база для доходности (§10.6). */
+  pnlInvested: number
+  pnlValue: number
   positions: PositionValuation[]
   /** true, если хотя бы одну позицию не удалось оценить: итог неполный и помечается в UI (§7.3, §40.2). */
   valuationIncomplete: boolean
@@ -219,10 +235,21 @@ export function aggregateByGroup(positions: PositionInput[], context: EngineCont
   let totalValue = 0
   let totalInvested = 0
   const unavailable: PortfolioAggregate['unavailable'] = []
+  // P&L складывается только из позиций, где он известен: позиция без цены или с
+  // приблизительной оценкой не должна давать ни «−вложено», ни «+0» (§7.3).
+  const pnlBase = new Map<AssetGroup, { invested: number; value: number }>()
+  const totalPnlBase = { invested: 0, value: 0 }
 
   for (const item of valuations) {
-    const bucket = buckets.get(item.group) ?? { group: item.group, invested: 0, value: 0, pnl: 0, pnlPercent: null, share: null, positions: 0, priceUnavailable: 0 }
+    const bucket = buckets.get(item.group) ?? { group: item.group, invested: 0, value: 0, pnl: 0, pnlPercent: null, share: null, positions: 0, priceUnavailable: 0, estimated: 0 }
     bucket.positions += 1
+    if (item.estimated) bucket.estimated += 1
+    if (item.pnl !== null && item.investedBase !== null && item.valueBase !== null) {
+      const base = pnlBase.get(item.group) ?? { invested: 0, value: 0 }
+      base.invested += item.investedBase; base.value += item.valueBase
+      pnlBase.set(item.group, base)
+      totalPnlBase.invested += item.investedBase; totalPnlBase.value += item.valueBase
+    }
     // Вложено известно всегда, когда есть cost basis, даже если текущей цены нет.
     if (item.investedBase !== null) { bucket.invested += item.investedBase; totalInvested += item.investedBase }
     if (item.valueBase !== null) { bucket.value += item.valueBase; totalValue += item.valueBase }
@@ -234,26 +261,29 @@ export function aggregateByGroup(positions: PositionInput[], context: EngineCont
   }
 
   const groups = [...buckets.values()].map((bucket) => {
-    const pnl = bucket.value - bucket.invested
+    const base = pnlBase.get(bucket.group) ?? { invested: 0, value: 0 }
+    const pnl = base.value - base.invested
     return {
       ...bucket,
       invested: round2(bucket.invested) as number,
       value: round2(bucket.value) as number,
       pnl: round2(pnl) as number,
-      pnlPercent: bucket.invested > 0 ? round4((pnl / bucket.invested) * 100) : null,
+      pnlPercent: base.invested > 0 ? round4((pnl / base.invested) * 100) : null,
       share: totalValue > 0 ? round4((bucket.value / totalValue) * 100) : null,
     }
   })
   groups.sort((left, right) => right.value - left.value || ASSET_GROUPS.indexOf(left.group) - ASSET_GROUPS.indexOf(right.group))
 
-  const pnl = totalValue - totalInvested
+  const pnl = totalPnlBase.value - totalPnlBase.invested
   return {
     baseCurrency: context.baseCurrency,
     groups,
     invested: round2(totalInvested) as number,
     value: round2(totalValue) as number,
     pnl: round2(pnl) as number,
-    pnlPercent: totalInvested > 0 ? round4((pnl / totalInvested) * 100) : null,
+    pnlPercent: totalPnlBase.invested > 0 ? round4((pnl / totalPnlBase.invested) * 100) : null,
+    pnlInvested: round2(totalPnlBase.invested) as number,
+    pnlValue: round2(totalPnlBase.value) as number,
     positions: valuations,
     valuationIncomplete: unavailable.length > 0,
     unavailable,
