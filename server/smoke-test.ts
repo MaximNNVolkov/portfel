@@ -197,6 +197,25 @@ async function run() {
       assert.equal(summary.json.total, 100000)
     })
 
+    // BUG-22 (FIX_PLAN 2.6): ожидаемая выплата с прошедшей датой — «просрочено»,
+    // в «Ожидается» не входит.
+    await test('просроченная выплата отделена от ожидаемых', async () => {
+      const before = await api('/api/portfolio/summary', { token: tokenA })
+      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест прошлый купон', amount: 1234, date: '2020-04-05', type: 'COUPON' } })
+      assert.equal(past.status, 201)
+      assert.equal(past.json.overdue, true)
+      const future = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест будущий купон', amount: 777, date: '2099-01-01', type: 'COUPON' } })
+      assert.equal(future.json.overdue, false)
+      const summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(summary.json.overdue, before.json.overdue + 1234)
+      assert.equal(summary.json.expected, before.json.expected + 777)
+      const received = await api(`/api/payouts/${past.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })
+      assert.equal(received.json.overdue, false)
+      for (const id of [past.json.id, future.json.id]) {
+        assert.equal((await api(`/api/payouts/${id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      }
+    })
+
     // BUG-15 (FIX_PLAN 2.3): тот же файл повторно не обрабатывается — сервер возвращает
     // прошлый документ. Воркер OCR в тесте не запущен, первый документ остаётся в очереди,
     // этого достаточно: совпадение ищется и среди ещё не обработанных загрузок.

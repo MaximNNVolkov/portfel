@@ -33,3 +33,7 @@
 :root[data-theme="dark"] .recommendation.warning { border-color: rgba(241,227,195,.35); background: rgba(255,250,240,.06); }
 .v2-badge { margin-left: 6px; padding: 1px 6px; border-radius: 4px; color: #a9c0ba; background: rgba(255,255,255,.1); font-size: 9px; font-weight: 700; letter-spacing: .5px; vertical-align: 1px; }
 .empty-option .v2-badge { color: var(--muted); background: var(--bg-subtle); }
+
+/* BUG-22: просроченные выплаты — отдельной группой над календарём. */
+.overdue-block { margin-bottom: 24px; }
+.overdue-block .list-row-actions { margin-top: 0; padding: 0 18px 14px; }

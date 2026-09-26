@@ -109,7 +109,13 @@ function transactionToWire(transaction: Transaction) {
     source: transaction.source,
   }
 }
-function payoutToWire(payout: Payout) {
+// «Сегодня» по местным часам сервера — граница между ожидаемыми и просроченными
+// выплатами (BUG-22). Не toISOString: в UTC после полуночи по Москве ещё «вчера».
+function localToday(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+function payoutToWire(payout: Payout, today = localToday()) {
   return {
     id: payout.id,
     title: payout.description ?? '',
@@ -122,6 +128,8 @@ function payoutToWire(payout: Payout) {
     instrumentId: payout.instrumentId,
     accountId: payout.accountId,
     transactionId: payout.transactionId,
+    // Ожидалась, но дата уже прошла (§22, BUG-22) — отдельная группа «Просрочено».
+    overdue: payout.status === 'expected' && payout.date < today,
   }
 }
 
@@ -489,7 +497,7 @@ app.get('/api/ocr/documents/:id', async (request, response) => {
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
+  const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId, localToday()), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), await engineContext(baseCurrency))
   // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
   // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
@@ -510,6 +518,7 @@ app.get('/api/portfolio/summary', async (request, response) => {
     profit: aggregate.pnl,
     profitPercent: aggregate.pnlPercent,
     expected: payouts.expected,
+    overdue: payouts.overdue,
     paid: payouts.received,
     cash,
     positions: positions.length,
@@ -622,7 +631,7 @@ async function defaultAccountId(client: Db, userId: string, currency = 'RUB'): P
 app.get('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const payouts = await listPayouts(db, userId, listOptions(request))
-  response.json(payouts.map(payoutToWire))
+  response.json(payouts.map((payout) => payoutToWire(payout)))
 })
 app.post('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return

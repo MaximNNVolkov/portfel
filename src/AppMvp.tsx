@@ -217,6 +217,8 @@ type Payment = {
   instrumentId?: string;
   accountId?: string;
   transactionId?: string;
+  /** Ожидалась, но дата уже прошла (BUG-22) — считается на бэкенде по его часам. */
+  overdue?: boolean;
 };
 type TransactionType =
   | "BUY"
@@ -274,6 +276,8 @@ type PortfolioSummary = {
   profit: number;
   profitPercent: number | null;
   expected: number;
+  // Ожидались, но дата прошла — в «Ожидается» не входят (BUG-22).
+  overdue: number;
   paid: number;
   // Свободные деньги (§7.1, §12) — сальдо денежных операций, посчитанное на бэкенде.
   // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
@@ -305,7 +309,10 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     profit,
     profitPercent: invested > 0 ? (profit / invested) * 100 : null,
     expected: payments
-      .filter((item) => item.status === "expected")
+      .filter(isUpcoming)
+      .reduce((sum, payment) => sum + payment.amount, 0),
+    overdue: payments
+      .filter(isOverdue)
       .reduce((sum, payment) => sum + payment.amount, 0),
     paid: payments
       .filter((item) => item.status === "received")
@@ -571,6 +578,18 @@ const dateLabel = (date: string) =>
   new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" })
     .format(new Date(`${date}T12:00:00`))
     .replace(".", "");
+// Сегодня по местному времени (toISOString дал бы дату по UTC — ночью это «вчера»).
+function todayIsoDate() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+// Просроченная выплата (§22, BUG-22). Флаг приходит с бэкенда; вычисление по дате —
+// только для офлайн-режима, где бэкенда нет.
+const isOverdue = (payment: Payment) =>
+  payment.overdue ??
+  (payment.status === "expected" && payment.date < todayIsoDate());
+const isUpcoming = (payment: Payment) =>
+  payment.status === "expected" && !isOverdue(payment);
 const fullDate = (date: string) =>
   new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
 // Показ готового P&L из Portfolio Engine (§10): фронт ничего не вычитает сам.
@@ -883,6 +902,28 @@ function AppMvp() {
     );
     setToast("Изменения сохранены");
     navigate(-1);
+  }
+  // Отметка просроченной выплаты полученной прямо из календаря (BUG-22) — без перехода
+  // на страницу правки: это смена статуса, а не редактирование содержимого.
+  async function markPaymentReceived(payment: Payment) {
+    let updated: Payment = { ...payment, status: "received", overdue: false };
+    if (apiOnline) {
+      const response = await fetch(`${apiUrl}/payouts/${payment.id}`, {
+        method: "PATCH",
+        headers: authHeaders,
+        body: JSON.stringify({ status: "received" }),
+      });
+      if (!response.ok) {
+        setToast("Не удалось отметить выплату полученной");
+        return;
+      }
+      updated = (await response.json()) as Payment;
+      await refreshSummary();
+    }
+    setPayments((current) =>
+      current.map((item) => (item.id === payment.id ? updated : item)),
+    );
+    setToast("Выплата отмечена полученной");
   }
   async function removePayment(id: string) {
     if (apiOnline) {
@@ -1260,7 +1301,13 @@ function AppMvp() {
           />
           <Route
             path="/payments"
-            element={<PaymentsPage payments={payments} products={products} />}
+            element={
+              <PaymentsPage
+                payments={payments}
+                products={products}
+                onMarkReceived={markPaymentReceived}
+              />
+            }
           />
           <Route
             path="/payments/new"
@@ -1366,7 +1413,7 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, invested, profit, profitPercent, paid, expected, cash, groups, valuation } =
+  const { total, invested, profit, profitPercent, paid, expected, overdue, cash, groups, valuation } =
     summary ?? localSummary(products, payments);
   const todayLabel = new Intl.DateTimeFormat("ru-RU", {
     weekday: "long",
@@ -1544,6 +1591,12 @@ function Dashboard({
             <span>Ожидается</span>
             <strong className="teal-text">{display(expected)}</strong>
           </div>
+          {overdue > 0 && (
+            <div className="metric-row">
+              <Link to="/payments">Просрочено — отметьте полученные</Link>
+              <strong className="danger-text">{display(overdue)}</strong>
+            </div>
+          )}
           <div className="metric-row">
             <span>Свободные деньги</span>
             <strong>
@@ -1623,7 +1676,11 @@ function Dashboard({
             </button>
           </div>
           <div className="payment-list">
-            {payments.slice(0, 3).map((payment) => (
+            {payments
+              .filter(isUpcoming)
+              .sort((a, b) => a.date.localeCompare(b.date))
+              .slice(0, 3)
+              .map((payment) => (
               <div className="payment-row" key={payment.id}>
                 <div className="date-box">
                   <strong>{dateLabel(payment.date).split(" ")[0]}</strong>
@@ -2036,9 +2093,11 @@ function PaymentRow({
 function PaymentsPage({
   payments,
   products,
+  onMarkReceived,
 }: {
   payments: Payment[];
   products: Product[];
+  onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<PaymentViewMode>("day");
@@ -2064,12 +2123,27 @@ function PaymentsPage({
     if (dateTo && payment.date > dateTo) return false;
     return true;
   });
-  const sorted = [...filtered].sort((a, b) => a.date.localeCompare(b.date));
+  // Просроченные — отдельной группой над календарём (BUG-22): в общий список и в суммы
+  // «ожидается» они не попадают, иначе прошедшие даты складываются с будущими.
+  const overduePayments = filtered
+    .filter(isOverdue)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = filtered
+    .filter((payment) => !isOverdue(payment))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const [markingId, setMarkingId] = useState<string | null>(null);
+  async function markReceived(payment: Payment) {
+    setMarkingId(payment.id);
+    try {
+      await onMarkReceived(payment);
+    } finally {
+      setMarkingId(null);
+    }
+  }
 
-  const now = new Date();
-  const currentMonthKey = periodKey(now.toISOString().slice(0, 10), "month");
+  const currentMonthKey = periodKey(todayIsoDate(), "month");
   const forecastAmount = payments
-    .filter((payment) => payment.status === "expected" && periodKey(payment.date, "month") === currentMonthKey)
+    .filter((payment) => isUpcoming(payment) && periodKey(payment.date, "month") === currentMonthKey)
     .reduce((sum, payment) => sum + payment.amount, 0);
 
   const groups = useMemo(() => {
@@ -2084,7 +2158,7 @@ function PaymentsPage({
       key,
       label: periodLabel(key, viewMode),
       items,
-      expected: items.filter((item) => item.status === "expected").reduce((sum, item) => sum + item.amount, 0),
+      expected: items.filter(isUpcoming).reduce((sum, item) => sum + item.amount, 0),
       received: items.filter((item) => item.status === "received").reduce((sum, item) => sum + item.amount, 0),
     }));
   }, [sorted, viewMode]);
@@ -2163,6 +2237,48 @@ function PaymentsPage({
           <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
         </label>
       </div>
+      {overduePayments.length > 0 && (
+        <section className="overdue-block">
+          <div className="section-heading compact">
+            <div>
+              <h2>Просрочено</h2>
+              <p>
+                Дата прошла, а выплата не отмечена полученной — в «Ожидается» не входит.
+                Если деньги пришли, отметьте её.
+              </p>
+            </div>
+          </div>
+          <div className="list-card">
+            {overduePayments.map((payment) => (
+              <div className="list-row" key={payment.id}>
+                <div className="list-row-summary list-row-static">
+                  <span className="list-row-main">
+                    <strong>{payment.title}</strong>
+                    <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
+                  </span>
+                  <span className="list-row-value">
+                    <strong>+{money(payment.amount)}</strong>
+                    <small className="danger-text">{fullDate(payment.date)} · просрочено</small>
+                  </span>
+                </div>
+                <div className="list-row-actions">
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={markingId === payment.id}
+                    onClick={() => void markReceived(payment)}
+                  >
+                    {markingId === payment.id ? "Сохраняем..." : "Отметить полученной"}
+                  </button>
+                  <Link className="outline-button" to={`/payments/${payment.id}/edit`}>
+                    Редактировать
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {sorted.length === 0 ? (
         <p className="muted">
           {payments.length === 0
@@ -3278,9 +3394,6 @@ const wizardTypeOptions: { value: AssetType; label: string; icon: string }[] = [
   { value: "Прочее", label: "Прочее", icon: "▧" },
 ];
 
-function todayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function ProductFormPage({
   token,
@@ -4006,6 +4119,9 @@ function PaymentFormPage({
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
   const [type, setType] = useState<PayoutType>("OTHER");
+  const [status, setStatus] = useState<PayoutStatus>("expected");
+  // Задним числом вводить выплаты законно — предупреждаем, но не запрещаем (BUG-22).
+  const pastExpected = Boolean(date) && date < todayIsoDate() && status === "expected";
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -4014,7 +4130,7 @@ function PaymentFormPage({
       amount: Number(amount),
       date,
       type,
-      status: "expected",
+      status,
       currency: "RUB",
     });
   };
@@ -4062,6 +4178,26 @@ function PaymentFormPage({
             ))}
           </select>
         </label>
+        <label>
+          Статус
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value as PayoutStatus)}
+          >
+            {Object.entries(payoutStatusLabels).map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {pastExpected && (
+          <small className="danger-text">
+            ⚠ Дата уже прошла. Выплата со статусом «Ожидается» попадёт в группу
+            «Просрочено» и не войдёт в ожидаемые суммы. Если деньги уже пришли —
+            выберите статус «Получено».
+          </small>
+        )}
         <button className="primary-button" type="submit">
           Добавить в календарь
         </button>

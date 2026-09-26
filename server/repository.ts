@@ -777,15 +777,23 @@ export async function deleteForecastPayouts(db: Db, userId: string): Promise<voi
 
 // Полученные и ожидаемые выплаты (§7.1). Мультивалютные выплаты суммируются как есть —
 // конверсия появится вместе с таблицей курсов ЦБ РФ (§13).
-export async function sumPayouts(db: Db, userId: string): Promise<{ expected: number; received: number }> {
+// BUG-22 (§22): ожидаемая выплата с датой в прошлом — не «ожидается», а «просрочено»:
+// деньги либо пришли и не отмечены, либо не пришли вовсе. Считается отдельно и в
+// «Ожидается» не складывается. today — дата «сегодня» по часам сервера (YYYY-MM-DD).
+export async function sumPayouts(db: Db, userId: string, today: string): Promise<{ expected: number; overdue: number; received: number }> {
   const result = await db.query(
     `SELECT
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected'), 0) AS expected,
+       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date >= $2::date), 0) AS expected,
+       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date < $2::date), 0) AS overdue,
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received'), 0) AS received
      ${PAYOUT_FROM} WHERE f.user_id = $1`,
-    [userId],
+    [userId, today],
   )
-  return { expected: Number(result.rows[0]?.expected ?? 0), received: Number(result.rows[0]?.received ?? 0) }
+  return {
+    expected: Number(result.rows[0]?.expected ?? 0),
+    overdue: Number(result.rows[0]?.overdue ?? 0),
+    received: Number(result.rows[0]?.received ?? 0),
+  }
 }
 
 // ---------------------------------------------------------------------------
