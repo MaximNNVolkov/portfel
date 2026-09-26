@@ -6,6 +6,7 @@ import {
   Navigate,
   Route,
   Routes,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -707,6 +708,19 @@ function chartPath(history: Snapshot[], close = false) {
 
 function AppMvp() {
   const navigate = useNavigate();
+  const location = useLocation();
+  // Выдвижное меню на мобильном (§40.1, BUG-25): тот же сайдбар, что и на десктопе,
+  // показывается поверх страницы по кнопке-гамбургеру.
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => setMenuOpen(false), [location.pathname]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [payments, setPayments] = useState<Payment[]>(initialPayments);
   const [transactions, setTransactions] =
@@ -1142,7 +1156,21 @@ function AppMvp() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      {menuOpen && (
+        <div
+          className="sidebar-overlay"
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        className={`sidebar ${menuOpen ? "open" : ""}`}
+        id="main-navigation"
+        onClick={(event) => {
+          // Выбор пункта меню закрывает выдвижную панель (на десктопе ни на что не влияет).
+          if ((event.target as HTMLElement).closest("a")) setMenuOpen(false);
+        }}
+      >
         <div className="brand">
           <span className="brand-mark">✳</span>
           <span>Капитал</span>
@@ -1210,10 +1238,13 @@ function AppMvp() {
             </button>
             <button
               className="mobile-menu"
-              aria-label="Открыть меню"
+              aria-label={menuOpen ? "Закрыть меню" : "Открыть меню"}
+              aria-expanded={menuOpen}
+              aria-controls="main-navigation"
+              onClick={() => setMenuOpen((open) => !open)}
               type="button"
             >
-              ☰
+              {menuOpen ? "✕" : "☰"}
             </button>
           </div>
         </header>
