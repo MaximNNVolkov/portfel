@@ -70,6 +70,17 @@ function post(url: string, token: string, payload: string): Promise<{ status: nu
   })
 }
 
+// Токен вставляют из приложения Т-Банка, часто с телефона: вместе с ним приезжают переносы
+// строк, пробелы, неразрывный пробел или невидимые символы форматирования (U+200B и т.п.).
+// Node отказывается ставить такое в заголовок Authorization (ERR_INVALID_CHAR), и раньше это
+// выглядело как «не удалось связаться». Настоящий токен — «t.» и base64url, без пробелов,
+// поэтому всё пробельное и невидимое вырезаем; если осталось что-то кроме печатного ASCII —
+// это не токен, и вызывающий код отвечает понятной ошибкой, не ходя в API.
+export function normalizeTinkoffToken(raw: string): string | null {
+  const token = raw.replace(/[\s\p{Cf}]/gu, '')
+  return /^[\x21-\x7e]+$/.test(token) ? token : null
+}
+
 async function call<T>(service: string, method: string, token: string, body: Record<string, unknown> = {}): Promise<T> {
   const { status, text } = await post(`${BASE_URL}.${service}/${method}`, token, JSON.stringify(body))
   if (status < 200 || status >= 300) {

@@ -11,7 +11,7 @@ import { Pool, types } from 'pg'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
-import { tinkoffConnector } from './brokers/tinkoff.ts'
+import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
   aggregateByGroup, aggregateByKey, calculateReturns, evaluatePosition,
   type Breakdown, type KeyedValuation,
@@ -271,7 +271,10 @@ app.get('/api/brokers/tinkoff', async (request, response) => {
 app.post('/api/brokers/tinkoff/connect', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const token = requiredText(request.body?.token, 'token')
+    const token = normalizeTinkoffToken(requiredText(request.body?.token, 'token'))
+    if (!token) {
+      return response.status(400).json({ error: 'В токене есть посторонние символы. Скопируйте его заново из приложения Т-Инвестиций — целиком, без кавычек и пояснений.' })
+    }
     const valid = await tinkoffConnector.validateToken(token)
     if (!valid) {
       return response.status(400).json({ error: 'Токен не подошёл. Проверьте, что он скопирован полностью и относится к боевому контуру Т-Инвестиций.' })
