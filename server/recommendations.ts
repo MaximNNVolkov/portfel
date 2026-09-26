@@ -28,6 +28,8 @@ export type Recommendation = {
 /** Всё, что правилам нужно знать про позицию — не зависит от репозитория/БД напрямую. */
 export type PositionSnapshot = {
   id: string
+  /** Одна бумага на нескольких счетах брокера — несколько позиций с общим инструментом. */
+  instrumentId?: string
   name: string
   group: AssetGroup
   issuer?: string
@@ -119,9 +121,18 @@ export function detectConcentration(
   if (totalValue <= 0) return []
   const results: Recommendation[] = []
 
+  // Доля инструмента — по всем его позициям: бумага, разложенная по двум счетам, не должна
+  // проскакивать под порог только потому, что на каждом счёте её меньше.
+  const byInstrument = new Map<string, { position: PositionSnapshot; value: number }>()
   for (const position of positions) {
     if (position.valueBase === null) continue
-    const share = (position.valueBase / totalValue) * 100
+    const key = position.instrumentId ?? position.id
+    const entry = byInstrument.get(key)
+    if (entry) entry.value += position.valueBase
+    else byInstrument.set(key, { position, value: position.valueBase })
+  }
+  for (const { position, value } of byInstrument.values()) {
+    const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
     results.push({
       ruleType: 'concentration',

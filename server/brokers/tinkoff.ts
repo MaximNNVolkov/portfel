@@ -99,6 +99,13 @@ function quotationToNumber(value: Quotation | undefined | null): number | null {
   return units + nano / 1e9
 }
 
+// Цену 0 брокер отдаёт у бумаг, которые не торгуются: заблокированные активы, делистинг,
+// дефолт. Это не стоимость 0, а её отсутствие — портфель должен показать «Актуальная цена
+// недоступна» (§7.3), а не обнулить позицию. Так же Т-Инвестиции и не включают их в итог.
+function knownPrice(value: number | null): number | null {
+  return value !== null && value > 0 ? value : null
+}
+
 interface TinkoffAccount { id: string; name?: string }
 interface TinkoffPortfolioPosition {
   figi?: string
@@ -108,6 +115,7 @@ interface TinkoffPortfolioPosition {
   averagePositionPrice?: MoneyValue
   currentPrice?: MoneyValue
   currentValue?: MoneyValue
+  currentNkd?: MoneyValue
   ticker?: string
   name?: string
   isin?: string
@@ -220,13 +228,16 @@ export const tinkoffConnector: BrokerConnector = {
           currency: (raw.averagePositionPrice?.currency || raw.currentPrice?.currency || info?.currency || 'RUB').toUpperCase(),
           assetType: ASSET_TYPE_MAP[raw.instrumentType || ''] || 'other',
         }
+        const quantity = quotationToNumber(raw.quantity) ?? 0
+        const nkd = quotationToNumber(raw.currentNkd)
         positions.push({
           accountExternalId: account.id,
           instrument,
-          quantity: quotationToNumber(raw.quantity) ?? 0,
+          quantity,
           averagePrice: quotationToNumber(raw.averagePositionPrice),
-          currentPrice: quotationToNumber(raw.currentPrice),
-          currentValue: quotationToNumber(raw.currentValue),
+          currentPrice: knownPrice(quotationToNumber(raw.currentPrice)),
+          currentValue: knownPrice(quotationToNumber(raw.currentValue)),
+          accruedInterest: nkd === null ? null : nkd * quantity,
         })
       }
 

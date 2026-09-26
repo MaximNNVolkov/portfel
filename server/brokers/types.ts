@@ -27,6 +27,8 @@ export interface BrokerPosition {
   averagePrice: number | null
   currentPrice: number | null
   currentValue: number | null
+  // НКД на всю позицию (§14), в валюте инструмента; null — у бумаги его нет.
+  accruedInterest?: number | null
 }
 
 export interface BrokerOperation {

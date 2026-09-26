@@ -9,7 +9,7 @@ import { getCbrRateTable, getMoexQuote } from './market-data.ts'
 import { aggregateByGroup, convertCurrency, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 import { forecastPayouts } from './payout-forecast.ts'
 import {
-  ensureAccount, ensurePortfolio, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
+  deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
   updatePositionMarketPrice, upsertSnapshot,
@@ -195,6 +195,20 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
   const data = await tinkoffConnector.fetchSyncData(token)
   const portfolio = await ensurePortfolio(client, userId, randomUUID())
   const instrumentIdByExternal = new Map<string, string>()
+  // Каждый счёт брокера — отдельный счёт в портфеле: одна бумага на двух счетах — две позиции.
+  const accountIdByExternal = new Map<string, string>()
+  for (const brokerAccount of data.accounts) {
+    const account = await ensureBrokerAccount(client, portfolio.id, randomUUID(), {
+      provider: TINKOFF_PROVIDER, externalId: brokerAccount.externalId, name: brokerAccount.name, currency: brokerAccount.currency,
+    })
+    accountIdByExternal.set(brokerAccount.externalId, account.id)
+  }
+  const brokerAccountId = (externalId: string): string => {
+    const id = accountIdByExternal.get(externalId)
+    if (!id) throw new Error(`T-Invest: счёт ${externalId} не пришёл в списке счетов`)
+    return id
+  }
+  const syncedPositionIds: string[] = []
 
   for (const brokerPosition of data.positions) {
     let instrument = await findInstrumentByKey(client, userId, {
@@ -227,37 +241,41 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
     }
     instrumentIdByExternal.set(brokerPosition.instrument.externalId, instrument.id)
 
-    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
-      type: 'broker', provider: TINKOFF_PROVIDER, currency: instrument.currency,
-    })
-    const existing = await findPositionByAccountInstrument(client, userId, account.id, instrument.id)
+    const accountId = brokerAccountId(brokerPosition.accountExternalId)
+    const existing = await findPositionByAccountInstrument(client, userId, accountId, instrument.id)
     const invested = brokerPosition.averagePrice !== null
       ? brokerPosition.averagePrice * brokerPosition.quantity
       : (existing?.invested ?? 0)
     const record: PositionRecord = {
       id: existing?.id ?? randomUUID(),
-      accountId: account.id,
+      accountId,
       instrumentId: instrument.id,
       quantity: brokerPosition.quantity,
       averagePrice: brokerPosition.averagePrice ?? undefined,
       currentPrice: brokerPosition.currentPrice ?? undefined,
       value: brokerPosition.currentValue ?? undefined,
+      accruedInterest: brokerPosition.accruedInterest ?? undefined,
       invested,
       source: 'broker',
       openedOn: existing?.openedOn,
     }
     if (existing) await updatePosition(client, userId, record)
     else await insertPosition(client, record)
+    syncedPositionIds.push(record.id)
   }
+  await deleteStaleBrokerPositions(client, portfolio.id, TINKOFF_PROVIDER, syncedPositionIds)
 
   for (const operation of data.operations) {
-    if (await findTransactionByExternalId(client, userId, operation.externalId)) continue
-    const account = await ensureAccount(client, portfolio.id, randomUUID(), {
-      type: 'broker', provider: TINKOFF_PROVIDER, currency: operation.currency,
-    })
+    const accountId = brokerAccountId(operation.accountExternalId)
+    const known = await findTransactionByExternalId(client, userId, operation.externalId)
+    if (known) {
+      // Операция загружена ещё в склеенный счёт прежней схемы — переносим на её настоящий счёт.
+      if (known.accountId !== accountId) await moveTransactionToAccount(client, known.id, accountId)
+      continue
+    }
     const transaction: Transaction = {
       id: randomUUID(),
-      accountId: account.id,
+      accountId,
       type: operation.type,
       date: operation.date.slice(0, 10),
       amount: operation.amount,
@@ -276,6 +294,7 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
   }
 
   await regenerateForecastPayouts(client, userId)
+  await deleteEmptyLegacyBrokerAccounts(client, portfolio.id, TINKOFF_PROVIDER)
   await recordSnapshot(client, userId)
 }
 

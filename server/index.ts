@@ -622,6 +622,7 @@ app.get('/api/recommendations', async (request, response) => {
     const valuation = valuationById.get(position.id)
     return {
       id: position.id,
+      instrumentId: position.instrumentId,
       name: position.instrument.name,
       group: valuation?.group ?? GROUP_LABELS[position.instrument.groupType] ?? 'Прочее',
       issuer: position.instrument.issuer,

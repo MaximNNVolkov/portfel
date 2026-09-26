@@ -31,6 +31,7 @@ export type Portfolio = { id: string; name: string; baseCurrency: string }
 export type Account = {
   id: string; portfolioId: string; type: AccountType; provider: string
   accountNumberMasked?: string; currency: string; status: string
+  externalId?: string; name?: string
 }
 
 // §11 Instrument + параметры облигаций (§14) и вкладов (§15).
@@ -224,12 +225,14 @@ function mapAccount(row: any): Account {
     accountNumberMasked: text(row.account_number_masked),
     currency: row.currency,
     status: row.status,
+    externalId: text(row.external_id),
+    name: text(row.name),
   }
 }
 
 export async function listAccounts(db: Db, userId: string): Promise<Account[]> {
   const result = await db.query(
-    `SELECT a.id, a.portfolio_id, a.type, a.provider, a.account_number_masked, a.currency, a.status
+    `SELECT a.id, a.portfolio_id, a.type, a.provider, a.account_number_masked, a.currency, a.status, a.external_id, a.name
        FROM portfolio.accounts a
        JOIN portfolio.portfolios f ON f.id = a.portfolio_id
       WHERE f.user_id = $1
@@ -248,18 +251,51 @@ export async function ensureAccount(
   account: { type: AccountType; provider: string; currency: string },
 ): Promise<Account> {
   const existing = await db.query(
-    `SELECT id, portfolio_id, type, provider, account_number_masked, currency, status
-       FROM portfolio.accounts WHERE portfolio_id = $1 AND provider = $2 AND currency = $3
+    `SELECT id, portfolio_id, type, provider, account_number_masked, currency, status, external_id, name
+       FROM portfolio.accounts WHERE portfolio_id = $1 AND provider = $2 AND currency = $3 AND external_id IS NULL
        ORDER BY created_at ASC LIMIT 1`,
     [portfolioId, account.provider, account.currency],
   )
   if (existing.rows[0]) return mapAccount(existing.rows[0])
   const result = await db.query(
     `INSERT INTO portfolio.accounts (id, portfolio_id, type, provider, currency) VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, portfolio_id, type, provider, account_number_masked, currency, status`,
+     RETURNING id, portfolio_id, type, provider, account_number_masked, currency, status, external_id, name`,
     [id, portfolioId, account.type, account.provider, account.currency],
   )
   return mapAccount(result.rows[0])
+}
+
+// Счёт брокера ищется по его id у брокера (external_id), а не по валюте: у пользователя
+// бывает несколько счетов у одного брокера, и одна бумага может лежать на нескольких.
+// Название счёта обновляется при каждой синхронизации — пользователь меняет его у брокера.
+export async function ensureBrokerAccount(
+  db: Db,
+  portfolioId: string,
+  id: string,
+  account: { provider: string; externalId: string; name?: string; currency: string },
+): Promise<Account> {
+  const result = await db.query(
+    `INSERT INTO portfolio.accounts (id, portfolio_id, type, provider, currency, external_id, name)
+     VALUES ($1, $2, 'broker', $3, $4, $5, $6)
+     ON CONFLICT (portfolio_id, provider, external_id) WHERE external_id IS NOT NULL
+     DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, portfolio_id, type, provider, account_number_masked, currency, status, external_id, name`,
+    [id, portfolioId, account.provider, account.currency, account.externalId, account.name ?? null],
+  )
+  return mapAccount(result.rows[0])
+}
+
+// Счета брокера без external_id — остаток прежней схемы, где все счета брокера были одним.
+// Удаляются, когда синхронизация перенесла с них операции и выплаты, а позиции убрала.
+export async function deleteEmptyLegacyBrokerAccounts(db: Db, portfolioId: string, provider: string): Promise<void> {
+  await db.query(
+    `DELETE FROM portfolio.accounts a
+      WHERE a.portfolio_id = $1 AND a.provider = $2 AND a.type = 'broker' AND a.external_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM portfolio.positions p WHERE p.account_id = a.id)
+        AND NOT EXISTS (SELECT 1 FROM portfolio.transactions t WHERE t.account_id = a.id)
+        AND NOT EXISTS (SELECT 1 FROM portfolio.payouts o WHERE o.account_id = a.id)`,
+    [portfolioId, provider],
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +438,14 @@ export async function deleteOrphanInstrument(db: Db, userId: string, id: string)
 // полученная такая выплата закрывает позицию, а в «Выплаты получено» не складывается.
 export const PRINCIPAL_PAYOUT_TYPES: PayoutType[] = ['DEPOSIT_PRINCIPAL', 'REDEMPTION']
 const PRINCIPAL_PAYOUT_SQL = PRINCIPAL_PAYOUT_TYPES.map((type) => `'${type}'`).join(', ')
+// Закрывает позицию не всякий возврат номинала. У амортизируемой облигации номинал
+// возвращается частями до самого погашения, и каждая часть приходит как REDEMPTION —
+// позиция при этом жива. Поэтому погашение закрывает облигацию, только если пришло в дату
+// погашения или позже (или дата неизвестна). Брокерскую облигацию REDEMPTION не закрывает
+// вовсе: полностью погашенную бумагу брокер сам убирает из портфеля, и синхронизация
+// удаляет её позицию.
+const CLOSING_PAYOUT_SQL = `o.type = 'DEPOSIT_PRINCIPAL' OR (o.type = 'REDEMPTION' AND p.source <> 'broker'
+      AND (i.maturity_date IS NULL OR o.payout_date >= i.maturity_date))`
 
 const POSITION_FIELDS = `
   p.id, p.account_id, p.quantity, p.average_price, p.current_price, p.current_value,
@@ -421,7 +465,7 @@ const POSITION_FROM = `
     FROM portfolio.payouts o
     WHERE o.account_id = p.account_id AND o.instrument_id = p.instrument_id
       AND o.status = 'received' AND o.type IN (${PRINCIPAL_PAYOUT_SQL})
-    HAVING COUNT(*) > 0
+    HAVING COUNT(*) FILTER (WHERE ${CLOSING_PAYOUT_SQL}) > 0
   ) closed ON TRUE`
 
 // Порядок общий для всех выборок позиций: он же определяет, какая позиция считается
@@ -543,6 +587,17 @@ export async function updatePositionMarketPrice(db: Db, userId: string, position
       WHERE p.id = $1 AND ${OWNED_POSITION}`,
     [position.id, userId, position.currentPrice ?? null, position.value ?? null,
       position.accruedInterest !== undefined, position.accruedInterest ?? null],
+  )
+}
+
+// Брокерские позиции, которых нет в свежем ответе брокера (продано, погашено, счёт закрыт),
+// из портфеля убираются: брокер — источник истины о составе своих счетов (§19).
+export async function deleteStaleBrokerPositions(db: Db, portfolioId: string, provider: string, keepIds: string[]): Promise<void> {
+  await db.query(
+    `DELETE FROM portfolio.positions p USING portfolio.accounts a
+      WHERE a.id = p.account_id AND a.portfolio_id = $1 AND a.provider = $2 AND p.source = 'broker'
+        AND NOT (p.id = ANY($3::uuid[]))`,
+    [portfolioId, provider, keepIds],
   )
 }
 
@@ -784,6 +839,13 @@ export async function deletePayout(db: Db, userId: string, id: string): Promise<
 // Выплата, созданная вместе с операцией (купон, дивиденд, проценты), живёт ровно столько,
 // сколько живёт сама операция: иначе после удаления операции в календаре остался бы
 // «полученный» доход без движения денег.
+// Перенос операции и её выплат на другой счёт — когда синхронизация узнала настоящий
+// счёт брокера для операции, загруженной ещё в склеенный счёт.
+export async function moveTransactionToAccount(db: Db, transactionId: string, accountId: string): Promise<void> {
+  await db.query('UPDATE portfolio.transactions SET account_id = $2 WHERE id = $1', [transactionId, accountId])
+  await db.query('UPDATE portfolio.payouts SET account_id = $2 WHERE transaction_id = $1', [transactionId, accountId])
+}
+
 export async function deletePayoutsForTransaction(db: Db, transactionId: string): Promise<void> {
   await db.query('DELETE FROM portfolio.payouts WHERE transaction_id = $1', [transactionId])
 }

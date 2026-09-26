@@ -43,6 +43,18 @@ test('инструмент выше порога — рекомендация с
   assert.match(instrumentRec!.text, /^Инструмент «ОФЗ 26238» \(группа «Облигации»\) занимает 31% портфеля$/)
 })
 
+test('одна бумага на двух счетах брокера — одна рекомендация с суммарной долей', () => {
+  const positions: PositionSnapshot[] = [
+    position({ id: 'tpay-1', instrumentId: 'tpay', name: 'Пассивный доход', group: 'Фонды', valueBase: 200000 }),
+    position({ id: 'tpay-2', instrumentId: 'tpay', name: 'Пассивный доход', group: 'Фонды', valueBase: 100000 }),
+    position({ id: 'rest', name: 'Остальное', group: 'Акции', valueBase: 700000 }),
+  ]
+  const instrumentRecs = detectConcentration(positions, 1000000)
+    .filter((rec) => rec.payload.kind === 'instrument' && rec.payload.name === 'Пассивный доход')
+  assert.equal(instrumentRecs.length, 1)
+  assert.equal(instrumentRecs[0].payload.sharePercent, 30)
+})
+
 test('ниже порога — рекомендаций нет', () => {
   const positions: PositionSnapshot[] = [
     position({ id: 'a', name: 'A', group: 'Облигации', valueBase: 200000 }),
