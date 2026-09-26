@@ -183,14 +183,17 @@ app.post('/api/auth/register', authLimiter, async (request, response) => {
     if (registrationInviteCode) {
       const provided = typeof request.body?.inviteCode === 'string' ? request.body.inviteCode.trim() : ''
       if (provided !== registrationInviteCode) {
-        return response.status(403).json({ error: 'Неверный код приглашения' })
+        return response.status(403).json({ error: 'Неверный код приглашения', field: 'inviteCode' })
       }
     }
-    const email = requiredText(request.body?.email, 'email').toLowerCase()
-    const password = requiredText(request.body?.password, 'password')
-    if (password.length < 8) return response.status(400).json({ error: 'Password must contain at least 8 characters' })
+    // Тексты ошибок показываются на экране входа под соответствующим полем (BUG-03),
+    // поэтому они русские и указывают поле.
+    const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : ''
+    const password = typeof request.body?.password === 'string' ? request.body.password : ''
+    if (!email) return response.status(400).json({ error: 'Укажите email', field: 'email' })
+    if (password.length < 8) return response.status(400).json({ error: 'Пароль должен быть не короче 8 символов', field: 'password' })
     const existing = await db.query('SELECT 1 FROM users WHERE email = $1', [email])
-    if (existing.rowCount) return response.status(409).json({ error: 'Email already registered' })
+    if (existing.rowCount) return response.status(409).json({ error: 'Аккаунт с таким email уже зарегистрирован', field: 'email' })
     const salt = randomBytes(16).toString('hex'); const user = { id: randomUUID(), email, passwordHash: hashPassword(password, salt), salt }
     await db.query('INSERT INTO users (id, email, password_hash, salt) VALUES ($1, $2, $3, $4)', [user.id, user.email, user.passwordHash, user.salt])
     users.set(user.id, user); const token = await createSession(user.id)
@@ -202,7 +205,7 @@ app.post('/api/auth/login', authLimiter, async (request, response) => {
   const password = typeof request.body?.password === 'string' ? request.body.password : ''
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users WHERE email = $1', [email])
   const user = result.rows[0] as User | undefined
-  if (!user || !timingSafeEqual(Buffer.from(user.passwordHash, 'hex'), Buffer.from(hashPassword(password, user.salt), 'hex'))) return response.status(401).json({ error: 'Invalid email or password' })
+  if (!user || !timingSafeEqual(Buffer.from(user.passwordHash, 'hex'), Buffer.from(hashPassword(password, user.salt), 'hex'))) return response.status(401).json({ error: 'Неверный email или пароль', field: 'password' })
   const token = await createSession(user.id); response.json({ token, user: { id: user.id, email: user.email } })
 })
 app.post('/api/auth/logout', async (request, response) => {

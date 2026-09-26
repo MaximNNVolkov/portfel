@@ -41,3 +41,5 @@
 /* BUG-25 (§40.1): выдвижное меню на мобильном — тот же сайдбар поверх страницы. */
 .sidebar-overlay { display: none; }
 @media (max-width: 680px) { .sidebar.open { display: flex; position: fixed; top: 0; bottom: 0; left: 0; z-index: 50; width: min(280px, 85vw); overflow-y: auto; box-shadow: 0 0 40px rgba(0,0,0,.35); }.sidebar-overlay { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.45); }.mobile-menu { position: relative; z-index: 60; } }
+/* BUG-03: ошибки входа — под полем, красным, а не серой подписью формы. */
+.login-card .form-error { color: var(--danger); text-align: left; font-size: 11px; }

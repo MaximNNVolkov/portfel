@@ -1130,27 +1130,36 @@ function AppMvp() {
     setToast("Операция удалена");
     navigate("/transactions");
   }
+  // Возвращает ошибку для показа на самом экране входа (BUG-03): тост рендерится внутри
+  // app-shell, которого до входа нет, и раньше ошибка просто терялась.
   async function signIn(
-    event: FormEvent<HTMLFormElement>,
+    form: FormData,
     mode: "login" | "register",
-  ) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const response = await fetch(`${apiUrl}/auth/${mode}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: form.get("email"),
-        password: form.get("password"),
-        // Код приглашения нужен только при регистрации и только если сервер его
-        // требует (REGISTRATION_INVITE_CODE, §28) — при входе поле не отправляется.
-        ...(mode === "register" ? { inviteCode: form.get("inviteCode") } : {}),
-      }),
-    });
+  ): Promise<LoginError | null> {
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}/auth/${mode}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: form.get("email"),
+          password: form.get("password"),
+          // Код приглашения нужен только при регистрации и только если сервер его
+          // требует (REGISTRATION_INVITE_CODE, §28) — при входе поле не отправляется.
+          ...(mode === "register" ? { inviteCode: form.get("inviteCode") } : {}),
+        }),
+      });
+    } catch {
+      return { field: "form", message: "Не удалось связаться с сервером. Проверьте подключение и попробуйте ещё раз." };
+    }
     if (!response.ok) {
-      const result = (await response.json()) as { error?: string };
-      setToast(result.error || "Не удалось войти");
-      return;
+      const result = (await response.json().catch(() => ({}))) as { error?: string; field?: LoginField };
+      return {
+        field: result.field ?? "form",
+        message:
+          result.error ||
+          (mode === "register" ? "Не удалось создать аккаунт" : "Не удалось войти"),
+      };
     }
     const result = (await response.json()) as { token: string };
     localStorage.setItem(tokenKey, result.token);
@@ -1158,6 +1167,7 @@ function AppMvp() {
     setToast(
       mode === "register" ? "Аккаунт создан" : "Добро пожаловать в Капитал",
     );
+    return null;
   }
   async function signOut() {
     if (apiOnline) {
@@ -3252,18 +3262,35 @@ function Page({
     </div>
   );
 }
+type LoginField = "email" | "password" | "inviteCode" | "form";
+type LoginError = { field: LoginField; message: string };
 function Login({
   onSubmit,
 }: {
-  onSubmit: (
-    event: FormEvent<HTMLFormElement>,
-    mode: "login" | "register",
-  ) => void;
+  onSubmit: (form: FormData, mode: "login" | "register") => Promise<LoginError | null>;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [error, setError] = useState<LoginError | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const errorFor = (field: LoginField) =>
+    error?.field === field ? (
+      <small className="form-error" role="alert">
+        {error.message}
+      </small>
+    ) : null;
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      setError(await onSubmit(new FormData(event.currentTarget), mode));
+    } finally {
+      setSubmitting(false);
+    }
+  }
   return (
     <div className="login-screen">
-      <form className="login-card" onSubmit={(event) => onSubmit(event, mode)}>
+      <form className="login-card" onSubmit={(event) => void handleSubmit(event)}>
         <div className="brand login-brand">
           <span className="brand-mark">✳</span> Капитал
         </div>
@@ -3276,7 +3303,9 @@ function Login({
             type="email"
             placeholder="you@example.com"
             required
+            aria-invalid={error?.field === "email"}
           />
+          {errorFor("email")}
         </label>
         <label>
           Пароль
@@ -3286,7 +3315,9 @@ function Login({
             placeholder="Минимум 8 символов"
             minLength={8}
             required
+            aria-invalid={error?.field === "password"}
           />
+          {errorFor("password")}
         </label>
         {mode === "register" && (
           <label>
@@ -3296,15 +3327,25 @@ function Login({
               type="text"
               placeholder="Выдаётся владельцем стенда"
               autoComplete="off"
+              aria-invalid={error?.field === "inviteCode"}
             />
+            {errorFor("inviteCode")}
           </label>
         )}
-        <button className="primary-button" type="submit">
-          {mode === "login" ? "Войти в портфель" : "Зарегистрироваться"}
+        {errorFor("form")}
+        <button className="primary-button" type="submit" disabled={submitting}>
+          {submitting
+            ? "Проверяем..."
+            : mode === "login"
+              ? "Войти в портфель"
+              : "Зарегистрироваться"}
         </button>
         <button
           className="text-button auth-switch"
-          onClick={() => setMode(mode === "login" ? "register" : "login")}
+          onClick={() => {
+            setMode(mode === "login" ? "register" : "login");
+            setError(null);
+          }}
           type="button"
         >
           {mode === "login"
