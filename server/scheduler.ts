@@ -3,6 +3,7 @@ import { Pool, types } from 'pg'
 import { logError } from './logger.ts'
 import { decryptToken } from './token-crypto.ts'
 import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
+import { listPendingMigrations } from './migrations.ts'
 import { processNextDocument } from './ocr.ts'
 import {
   failStaleProcessingDocuments, findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
@@ -128,6 +129,32 @@ async function staleDocumentLoop(): Promise<void> {
   }
 }
 
+// API и планировщик перезапускаются одновременно, а миграции применяет только API: без этого
+// ожидания первый опрос очереди OCR после деплоя с новой миграцией падал на несуществующей
+// колонке (content_hash, claimed_at). Ошибка БД здесь — тоже повод подождать, а не упасть:
+// база может подниматься вместе с сервисами.
+const SCHEMA_WAIT_SECONDS = Number(process.env.SCHEDULER_SCHEMA_WAIT_SECONDS || 2)
+
+async function waitForSchema(): Promise<void> {
+  let reported = false
+  for (;;) {
+    const pending = await listPendingMigrations(db).catch((error) => {
+      logError('scheduler.schema-check', error)
+      return null
+    })
+    if (pending && !pending.length) {
+      if (reported) console.log(`[scheduler] ${new Date().toISOString()} schema is up to date, starting`)
+      return
+    }
+    if (pending && !reported) {
+      console.log(`[scheduler] ${new Date().toISOString()} waiting for API to apply migrations: ${pending.map((migration) => migration.name).join(', ')}`)
+      reported = true
+    }
+    await sleep(SCHEMA_WAIT_SECONDS)
+  }
+}
+
+await waitForSchema()
 dailyLoop()
 ocrLoop()
 staleDocumentLoop()

@@ -66,6 +66,18 @@ export async function runMigrations(db: Pool, directory = MIGRATIONS_DIR): Promi
   }
 }
 
+// Миграции применяет только API при старте. Процессы, которые его не заменяют (планировщик),
+// спрашивают здесь, догнала ли база схему из db/migrations, — иначе после деплоя с новой
+// миграцией их первые запросы падают на ещё не созданных колонках.
+export async function listPendingMigrations(db: Pool, directory = MIGRATIONS_DIR): Promise<Migration[]> {
+  const migrations = await loadMigrations(directory)
+  const table = await db.query("SELECT to_regclass('schema_migrations') AS name")
+  if (!table.rows[0]?.name) return migrations
+  const executed = await db.query('SELECT id FROM schema_migrations')
+  const executedIds = new Set<string>(executed.rows.map((row) => row.id))
+  return migrations.filter((migration) => !executedIds.has(migration.id))
+}
+
 const isDirectRun = process.argv[1] ? resolve(process.argv[1]) === fileURLToPath(import.meta.url) : false
 if (isDirectRun) {
   const db = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel', max: 1 })
