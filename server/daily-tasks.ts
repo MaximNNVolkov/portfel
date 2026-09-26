@@ -10,7 +10,7 @@ import { aggregateByGroup, convertCurrency, type AssetGroup, type EngineContext,
 import { forecastPayouts } from './payout-forecast.ts'
 import {
   ensureAccount, ensurePortfolio, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
-  findTransactionByExternalId, insertInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
+  findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
   updatePositionMarketPrice, upsertSnapshot,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
@@ -215,6 +215,15 @@ export async function performTinkoffSync(client: Db, userId: string, token: stri
         couponRate: brokerPosition.instrument.couponRate,
       }
       await insertInstrument(client, userId, instrument)
+    } else if (instrument.source === 'broker') {
+      // Справочные поля брокерской бумаги — за брокером: так ранее загруженные позиции
+      // получают название вместо тикера и заглавный код валюты при следующей синхронизации.
+      const fresh = brokerPosition.instrument
+      const updated = { ...instrument, name: fresh.name, isin: fresh.isin ?? instrument.isin, currency: fresh.currency }
+      if (updated.name !== instrument.name || updated.isin !== instrument.isin || updated.currency !== instrument.currency) {
+        await updateInstrument(client, userId, updated)
+        instrument = updated
+      }
     }
     instrumentIdByExternal.set(brokerPosition.instrument.externalId, instrument.id)
 

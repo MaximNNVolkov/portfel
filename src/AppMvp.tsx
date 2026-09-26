@@ -994,6 +994,21 @@ function AppMvp() {
     });
     if (response.ok) setBrokerStatus((await response.json()) as BrokerStatus);
   }
+  // Синхронизация брокера меняет состав портфеля целиком: без перезагрузки
+  // всех наборов «Портфель» оставался пустым до F5, хотя Аналитика (своя загрузка) уже
+  // показывала импортированные позиции.
+  async function refreshAfterBrokerSync() {
+    const [transactionsResponse, historyResponse] = await Promise.all([
+      apiFetch(`${apiUrl}/transactions`, { headers: authHeaders }),
+      apiFetch(`${apiUrl}/portfolio/history`, { headers: authHeaders }),
+      refreshProducts(),
+      refreshSummary(),
+      refreshPayments(),
+      refreshBrokerStatus(),
+    ]);
+    if (transactionsResponse.ok) setTransactions((await transactionsResponse.json()) as Transaction[]);
+    if (historyResponse.ok) setHistory((await historyResponse.json()) as Snapshot[]);
+  }
   async function addProduct(product: Product) {
     if (apiOnline) {
       const response = await apiFetch(`${apiUrl}/positions`, {
@@ -1544,7 +1559,7 @@ function AppMvp() {
           <Route
             path="/integrations"
             element={
-              <Integrations token={token} onStatusChange={withErrorToast(refreshBrokerStatus, "Не удалось обновить статус брокера")} />
+              <Integrations token={token} onStatusChange={withErrorToast(refreshBrokerStatus, "Не удалось обновить статус брокера")} onDataChange={withErrorToast(refreshAfterBrokerSync, "Не удалось обновить данные портфеля")} />
             }
           />
           <Route
@@ -3317,9 +3332,11 @@ function Settings({
 function Integrations({
   token,
   onStatusChange,
+  onDataChange,
 }: {
   token: string;
   onStatusChange: () => void;
+  onDataChange: () => Promise<void>;
 }) {
   const [brokerToken, setBrokerToken] = useState("");
   const [status, setStatus] = useState("disconnected");
@@ -3397,6 +3414,7 @@ function Integrations({
       };
       setMessage(result.message || result.error || "");
       await loadStatus();
+      if (response.ok) await onDataChange();
     } catch (error) {
       setMessage(errorText(error, "Не удалось синхронизировать портфель"));
     } finally {

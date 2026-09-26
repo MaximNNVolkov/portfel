@@ -112,6 +112,26 @@ interface TinkoffPortfolioPosition {
   name?: string
   isin?: string
 }
+// InstrumentsService.GetInstrumentBy — GetPortfolio не отдаёт ни названия, ни ISIN бумаги,
+// только тикер (у облигаций он совпадает с ISIN): без этого запроса в портфеле стояли «MOEX»
+// и «RU000A1075S4» вместо «Московская Биржа» и названия выпуска.
+interface TinkoffInstrumentInfo { name?: string; ticker?: string; isin?: string; currency?: string }
+
+async function fetchInstrumentInfo(token: string, uid: string): Promise<TinkoffInstrumentInfo | undefined> {
+  try {
+    const { instrument } = await call<{ instrument?: TinkoffInstrumentInfo }>('InstrumentsService', 'GetInstrumentBy', token, {
+      idType: 'INSTRUMENT_ID_TYPE_UID',
+      id: uid,
+    })
+    return instrument
+  } catch (error) {
+    // Справка об инструменте — украшение, а не данные портфеля: при сбое остаётся тикер,
+    // но протухший токен должен ронять синхронизацию, как и остальные вызовы.
+    if (error instanceof TinkoffApiError && (error.status === 401 || error.status === 403)) throw error
+    return undefined
+  }
+}
+
 interface TinkoffOperation {
   id?: string
   parentOperationId?: string
@@ -178,6 +198,7 @@ export const tinkoffConnector: BrokerConnector = {
 
     const positions: BrokerPosition[] = []
     const operations: BrokerOperation[] = []
+    const instrumentInfo = new Map<string, TinkoffInstrumentInfo | undefined>()
 
     for (const account of accounts) {
       const portfolio = await call<{ positions?: TinkoffPortfolioPosition[] }>(PORTFOLIO_SERVICE, PORTFOLIO_METHOD, token, {
@@ -186,12 +207,17 @@ export const tinkoffConnector: BrokerConnector = {
       for (const raw of portfolio.positions ?? []) {
         const instrumentExternalId = raw.instrumentUid || raw.figi || raw.ticker || ''
         if (!instrumentExternalId) continue
+        if (raw.instrumentUid && !instrumentInfo.has(raw.instrumentUid)) {
+          instrumentInfo.set(raw.instrumentUid, await fetchInstrumentInfo(token, raw.instrumentUid))
+        }
+        const info = raw.instrumentUid ? instrumentInfo.get(raw.instrumentUid) : undefined
         const instrument: BrokerInstrument = {
           externalId: instrumentExternalId,
-          isin: raw.isin,
-          ticker: raw.ticker,
-          name: raw.name || raw.ticker || instrumentExternalId,
-          currency: raw.averagePositionPrice?.currency || raw.currentPrice?.currency || 'RUB',
+          isin: raw.isin || info?.isin || undefined,
+          ticker: raw.ticker || info?.ticker,
+          name: raw.name || info?.name || raw.ticker || instrumentExternalId,
+          // API отдаёт код валюты строчными («rub»), остальное приложение — ISO-заглавными.
+          currency: (raw.averagePositionPrice?.currency || raw.currentPrice?.currency || info?.currency || 'RUB').toUpperCase(),
           assetType: ASSET_TYPE_MAP[raw.instrumentType || ''] || 'other',
         }
         positions.push({
@@ -226,7 +252,7 @@ export const tinkoffConnector: BrokerConnector = {
           quantity: raw.quantity !== undefined ? Number(raw.quantity) : undefined,
           price: quotationToNumber(raw.price) ?? undefined,
           amount: Math.abs(quotationToNumber(raw.payment) ?? 0),
-          currency: raw.currency || raw.payment?.currency || 'RUB',
+          currency: (raw.currency || raw.payment?.currency || 'RUB').toUpperCase(),
           commission: raw.commission ? Math.abs(quotationToNumber(raw.commission) ?? 0) : undefined,
           description: raw.description,
         })
