@@ -40,7 +40,7 @@ test('инструмент выше порога — рекомендация с
   const instrumentRec = result.find((rec) => rec.payload.kind === 'instrument')
   assert.ok(instrumentRec, 'должна быть рекомендация по инструменту')
   assert.equal(instrumentRec!.payload.sharePercent, 31)
-  assert.match(instrumentRec!.text, /ОФЗ 26238.*31%/)
+  assert.match(instrumentRec!.text, /^Инструмент «ОФЗ 26238» \(группа «Облигации»\) занимает 31% портфеля$/)
 })
 
 test('ниже порога — рекомендаций нет', () => {

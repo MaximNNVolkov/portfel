@@ -125,7 +125,7 @@ export function detectConcentration(
     if (share <= rules.concentrationThresholdPercent) continue
     results.push({
       ruleType: 'concentration',
-      text: `«${position.name}» занимает ${round1(share)}% портфеля`,
+      text: `Инструмент «${position.name}» (группа «${position.group}») занимает ${round1(share)}% портфеля`,
       payload: { kind: 'instrument', id: position.id, name: position.name, sharePercent: round1(share) },
     })
   }
