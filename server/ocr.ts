@@ -122,10 +122,130 @@ export function groupOcrLines(text: string): OcrBlock[] {
   return blocks
 }
 
-export function buildOcrCandidates(text: string) {
+export type OcrCandidate = {
+  name: string
+  type: AssetGroup
+  amount: number
+  invested: number
+  currency: string
+  deltaPercent: number
+  confidence: number
+  missingFields: string[]
+  // Поля карточки продукта, прочитанные по подписям (дата открытия, ставка, банк…) —
+  // уходят в createPosition как есть, в том же виде, что и поля ручного ввода (§17).
+  details?: Record<string, unknown>
+}
+
+// «22.08.2024» → «2024-08-22». Всё, что не похоже на дату, — undefined.
+export function parseRuDate(value: string | undefined): string | undefined {
+  const match = value?.match(/(\d{2})[./](\d{2})[./](\d{4})/)
+  if (!match) return undefined
+  const [, day, month, year] = match
+  const iso = `${year}-${month}-${day}`
+  return Number.isNaN(Date.parse(iso)) ? undefined : iso
+}
+
+// Карточка вклада из приложения банка — это не список продуктов, а один продукт,
+// расписанный строками «подпись — значение» («Ставка 20%», «Дата открытия 22.08.2024»).
+// Построчный разбор принимал каждую такую строку за отдельный вклад (замечание владельца
+// 27.09.2026), поэтому карточка узнаётся по подписям и собирается в одну запись.
+// Две подписи в одной строке («Сумма вклада Ставка») означают, что значения стоят
+// строкой ниже в том же порядке («10 000 ₽ 20%»).
+const DEPOSIT_LABELS: Array<[key: string, pattern: RegExp]> = [
+  ['amount', /сумма вклада|сумма на вкладе|сумма депозита|текущая сумма|баланс вклада/i],
+  ['rate', /(?:процентная )?ставка/i],
+  ['opened', /дата открытия|открыт(?:\s|$)/i],
+  ['closes', /дата (?:закрытия|окончания|возврата)|действует до|окончание срока/i],
+  ['term', /срок(?: вклада)?(?=\s|$)/i],
+  ['bank', /^банк(?=\s|$)/i],
+  ['product', /^(?:вклад|депозит|название вклада)(?=\s|$)/i],
+  ['capitalization', /капитализац/i],
+  ['replenishable', /пополнени/i],
+  ['partialWithdrawal', /частичное снятие/i],
+  ['payout', /выплата процентов/i],
+]
+const CARD_MARKERS = ['amount', 'rate', 'opened', 'closes', 'term']
+
+function labelsIn(line: string): string[] {
+  return DEPOSIT_LABELS.filter(([, pattern]) => pattern.test(line)).map(([key]) => key)
+}
+function yesNo(value: string | undefined): boolean | undefined {
+  // Ответ стоит в конце строки: подпись («Капитализация процентов») обрезается
+  // не целиком, поэтому начало значения ненадёжно.
+  const answer = value?.trim().split(/\s+/).pop()?.toLowerCase()
+  if (!answer) return undefined
+  if (/^(да|есть|возможно)$/.test(answer)) return true
+  if (/^(нет|невозможно)$/.test(answer)) return false
+  return undefined
+}
+
+export function parseDepositCard(text: string): OcrCandidate | null {
+  const lines = text.split(/\n|\r/).map((line) => line.trim()).filter(Boolean)
+  const fields: Record<string, string> = {}
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const keys = labelsIn(line)
+    if (!keys.length) continue
+    const [key, pattern] = DEPOSIT_LABELS.find(([name]) => name === keys[0])!
+    const rest = line.replace(pattern, '').replace(/^[\s:—-]+/, '').trim()
+    if (keys.length === 1 && rest) {
+      fields[key] ??= rest
+      continue
+    }
+    // Подписи без значений в строке — значения строкой ниже.
+    const next = lines[index + 1]
+    if (!next || labelsIn(next).length) continue
+    if (keys.includes('amount')) fields.amount ??= next.replace(/\d+(?:[.,]\d+)?\s*%/g, '')
+    if (keys.includes('rate')) fields.rate ??= next.match(/\d+(?:[.,]\d+)?\s*%/)?.[0] ?? ''
+    if (keys.length === 1 && !keys.includes('amount') && !keys.includes('rate')) fields[key] ??= next
+  }
+  if (CARD_MARKERS.filter((key) => fields[key]).length < 2) return null
+
+  const amount = fields.amount ? extractNumbers(stripIdentifiers(fields.amount)).filter((value) => value > 0)[0] ?? 0 : 0
+  const rate = fields.rate ? parseNumber(fields.rate.match(/\d+(?:[.,]\d+)?/)?.[0] ?? '') : 0
+  const openedOn = parseRuDate(fields.opened)
+  // Дата окончания — из явной подписи, иначе из «до 27.08.2027» в шапке карточки.
+  const termEndDate = parseRuDate(fields.closes) ?? parseRuDate(text.match(/до\s+\d{2}[./]\d{2}[./]\d{4}/i)?.[0])
+  const bank = fields.bank?.trim()
+  const product = fields.product?.trim()
+  const name = product || (bank ? `Вклад ${bank}` : 'Вклад')
+  const payout = fields.payout?.toLowerCase()
+
+  const details: Record<string, unknown> = {
+    rate: rate > 0 ? rate : undefined,
+    termEndDate,
+    date: openedOn,
+    institution: bank,
+    capitalization: yesNo(fields.capitalization),
+    replenishable: yesNo(fields.replenishable),
+    partialWithdrawal: yesNo(fields.partialWithdrawal),
+    interestPayoutFrequency: payout && /ежемесяч|ежекварталь/.test(payout) ? payout : undefined,
+  }
+  const missingFields: string[] = []
+  if (!(amount > 0)) missingFields.push('amount')
+  if (!openedOn) missingFields.push('date')
+  if (!termEndDate) missingFields.push('termEndDate')
+  if (!(rate > 0)) missingFields.push('rate')
+  return {
+    name: toCandidateName(name),
+    type: 'Вклады',
+    amount,
+    invested: amount,
+    currency: normalizeCurrency(fields.amount ?? text),
+    deltaPercent: 0,
+    confidence: amount > 0 ? 0.8 : 0.4,
+    missingFields,
+    details: Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined)),
+  }
+}
+
+export function buildOcrCandidates(text: string): OcrCandidate[] {
+  const card = parseDepositCard(text)
+  if (card) return [card]
+
   const blocks = groupOcrLines(text).filter((block) => block.text.length > 4)
 
-  const candidates: Array<{ name: string; type: AssetGroup; amount: number; invested: number; currency: string; deltaPercent: number; confidence: number; missingFields: string[] }> = []
+  const candidates: OcrCandidate[] = []
 
   for (const { text: block, name: blockName } of blocks) {
     // Суммы ищутся в строке без идентификаторов: номер выпуска не сумма (BUG-12).
@@ -263,12 +383,13 @@ export async function processDocument(db: Pool, document: UploadedDocument): Pro
         for (const candidate of recognized) {
           duplicates.push(isPossibleDuplicate(candidate, existing))
           const position = await createPosition(client, document.userId, {
+            ...candidate.details,
             name: candidate.name,
             type: candidate.type,
             amount: candidate.amount,
             invested: candidate.invested > 0 ? candidate.invested : candidate.amount,
-            date,
-            institution: 'Проверьте источник',
+            date: typeof candidate.details?.date === 'string' ? candidate.details.date : date,
+            institution: typeof candidate.details?.institution === 'string' ? candidate.details.institution : 'Проверьте источник',
             currency: candidate.currency,
           }, 'ocr')
           created.push(position)

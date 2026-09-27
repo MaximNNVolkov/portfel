@@ -6,7 +6,7 @@
 // в БД и в tesseract, поэтому проверяется вручную на живом стенде.
 
 import assert from 'node:assert/strict'
-import { buildOcrCandidates, extractNumbers, isPossibleDuplicate, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
+import { buildOcrCandidates, parseDepositCard, parseRuDate, extractNumbers, isPossibleDuplicate, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
 
 let failed = 0
 function test(name: string, run: () => void) {
@@ -186,6 +186,46 @@ test('дубль — только совпадение названия, гру�
   assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Вклады', amount: 250000 }, existing), false)
   assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Акции', amount: 500000 }, existing), false)
   assert.equal(isPossibleDuplicate({ name: 'Вклад Надёжный', type: 'Вклады', amount: 500000 }, []), false)
+})
+
+// Текст, который tesseract выдал на карточке вклада МКБ (замечание владельца 27.09.2026):
+// раньше каждая строка «подпись — значение» становилась отдельным вкладом.
+const DEPOSIT_CARD = [
+  '© Вклад у', 'до 27.08.2027', 'Сумма вклада Ставка', '10 000 Р 20%', 'Подробнее',
+  'Банк Московский Кредитный Банк', 'Вклад МКБ. Преимущество', 'Срок 1100 дней',
+  'Дата открытия 22.08.2024', 'Дата закрытия 27.08.2027', 'Капитализация процентов Нет',
+  'Пополнение Нет', 'Частичное снятие Нет', 'Льготное расторжение Нет',
+  'Автоподбор нового вклада Нет', 'Номер счета 42307810505000009039', 'Действия',
+  'Х — Закрыть досрочно >',
+].join('\n')
+
+test('карточка вклада распознаётся одной записью со всеми полями', () => {
+  const candidates = buildOcrCandidates(DEPOSIT_CARD)
+  assert.equal(candidates.length, 1)
+  const [deposit] = candidates
+  assert.equal(deposit.name, 'МКБ. Преимущество')
+  assert.equal(deposit.type, 'Вклады')
+  assert.equal(deposit.amount, 10000)
+  assert.equal(deposit.currency, 'RUB')
+  assert.deepEqual(deposit.details, {
+    rate: 20,
+    termEndDate: '2027-08-27',
+    date: '2024-08-22',
+    institution: 'Московский Кредитный Банк',
+    capitalization: false,
+    replenishable: false,
+    partialWithdrawal: false,
+  })
+  assert.deepEqual(deposit.missingFields, [])
+})
+
+test('список продуктов не принимается за карточку вклада', () => {
+  assert.equal(parseDepositCard('Вклад Надёжный 350 000 ₽\nОФЗ 26238 120 000 ₽'), null)
+})
+
+test('parseRuDate переводит дд.мм.гггг в ISO и отбрасывает мусор', () => {
+  assert.equal(parseRuDate('22.08.2024'), '2024-08-22')
+  assert.equal(parseRuDate('1100 дней'), undefined)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
