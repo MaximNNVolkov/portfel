@@ -633,16 +633,24 @@ function parseIsoDate(date: string | undefined | null): Date | null {
 }
 // Короткие даты. Год добавляется, когда дата не в текущем году (BUG-07): иначе
 // полугодовые купоны на годы вперёд читались как одна выплата, повторённая 12 раз.
+// Фиксированный трёхбуквенный список, а не Intl.DateTimeFormat: ICU-сокращения
+// для русского в разных браузерах/ОС не одной длины («окт» — 3 буквы, «нояб» — 4),
+// из-за чего «1 окт»/«1 нояб» выглядели непарно — фиксированный список даёт
+// единообразный формат везде, независимо от движка.
+const RU_SHORT_MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 const shortMonth = (date: string) => {
   const parsed = parseIsoDate(date);
-  return parsed ? new Intl.DateTimeFormat("ru-RU", { month: "short" }).format(parsed).replace(".", "") : "";
+  return parsed ? RU_SHORT_MONTHS[parsed.getMonth()] : "";
 };
 const dayOfMonth = (date: string) => (parseIsoDate(date) ? date.slice(8, 10) : "—");
 const isCurrentYear = (date: string) => date.slice(0, 4) === todayIsoDate().slice(0, 4);
-const dateLabel = (date: string) =>
-  parseIsoDate(date)
-    ? `${dayOfMonth(date)} ${shortMonth(date)}${isCurrentYear(date) ? "" : ` ${date.slice(0, 4)}`}`
-    : "—";
+const dateLabel = (date: string) => {
+  const parsed = parseIsoDate(date);
+  if (!parsed) return "—";
+  // Без ведущего нуля («1 окт», не «01 окт») — единый короткий формат дат в карточке
+  // продукта и в остальных местах, где нужна не полная дата, а «день месяц[, год]».
+  return `${parsed.getDate()} ${shortMonth(date)}${isCurrentYear(date) ? "" : ` ${date.slice(0, 4)}`}`;
+};
 // «Ближайшие выплаты» на главном экране — горизонт, заявленный в подписи блока (BUG-06).
 const UPCOMING_HORIZON_DAYS = 60;
 function addDaysIso(date: string, days: number) {
@@ -2234,7 +2242,7 @@ function ProductsPage({
                     {parseIsoDate(product.date) && (
                       <div className="detail-line">
                         <span>Дата покупки</span>
-                        <span>{fullDate(product.date)}</span>
+                        <span>{dateLabel(product.date)}</span>
                       </div>
                     )}
                     <div className="list-row-actions">
