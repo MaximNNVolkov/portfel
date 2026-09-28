@@ -73,8 +73,12 @@ const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60
 const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
 
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false })
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Слишком много попыток, повторите позже' } })
-// Восстановление пароля: IP уже ограничен authLimiter выше (тем же, что и /login, /register).
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, skipSuccessfulRequests: true, message: { error: 'Слишком много попыток, повторите позже' } })
+// Отдельные корзины для восстановления пароля: общий authLimiter с /login съедал попытки, и
+// после пары запросов письма пользователь не мог ни сбросить пароль, ни войти.
+const forgotLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Слишком много попыток, повторите позже' } })
+const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, skipSuccessfulRequests: true, message: { error: 'Слишком много попыток, повторите позже' } })
+// Восстановление пароля: IP ограничен forgotLimiter/resetLimiter выше.
 // Этот лимитер — отдельно по email, чтобы нельзя было засыпать письмами один и тот же ящик
 // с разных IP (§28).
 const forgotPasswordEmailLimiter = new EmailRateLimiter()
@@ -229,7 +233,7 @@ app.get('/api/auth/me', async (request, response) => {
 // того, существует ли аккаунт с таким email, — иначе форма превращается в оракул,
 // позволяющий перебором узнавать зарегистрированные адреса.
 const FORGOT_PASSWORD_MESSAGE = 'Если аккаунт с таким email существует, мы отправили на него письмо со ссылкой для восстановления пароля.'
-app.post('/api/auth/forgot-password', authLimiter, async (request, response) => {
+app.post('/api/auth/forgot-password', forgotLimiter, async (request, response) => {
   const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : ''
   if (email && forgotPasswordEmailLimiter.allow(email)) {
     const result = await db.query('SELECT id FROM users WHERE email = $1', [email])
@@ -241,7 +245,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (request, response) => 
   }
   response.json({ message: FORGOT_PASSWORD_MESSAGE })
 })
-app.post('/api/auth/reset-password', authLimiter, async (request, response) => {
+app.post('/api/auth/reset-password', resetLimiter, async (request, response) => {
   const token = typeof request.body?.token === 'string' ? request.body.token : ''
   const password = typeof request.body?.password === 'string' ? request.body.password : ''
   if (!token) return response.status(400).json({ error: 'Ссылка для восстановления пароля недействительна' })
