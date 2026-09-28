@@ -2026,7 +2026,7 @@ type ProductSortKey = keyof typeof PRODUCT_SORT_OPTIONS;
 function sortProducts(
   products: Product[],
   sortBy: ProductSortKey,
-  nearestPayoutByInstrument: Map<string, Payment>,
+  nearestPayoutByInstrument: Map<string, NearestPayout>,
 ): Product[] {
   const withIndex = products.map((product, index) => ({ product, index }));
   // Позиции без оценки (null) уходят в конец списка, а не сортируются как нулевые (§7.3).
@@ -2061,18 +2061,31 @@ function sortProducts(
 }
 // Ближайшая будущая выплата по инструменту (тот же источник, что и календарь выплат,
 // §22 — прогноз уже посчитан бэкендом в payments, см. server/payout-forecast.ts).
-function nearestPayoutMap(payments: Payment[]): Map<string, Payment> {
-  const map = new Map<string, Payment>();
+// На одну дату бывает несколько строк: в конце срока вклада — тело (DEPOSIT_PRINCIPAL)
+// и проценты (INTEREST), у облигации — последний купон и погашение. Показываем их
+// суммой, а в деталях — по частям; раньше бралась одна случайная строка из нескольких.
+type NearestPayout = { date: string; total: number; parts: Payment[] };
+const payoutPartOrder: PayoutType[] = ["DEPOSIT_PRINCIPAL", "REDEMPTION", "INTEREST", "COUPON", "DIVIDEND", "OTHER"];
+function nearestPayoutMap(payments: Payment[]): Map<string, NearestPayout> {
+  const map = new Map<string, NearestPayout>();
   for (const payment of payments) {
     if (!payment.instrumentId || payment.status !== "expected" || isOverdue(payment)) continue;
     const current = map.get(payment.instrumentId);
-    if (!current || payment.date < current.date) map.set(payment.instrumentId, payment);
+    if (!current || payment.date < current.date) {
+      map.set(payment.instrumentId, { date: payment.date, total: payment.amount, parts: [payment] });
+    } else if (payment.date === current.date) {
+      current.total += payment.amount;
+      current.parts.push(payment);
+    }
+  }
+  for (const entry of map.values()) {
+    entry.parts.sort((left, right) => payoutPartOrder.indexOf(left.type) - payoutPartOrder.indexOf(right.type));
   }
   return map;
 }
 // Строка-подпись под названием (вариант B, sketches/002-product-row): ближайшая выплата,
 // иначе тип продукта — с явной пометкой закрытой позиции вместо простого игнорирования.
-function productRowMeta(product: Product, nextPayout: Payment | undefined): React.ReactNode {
+function productRowMeta(product: Product, nextPayout: NearestPayout | undefined): React.ReactNode {
   if (product.closedOn) {
     return parseIsoDate(product.closedOn) ? `Закрыт ${fullDate(product.closedOn)}` : "Закрыт";
   }
@@ -2080,7 +2093,7 @@ function productRowMeta(product: Product, nextPayout: Payment | undefined): Reac
     return (
       <>
         Выплата {dateLabel(nextPayout.date)} ·{" "}
-        <span className="product-row-meta-amount">{money(nextPayout.amount)}</span>
+        <span className="product-row-meta-amount">{money(nextPayout.total)}</span>
       </>
     );
   }
@@ -2244,6 +2257,20 @@ function ProductsPage({
                         <span>Дата покупки</span>
                         <span>{dateLabel(product.date)}</span>
                       </div>
+                    )}
+                    {nextPayout && nextPayout.parts.length > 1 && (
+                      <>
+                        <div className="detail-line">
+                          <span>Выплата {dateLabel(nextPayout.date)}</span>
+                          <span>{money(nextPayout.total)}</span>
+                        </div>
+                        {nextPayout.parts.map((part) => (
+                          <div className="detail-line detail-line-sub" key={part.id}>
+                            <span>{part.type === "DEPOSIT_PRINCIPAL" ? "Тело вклада" : payoutTypeLabels[part.type]}</span>
+                            <span>{money(part.amount)}</span>
+                          </div>
+                        ))}
+                      </>
                     )}
                     <div className="list-row-actions">
                       <Link className="outline-button" to={`/products/${product.id}`}>
