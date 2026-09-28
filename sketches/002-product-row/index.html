@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Карточка продукта — варианты</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;background:#0d1110;color:#edefee;-webkit-font-smoothing:antialiased;padding:20px;display:flex;gap:22px;align-items:flex-start}
+.phone{width:380px;background:#121716;border:1px solid #2a302e;border-radius:18px;padding:16px 14px;flex:none}
+.cap{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#d9a650;font-weight:700;margin-bottom:4px}
+h2{font-size:17px;margin-bottom:4px}
+.note{font-size:12px;color:#8b9391;margin-bottom:14px;line-height:1.4}
+.muted{color:#8b9391}.up{color:#4fd18b}.down{color:#ef6b6b}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.bond{background:#3fbf8f}.fund{background:#8f8ff0}.dep{background:#d9a650}.cash{background:#7c8a86}.stock{background:#5aa9e6}
+/* A: one line */
+.A .head,.A .row{display:grid;grid-template-columns:1fr 62px 74px 78px;gap:6px;align-items:center}
+.A .head{font-size:10px;color:#8b9391;text-transform:uppercase;letter-spacing:.06em;padding:0 8px 6px;border-bottom:1px solid #2a302e}
+.A .head span:not(:first-child),.A .row span:not(:first-child){text-align:right}
+.A .row{padding:11px 8px;border-bottom:1px solid #1f2523;font-size:13px}
+.A .row:hover{background:#1a1f1e}
+.A .nm{display:flex;align-items:center;gap:7px;min-width:0}.A .nm b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.A .sum{font-weight:700}.A .pay{font-size:12px}
+/* B: two line */
+.B .row{padding:11px 10px;border-bottom:1px solid #1f2523;cursor:pointer}
+.B .l1,.B .l2{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.B .l1 b{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:7px}
+.B .l1 .sum{font-weight:700;font-size:14px;white-space:nowrap}
+.B .l2{font-size:12px;margin-top:3px;padding-left:15px}
+.B .det{display:none;margin:8px 0 0 15px;font-size:12px;color:#8b9391;line-height:1.7}
+.B .row.open .det{display:block}
+.B .det a{color:#d9a650;text-decoration:none}
+/* C: grouped */
+.C .grp{margin-bottom:12px}
+.C .gh{display:flex;justify-content:space-between;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8b9391;padding:6px 4px;border-bottom:1px solid #2a302e}
+.C .row{display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid #1f2523;font-size:13px}
+.C .row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.C .chip{font-size:11px;padding:2px 6px;border-radius:6px;background:#1f2a26;color:#9fd8bd;white-space:nowrap}
+.C .chip.none{background:transparent;color:#56605d}
+.C .r{text-align:right;white-space:nowrap}.C .r b{display:block;font-size:13px}.C .r small{font-size:11px}
+</style></head><body>
+
+<div class="phone A">
+ <div class="cap">Вариант A</div><h2>Строго одна строка</h2>
+ <div class="note">Таблица из 4 колонок. Максимум плотности, всё видно сразу. Тип — цветная точка. Минус: длинные названия обрезаются.</div>
+ <div class="head"><span>Название</span><span>Прирост</span><span>Выплата</span><span>Сумма</span></div>
+ <div id="A"></div>
+</div>
+
+<div class="phone B">
+ <div class="cap">Вариант B · рекомендую</div><h2>Две короткие строки</h2>
+ <div class="note">Сверху название и сумма, под ними прирост и ближайшая выплата мелким шрифтом. Название влезает целиком. Тап — раскрыть детали.</div>
+ <div id="B"></div>
+</div>
+
+<div class="phone C">
+ <div class="cap">Вариант C</div><h2>Одна строка + группы</h2>
+ <div class="note">Позиции сгруппированы по типу с итогом группы. Выплата — чип в строке, прирост под суммой.</div>
+ <div id="C"></div>
+</div>
+
+<script>
+// Прирост и выплаты — иллюстративные значения для макета
+const P=[
+ {n:'Пассивный доход',t:'fund',g:'Фонды',s:107420,p:+2.4,pd:null},
+ {n:'Томск 34009',t:'bond',g:'Облигации',s:39393,p:+1.1,pd:['12 окт',812]},
+ {n:'Ульяновская область 34010',t:'bond',g:'Облигации',s:29800,p:-0.6,pd:['3 ноя',634]},
+ {n:'Российский рубль',t:'cash',g:'Деньги',s:22814,p:null,pd:null},
+ {n:'Денежный рынок',t:'fund',g:'Фонды',s:16176,p:+1.7,pd:null},
+ {n:'АФК Система БО 001P-28',t:'bond',g:'Облигации',s:11834,p:+3.2,pd:['6 окт',296]},
+ {n:'ГК Самолет БО-П14',t:'bond',g:'Облигации',s:10378,p:-4.1,pd:['19 окт',318]},
+ {n:'ИКС 5 Финанс 003P-02',t:'bond',g:'Облигации',s:10045,p:+0.4,pd:['28 окт',224]},
+ {n:'Финуслуги 2',t:'dep',g:'Вклады',s:10000,p:+1.4,pd:['30 окт',142]},
+];
+const r=v=>'₽ '+Math.round(v).toLocaleString('ru-RU');
+const pc=p=>p==null?'<span class="muted">—</span>':`<span class="${p>=0?'up':'down'}">${p>=0?'+':''}${p.toFixed(1).replace('.',',')}%</span>`;
+A.innerHTML=P.map(x=>`<div class="row"><span class="nm"><i class="dot ${x.t}"></i><b>${x.n}</b></span><span>${pc(x.p)}</span><span class="pay">${x.pd?x.pd[0]:'<span class="muted">—</span>'}</span><span class="sum">${r(x.s)}</span></div>`).join('');
+B.innerHTML=P.map(x=>`<div class="row" onclick="this.classList.toggle('open')"><div class="l1"><b><i class="dot ${x.t}"></i>${x.n}</b><span class="sum">${r(x.s)}</span></div>
+<div class="l2"><span class="muted">${x.pd?`Выплата ${x.pd[0]} · <span style="color:#edefee">${r(x.pd[1])}</span>`:x.g}</span><span>${pc(x.p)}</span></div>
+<div class="det">${x.g} · Т-Инвестиции<br>Куплено на ${r(x.s/(1+(x.p||0)/100))}<br><a href="#">Подробнее →</a></div></div>`).join('');
+const groups={};P.forEach(x=>(groups[x.g]??=[]).push(x));
+C.innerHTML=Object.entries(groups).map(([g,xs])=>`<div class="grp"><div class="gh"><span>${g}</span><span>${r(xs.reduce((a,x)=>a+x.s,0))}</span></div>`+xs.map(x=>`<div class="row"><span class="nm">${x.n}</span>${x.pd?`<span class="chip">${x.pd[0]}</span>`:''}<span class="r"><b>${r(x.s)}</b><small>${pc(x.p)}</small></span></div>`).join('')+'</div>').join('');
+</script></body></html>

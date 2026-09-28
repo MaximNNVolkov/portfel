@@ -2,6 +2,6 @@
 
 :root { font-family: 'DM Sans', sans-serif; color: var(--ink); background: var(--bg-page); font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; color-scheme: light dark; }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; background: var(--bg-page); transition: background-color .15s ease; }
+body { margin: 0; min-width: 320px; overflow-x: hidden; background: var(--bg-page); transition: background-color .15s ease; }
 button { font: inherit; cursor: pointer; }
 #root { min-height: 100vh; }

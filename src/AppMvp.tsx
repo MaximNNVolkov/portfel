@@ -622,16 +622,27 @@ const money = (value: number) =>
   `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
 const pct = (numerator: number, denominator: number) =>
   denominator ? (numerator / denominator) * 100 : 0;
+// Единая точка разбора даты (баг со скриншота владельца, iPhone/Safari, 390px): пустая
+// или невалидная строка — законный случай (необязательное поле, повреждённые данные
+// со скриншота), а не повод показывать "Invalid Date"/ронять страницу на
+// Intl.DateTimeFormat. Все форматтеры дат идут через эту функцию.
+function parseIsoDate(date: string | undefined | null): Date | null {
+  if (!date) return null;
+  const parsed = new Date(`${date}T12:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
 // Короткие даты. Год добавляется, когда дата не в текущем году (BUG-07): иначе
 // полугодовые купоны на годы вперёд читались как одна выплата, повторённая 12 раз.
-const shortMonth = (date: string) =>
-  new Intl.DateTimeFormat("ru-RU", { month: "short" })
-    .format(new Date(`${date}T12:00:00`))
-    .replace(".", "");
-const dayOfMonth = (date: string) => date.slice(8, 10);
+const shortMonth = (date: string) => {
+  const parsed = parseIsoDate(date);
+  return parsed ? new Intl.DateTimeFormat("ru-RU", { month: "short" }).format(parsed).replace(".", "") : "";
+};
+const dayOfMonth = (date: string) => (parseIsoDate(date) ? date.slice(8, 10) : "—");
 const isCurrentYear = (date: string) => date.slice(0, 4) === todayIsoDate().slice(0, 4);
 const dateLabel = (date: string) =>
-  `${dayOfMonth(date)} ${shortMonth(date)}${isCurrentYear(date) ? "" : ` ${date.slice(0, 4)}`}`;
+  parseIsoDate(date)
+    ? `${dayOfMonth(date)} ${shortMonth(date)}${isCurrentYear(date) ? "" : ` ${date.slice(0, 4)}`}`
+    : "—";
 // «Ближайшие выплаты» на главном экране — горизонт, заявленный в подписи блока (BUG-06).
 const UPCOMING_HORIZON_DAYS = 60;
 function addDaysIso(date: string, days: number) {
@@ -690,8 +701,18 @@ function PayoutGroupValue({
     </>
   );
 }
-const fullDate = (date: string) =>
-  new Date(`${date}T12:00:00`).toLocaleDateString("ru-RU");
+const fullDate = (date: string) => {
+  const parsed = parseIsoDate(date);
+  return parsed ? parsed.toLocaleDateString("ru-RU") : "—";
+};
+// Как fullDate, но для полных ISO-таймстемпов с сервера (синхронизация брокера,
+// дата обновления цены, повторная загрузка скриншота), а не даты без времени — та же
+// защита от "Invalid Date"/падения на некорректном или отсутствующем значении.
+function formatDateTime(value: string | undefined | null): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString("ru-RU");
+}
 // Показ готового P&L из Portfolio Engine (§10): фронт ничего не вычитает сам.
 // null — результат неизвестен (нет цены или курса), выводится «—», а не «+0,0%» (§7.3).
 function pnlDisplay(pnl: number | null, pnlPercent: number | null) {
@@ -1462,7 +1483,7 @@ function AppMvp() {
           />
           <Route
             path="/products"
-            element={<ProductsPage products={products} lastRefresh={priceRefresh} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
+            element={<ProductsPage products={products} payments={payments} lastRefresh={priceRefresh} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
           />
           <Route
             path="/products/:id"
@@ -1754,7 +1775,7 @@ function Dashboard({
           {brokerHasCache && (
             <p className="muted">
               Данные неполные — показано по состоянию на{" "}
-              {new Date(brokerStatus!.lastSyncAt!).toLocaleString("ru-RU")}.
+              {formatDateTime(brokerStatus!.lastSyncAt)}.
             </p>
           )}
           {brokerDegraded && !brokerHasCache && (
@@ -1775,7 +1796,7 @@ function Dashboard({
           {brokerHasCache && (
             <div className="demo-note">
               ⚠ Данные от брокера «Т-Инвестиции» по состоянию на{" "}
-              {new Date(brokerStatus!.lastSyncAt!).toLocaleString("ru-RU")}.
+              {formatDateTime(brokerStatus!.lastSyncAt)}.
               Не удалось обновить.{" "}
               <Link to="/integrations">Повторить попытку</Link>
             </div>
@@ -1990,10 +2011,15 @@ const PRODUCT_SORT_OPTIONS = {
   return: "По доходности",
   pnl: "По P&L",
   maturity: "По дате погашения",
+  nearestPayout: "По ближайшей выплате",
 } as const;
 type ProductSortKey = keyof typeof PRODUCT_SORT_OPTIONS;
 
-function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
+function sortProducts(
+  products: Product[],
+  sortBy: ProductSortKey,
+  nearestPayoutByInstrument: Map<string, Payment>,
+): Product[] {
   const withIndex = products.map((product, index) => ({ product, index }));
   // Позиции без оценки (null) уходят в конец списка, а не сортируются как нулевые (§7.3).
   const byNumber = (left: number | null, right: number | null, leftIndex: number, rightIndex: number) => {
@@ -2008,6 +2034,15 @@ function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
     if (sortBy === "value") return byNumber(left.value, right.value, a.index, b.index);
     if (sortBy === "return") return byNumber(left.pnlPercent, right.pnlPercent, a.index, b.index);
     if (sortBy === "pnl") return byNumber(left.pnl, right.pnl, a.index, b.index);
+    if (sortBy === "nearestPayout") {
+      // Без ближайшей выплаты — в конец, как и у остальных сортировок с "нет данных" (§7.3).
+      const leftDate = a.product.instrumentId ? nearestPayoutByInstrument.get(a.product.instrumentId)?.date ?? null : null;
+      const rightDate = b.product.instrumentId ? nearestPayoutByInstrument.get(b.product.instrumentId)?.date ?? null : null;
+      if (leftDate === null && rightDate === null) return a.index - b.index;
+      if (leftDate === null) return 1;
+      if (rightDate === null) return -1;
+      return leftDate.localeCompare(rightDate);
+    }
     // maturity: с ближайшей датой погашения впереди, без даты — в конец, исходный порядок сохраняется
     if (!a.product.maturityDate && !b.product.maturityDate) return a.index - b.index;
     if (!a.product.maturityDate) return 1;
@@ -2016,13 +2051,47 @@ function sortProducts(products: Product[], sortBy: ProductSortKey): Product[] {
   });
   return withIndex.map((entry) => entry.product);
 }
+// Ближайшая будущая выплата по инструменту (тот же источник, что и календарь выплат,
+// §22 — прогноз уже посчитан бэкендом в payments, см. server/payout-forecast.ts).
+function nearestPayoutMap(payments: Payment[]): Map<string, Payment> {
+  const map = new Map<string, Payment>();
+  for (const payment of payments) {
+    if (!payment.instrumentId || payment.status !== "expected" || isOverdue(payment)) continue;
+    const current = map.get(payment.instrumentId);
+    if (!current || payment.date < current.date) map.set(payment.instrumentId, payment);
+  }
+  return map;
+}
+// Строка-подпись под названием (вариант B, sketches/002-product-row): ближайшая выплата,
+// иначе тип продукта — с явной пометкой закрытой позиции вместо простого игнорирования.
+function productRowMeta(product: Product, nextPayout: Payment | undefined): React.ReactNode {
+  if (product.closedOn) {
+    return parseIsoDate(product.closedOn) ? `Закрыт ${fullDate(product.closedOn)}` : "Закрыт";
+  }
+  if (nextPayout) {
+    return (
+      <>
+        Выплата {dateLabel(nextPayout.date)} ·{" "}
+        <span className="product-row-meta-amount">{money(nextPayout.amount)}</span>
+      </>
+    );
+  }
+  return product.type;
+}
+// Цена с копейками — количество × цена должно давать ровно показанную сумму покупки
+// (иначе на маленьких суммах видно расхождение из-за округления money() до рублей).
+function preciseMoney(value: number): string {
+  return `₽ ${value.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
 
 function ProductsPage({
   products,
+  payments,
   lastRefresh,
   onRefreshPrices,
 }: {
   products: Product[];
+  payments: Payment[];
   lastRefresh: PriceRefreshResult | null;
   onRefreshPrices: () => Promise<void>;
 }) {
@@ -2039,17 +2108,19 @@ function ProductsPage({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<AssetType | "all">("all");
   const [sortBy, setSortBy] = useState<ProductSortKey>("value");
+  const nearestPayoutByInstrument = useMemo(() => nearestPayoutMap(payments), [payments]);
   const filtered = typeFilter === "all"
     ? products
     : products.filter((product) => product.type === typeFilter);
-  const sorted = sortProducts(filtered, sortBy);
+  const sorted = sortProducts(filtered, sortBy, nearestPayoutByInstrument);
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(sorted);
   const productTypes = Array.from(new Set(products.map((product) => product.type)));
   return (
     <Page title="Инструменты" subtitle="Все продукты в вашем портфеле">
       <div className="toolbar">
         <Link className="primary-button" to="/products/new">
-          ＋ Добавить продукт
+          <span className="label-full">＋ Добавить продукт</span>
+          <span className="label-short">＋ Добавить</span>
         </Link>
         <button
           type="button"
@@ -2057,8 +2128,17 @@ function ProductsPage({
           onClick={handleRefreshPrices}
           disabled={refreshing}
         >
-          {refreshing ? "Обновляем…" : "↻ Обновить цены (MOEX)"}
+          {refreshing ? (
+            "Обновляем…"
+          ) : (
+            <>
+              <span className="label-full">↻ Обновить цены (MOEX)</span>
+              <span className="label-short">↻ Цены</span>
+            </>
+          )}
         </button>
+      </div>
+      <div className="filters-bar">
         <label className="inline-select">
           <span>Фильтр</span>
           <select
@@ -2091,7 +2171,7 @@ function ProductsPage({
               <li key={item.positionId}>
                 {item.name} ({item.code}) — {priceRefreshReasons[item.status as keyof typeof priceRefreshReasons]}.{" "}
                 {item.priceUpdatedAt
-                  ? `Последняя цена с биржи — ${new Date(item.priceUpdatedAt).toLocaleString("ru-RU")}.`
+                  ? `Последняя цена с биржи — ${formatDateTime(item.priceUpdatedAt)}.`
                   : "С биржи цена ещё ни разу не приходила."}
               </li>
             ))}
@@ -2105,122 +2185,76 @@ function ProductsPage({
             : "Нет инструментов, подходящих под выбранный фильтр."}
         </p>
       ) : (
-        <div className="list-card">
+        <>
+        <div className="product-list">
           {visible.map((product) => {
             const expanded = expandedId === product.id;
             const valuation = valuationOf(product);
             const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
+            const nextPayout = product.instrumentId ? nearestPayoutByInstrument.get(product.instrumentId) : undefined;
+            const hasQuantity = product.quantity !== undefined && product.quantity > 0;
             return (
               <div className="list-row" key={product.id}>
                 <button
                   type="button"
-                  className="list-row-summary"
+                  className="product-row-summary"
                   aria-expanded={expanded}
                   onClick={() => setExpandedId(expanded ? null : product.id)}
                 >
-                  <span className="list-row-main">
-                    <strong>{product.name}</strong>
-                    <span className={`type-tag ${typeColors[product.type]}`}>
-                      {product.type}
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <i className={`legend type-dot ${typeColors[product.type]}`} title={product.type} />
+                      <strong>{product.name}</strong>
                     </span>
-                    {product.closedOn && <span className="type-tag slate">Закрыт</span>}
+                    <span className="product-row-sum">{valueText(valuation.value)}</span>
                   </span>
-                  <span className="list-row-value">
-                    <strong>{valueText(valuation.value)}</strong>
-                    <small className={pnl.className}>
+                  <span className="product-row-line2">
+                    <span className="muted product-row-meta">{productRowMeta(product, nextPayout)}</span>
+                    <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
                       {estimateNote(valuation) ?? pnl.percentText}
-                    </small>
+                    </span>
                   </span>
-                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
                 {expanded && (
                   <div className="list-row-details">
                     <div className="detail-line">
-                      <span>Тикер / ISIN</span>
-                      <span>
-                        {product.ticker || "—"}
-                        {product.isin ? ` · ${product.isin}` : ""}
-                      </span>
-                    </div>
-                    <div className="detail-line">
-                      <span>Банк / брокер</span>
+                      <span>Брокер / банк</span>
                       <span>{product.institution || "—"} · {product.currency}</span>
                     </div>
                     <div className="detail-line">
-                      <span>Дата открытия/покупки</span>
-                      <span>{fullDate(product.date)}</span>
+                      <span>Сумма покупки</span>
+                      <span>{money(product.invested)}</span>
                     </div>
-                    {product.type === "Облигации" &&
-                      (product.maturityDate || product.couponRate !== undefined) && (
-                        <div className="detail-line">
-                          <span>Купон / погашение</span>
-                          <span>
-                            {product.maturityDate
-                              ? `Погашение ${fullDate(product.maturityDate)}`
-                              : ""}
-                            {product.maturityDate && product.couponRate !== undefined
-                              ? " · "
-                              : ""}
-                            {product.couponRate !== undefined
-                              ? `купон ${product.couponRate}%`
-                              : ""}
-                          </span>
-                        </div>
-                      )}
-                    {product.type === "Вклады" && product.rate !== undefined && (
+                    {hasQuantity && (
                       <div className="detail-line">
-                        <span>Ставка</span>
-                        <span>
-                          {product.rate}%
-                          {product.termEndDate ? ` · до ${fullDate(product.termEndDate)}` : ""}
-                        </span>
+                        <span>Количество × цена</span>
+                        <span>{product.quantity} × {preciseMoney(product.invested / (product.quantity as number))}</span>
                       </div>
                     )}
-                    {(product.type === "Акции" || product.type === "Фонды") &&
-                      product.quantity !== undefined && (
-                        <div className="detail-line">
-                          <span>Количество / цена</span>
-                          <span>
-                            {product.quantity} шт.
-                            {product.currentPrice !== undefined
-                              ? ` · тек. цена ${money(product.currentPrice)}`
-                              : " · текущая цена недоступна"}
-                          </span>
-                        </div>
-                      )}
+                    {parseIsoDate(product.date) && (
+                      <div className="detail-line">
+                        <span>Дата покупки</span>
+                        <span>{fullDate(product.date)}</span>
+                      </div>
+                    )}
                     <div className="list-row-actions">
                       <Link className="outline-button" to={`/products/${product.id}`}>
-                        Подробнее
+                        Подробнее →
                       </Link>
-                      {product.source !== "broker" && (
-                        <>
-                          <Link
-                            className="outline-button"
-                            to={`/products/${product.id}/edit`}
-                          >
-                            Редактировать
-                          </Link>
-                          <Link
-                            className="delete-button"
-                            to={`/products/${product.id}/delete`}
-                          >
-                            Удалить
-                          </Link>
-                        </>
-                      )}
                     </div>
                   </div>
                 )}
               </div>
             );
           })}
-          <ListPagination
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            pageSize={pageSize}
-            onPageSizeChange={setPageSize}
-          />
         </div>
+        <ListPagination
+          hasMore={hasMore}
+          onLoadMore={loadMore}
+          pageSize={pageSize}
+          onPageSizeChange={setPageSize}
+        />
+        </>
       )}
     </Page>
   );
@@ -2822,7 +2856,7 @@ function ProductDetailPage({
               ? money(product.currentPrice)
               : "Актуальная цена недоступна"}
             {product.priceUpdatedAt &&
-              ` · с биржи ${new Date(product.priceUpdatedAt).toLocaleString("ru-RU")}`}
+              ` · с биржи ${formatDateTime(product.priceUpdatedAt)}`}
           </span>
         </div>
         )}
@@ -3453,7 +3487,7 @@ function Integrations({
         )}
         {lastSyncAt && (
           <p className="field-hint">
-            Последняя синхронизация: {new Date(lastSyncAt).toLocaleString("ru-RU")}
+            Последняя синхронизация: {formatDateTime(lastSyncAt)}
           </p>
         )}
         {status === "error" && (
@@ -4692,7 +4726,7 @@ function OcrSummaryPage({
   const items = summary ? currentOcrItems(summary, products, dataLoaded) : [];
   const paging = usePagedList(items);
   if (!summary) return <OcrSummaryPlaceholder documentId={documentId} loadState={loadState} />;
-  const formattedDate = new Date(`${summary.date}T12:00:00`).toLocaleDateString("ru-RU");
+  const formattedDate = fullDate(summary.date);
   const returnTo = documentId ? `/ocr-summary/${documentId}` : "/products";
   const removedCount = summary.items.length - items.length;
   return (
@@ -4703,7 +4737,7 @@ function OcrSummaryPage({
       {summary.alreadyUploadedAt && (
         <div className="demo-note">
           ⚠ Этот скриншот уже загружался{" "}
-          {new Date(summary.alreadyUploadedAt).toLocaleDateString("ru-RU")} — повторно
+          {formatDateTime(summary.alreadyUploadedAt)} — повторно
           он не обрабатывался, новые записи не созданы. Ниже — результат прошлой обработки.
         </div>
       )}
