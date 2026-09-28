@@ -1338,7 +1338,14 @@ function AppMvp() {
     navigate("/portfolio");
   }
 
-  if (!token) return <Login onSubmit={signIn} />;
+  // Ссылка из письма восстановления пароля должна работать независимо от того, есть ли
+  // в этом браузере ещё активная сессия (например, письмо открыто на другом устройстве),
+  // поэтому маршрут проверяется до проверки токена, а не только в неавторизованной ветке.
+  if (location.pathname === "/reset-password") return <ResetPasswordPage />;
+  if (!token) {
+    if (location.pathname === "/forgot-password") return <ForgotPasswordPage />;
+    return <Login onSubmit={signIn} />;
+  }
 
   return (
     <DataLoadedContext.Provider value={dataLoaded}>
@@ -3629,6 +3636,11 @@ function Login({
               ? "Войти в портфель"
               : "Зарегистрироваться"}
         </button>
+        {mode === "login" && (
+          <Link className="text-button auth-switch" to="/forgot-password">
+            Забыли пароль?
+          </Link>
+        )}
         <button
           className="text-button auth-switch"
           onClick={() => {
@@ -3642,6 +3654,214 @@ function Login({
             : "Уже есть аккаунт? Войти"}
         </button>
         <small>Пароль хранится на сервере в виде криптографического хеша</small>
+      </form>
+    </div>
+  );
+}
+const FORGOT_PASSWORD_SENT_MESSAGE =
+  "Если такой аккаунт есть, мы отправили письмо со ссылкой для восстановления пароля.";
+function ForgotPasswordPage() {
+  const [email, setEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/auth/forgot-password`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      // §28: ответ одинаковый независимо от того, существует ли аккаунт — нечего
+      // разбирать в теле ответа, кроме факта успеха запроса.
+      if (!response.ok) throw new Error();
+      setSent(true);
+    } catch (submitError) {
+      setError(errorText(submitError, "Не удалось отправить запрос. Попробуйте ещё раз"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="brand login-brand">
+          <span className="brand-mark">✳</span> Капитал
+        </div>
+        <p className="eyebrow">ВОССТАНОВЛЕНИЕ ПАРОЛЯ</p>
+        {sent ? (
+          <>
+            <h1>Проверьте почту</h1>
+            <p className="muted">{FORGOT_PASSWORD_SENT_MESSAGE}</p>
+            <Link className="text-button auth-switch" to="/">
+              Вернуться ко входу
+            </Link>
+          </>
+        ) : (
+          <form onSubmit={(event) => void handleSubmit(event)}>
+            <h1>Забыли пароль?</h1>
+            <p className="muted">
+              Укажите email, указанный при регистрации — мы отправим на него
+              ссылку для восстановления пароля.
+            </p>
+            <label>
+              Email
+              <input
+                name="email"
+                type="email"
+                placeholder="you@example.com"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </label>
+            {error && (
+              <small className="form-error" role="alert">
+                {error}
+              </small>
+            )}
+            <button className="primary-button" type="submit" disabled={submitting}>
+              {submitting ? "Отправляем..." : "Отправить ссылку"}
+            </button>
+            <Link className="text-button auth-switch" to="/">
+              Вернуться ко входу
+            </Link>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+// Понятная причина недействительности ссылки (§40.4-подобный принцип: не «ошибка»
+// без объяснения) плюс путь для повторной попытки — без этого просроченная ссылка
+// из письма была бы тупиком.
+function resetTokenErrorHint(message: string): boolean {
+  return /недействительна|использован|истёк/i.test(message);
+}
+function ResetPasswordPage() {
+  const [searchParams] = useSearchParams();
+  const token = (searchParams.get("token") ?? "").trim();
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  if (!token) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <div className="brand login-brand">
+            <span className="brand-mark">✳</span> Капитал
+          </div>
+          <h1>Ссылка недействительна</h1>
+          <p className="muted">
+            В ссылке не указан токен восстановления. Запросите новое письмо.
+          </p>
+          <Link className="primary-button" to="/forgot-password">
+            Запросить новое письмо
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (done) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <div className="brand login-brand">
+            <span className="brand-mark">✳</span> Капитал
+          </div>
+          <h1>Пароль изменён</h1>
+          <p className="muted">Теперь можно войти в аккаунт с новым паролем.</p>
+          <Link className="primary-button" to="/">
+            Войти
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    if (password.length < 8) {
+      setError("Пароль должен быть не короче 8 символов");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Пароли не совпадают");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const response = await apiFetch(`${apiUrl}/auth/reset-password`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, password }),
+      });
+      if (!response.ok) {
+        const result = (await response.json().catch(() => ({}))) as { error?: string };
+        setError(result.error || "Не удалось изменить пароль. Попробуйте ещё раз");
+        return;
+      }
+      setDone(true);
+    } catch (submitError) {
+      setError(errorText(submitError, "Не удалось изменить пароль. Попробуйте ещё раз"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="login-screen">
+      <form className="login-card" onSubmit={(event) => void handleSubmit(event)}>
+        <div className="brand login-brand">
+          <span className="brand-mark">✳</span> Капитал
+        </div>
+        <p className="eyebrow">ВОССТАНОВЛЕНИЕ ПАРОЛЯ</p>
+        <h1>Новый пароль</h1>
+        <label>
+          Новый пароль
+          <input
+            name="password"
+            type="password"
+            placeholder="Минимум 8 символов"
+            minLength={8}
+            required
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </label>
+        <label>
+          Повторите пароль
+          <input
+            name="confirmPassword"
+            type="password"
+            placeholder="Ещё раз новый пароль"
+            minLength={8}
+            required
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+        </label>
+        {error && (
+          <small className="form-error" role="alert">
+            {error}
+          </small>
+        )}
+        {error && resetTokenErrorHint(error) && (
+          <Link className="text-button auth-switch" to="/forgot-password">
+            Запросить новое письмо
+          </Link>
+        )}
+        <button className="primary-button" type="submit" disabled={submitting}>
+          {submitting ? "Сохраняем..." : "Сохранить новый пароль"}
+        </button>
       </form>
     </div>
   );

@@ -11,6 +11,10 @@ import { Pool, types } from 'pg'
 import { runMigrations } from './migrations.ts'
 import { logError } from './logger.ts'
 import { decryptToken, encryptToken, maskToken } from './token-crypto.ts'
+import {
+  EmailRateLimiter, createPasswordResetToken, findResetToken, invalidateUserResetTokens, validateResetToken,
+} from './password-reset.ts'
+import { sendPasswordResetEmail } from './mailer.ts'
 import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
   aggregateByGroup, aggregateByKey, calculateReturns, evaluatePosition,
@@ -70,6 +74,10 @@ const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: 
 
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false })
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Слишком много попыток, повторите позже' } })
+// Восстановление пароля: IP уже ограничен authLimiter выше (тем же, что и /login, /register).
+// Этот лимитер — отдельно по email, чтобы нельзя было засыпать письмами один и тот же ящик
+// с разных IP (§28).
+const forgotPasswordEmailLimiter = new EmailRateLimiter()
 
 app.use(helmet())
 app.use(express.json())
@@ -216,6 +224,49 @@ app.post('/api/auth/logout', async (request, response) => {
 app.get('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   response.json({ authenticated: true, email: users.get(userId)?.email ?? null })
+})
+// Восстановление пароля по почте. Ответ всегда 200 с одинаковым текстом независимо от
+// того, существует ли аккаунт с таким email, — иначе форма превращается в оракул,
+// позволяющий перебором узнавать зарегистрированные адреса.
+const FORGOT_PASSWORD_MESSAGE = 'Если аккаунт с таким email существует, мы отправили на него письмо со ссылкой для восстановления пароля.'
+app.post('/api/auth/forgot-password', authLimiter, async (request, response) => {
+  const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : ''
+  if (email && forgotPasswordEmailLimiter.allow(email)) {
+    const result = await db.query('SELECT id FROM users WHERE email = $1', [email])
+    const userId = result.rows[0]?.id as string | undefined
+    if (userId) {
+      const token = await createPasswordResetToken(db, userId)
+      await sendPasswordResetEmail(email, token)
+    }
+  }
+  response.json({ message: FORGOT_PASSWORD_MESSAGE })
+})
+app.post('/api/auth/reset-password', authLimiter, async (request, response) => {
+  const token = typeof request.body?.token === 'string' ? request.body.token : ''
+  const password = typeof request.body?.password === 'string' ? request.body.password : ''
+  if (!token) return response.status(400).json({ error: 'Ссылка для восстановления пароля недействительна' })
+  // Те же правила, что и при регистрации (см. /api/auth/register выше).
+  if (password.length < 8) return response.status(400).json({ error: 'Пароль должен быть не короче 8 символов', field: 'password' })
+  const record = await findResetToken(db, token)
+  const validation = validateResetToken(record)
+  if (validation === 'not_found') return response.status(400).json({ error: 'Ссылка для восстановления пароля недействительна' })
+  if (validation === 'used') return response.status(400).json({ error: 'Эта ссылка уже использована. Запросите новую на странице входа' })
+  if (validation === 'expired') return response.status(400).json({ error: 'Срок действия ссылки истёк. Запросите новую на странице входа' })
+  if (!record) return response.status(400).json({ error: 'Ссылка для восстановления пароля недействительна' })
+  const salt = randomBytes(16).toString('hex')
+  const passwordHash = hashPassword(password, salt)
+  await withTransaction(db, async (client) => {
+    await client.query('UPDATE users SET password_hash = $1, salt = $2 WHERE id = $3', [passwordHash, salt, record.userId])
+    // Обесценивает и сам применённый токен, и все прочие ещё не использованные ссылки
+    // этого пользователя — старое письмо не должно оставаться рабочим после смены пароля.
+    await invalidateUserResetTokens(client, record.userId)
+    // Разлогинить пользователя везде: если аккаунт скомпрометирован, старые сессии не
+    // должны переживать смену пароля.
+    await client.query('DELETE FROM sessions WHERE user_id = $1', [record.userId])
+  })
+  const existing = users.get(record.userId)
+  if (existing) users.set(record.userId, { ...existing, passwordHash, salt })
+  response.status(204).send()
 })
 app.delete('/api/auth/me', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
