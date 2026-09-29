@@ -53,7 +53,7 @@ export function toEngineInput(position: Position): PositionInput {
   }
 }
 // «Сегодня» по местным часам сервера, как граница просроченных выплат в server/index.ts.
-function localDate(): string {
+export function localDate(): string {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }

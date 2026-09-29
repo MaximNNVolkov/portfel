@@ -149,9 +149,15 @@ export function detectConcentration(
     if (entry) entry.value += position.valueBase
     else byInstrument.set(key, { position, value: position.valueBase })
   }
+  // Стоимость уже названных инструментов по эмитенту и группе: если эмитент или группа
+  // крупны только из-за них, второй пункт повторяет первый (критик К8) и не выводится.
+  const flaggedByIssuer = new Map<string, number>()
+  const flaggedByGroup = new Map<AssetGroup, number>()
   for (const { position, value } of byInstrument.values()) {
     const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
+    if (position.issuer) flaggedByIssuer.set(position.issuer, (flaggedByIssuer.get(position.issuer) ?? 0) + value)
+    flaggedByGroup.set(position.group, (flaggedByGroup.get(position.group) ?? 0) + value)
     results.push({
       ruleType: 'concentration',
       text: `Инструмент «${position.name}» (группа «${position.group}») занимает ${percentLabel(share)}% портфеля`,
@@ -167,6 +173,7 @@ export function detectConcentration(
   for (const [issuer, value] of byIssuer) {
     const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
+    if (explainedByInstruments(flaggedByIssuer.get(issuer), value)) continue
     results.push({
       ruleType: 'concentration',
       text: `Эмитент «${issuer}» занимает ${percentLabel(share)}% портфеля`,
@@ -182,6 +189,7 @@ export function detectConcentration(
   for (const [group, value] of byGroup) {
     const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
+    if (explainedByInstruments(flaggedByGroup.get(group), value)) continue
     results.push({
       ruleType: 'concentration',
       text: `Группа «${group}» занимает ${percentLabel(share)}% портфеля`,
@@ -190,6 +198,12 @@ export function detectConcentration(
   }
 
   return results
+}
+
+// Эмитент или группа «объяснены» инструментами, если на уже названные крупные позиции
+// приходится 90% и больше их стоимости.
+function explainedByInstruments(flagged: number | undefined, total: number): boolean {
+  return flagged !== undefined && flagged >= total * 0.9
 }
 
 // ---------------------------------------------------------------------------

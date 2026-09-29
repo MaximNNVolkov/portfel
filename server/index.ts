@@ -32,8 +32,9 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate,
 } from './daily-tasks.ts'
+import { periodReturns } from './period-returns.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
@@ -750,6 +751,13 @@ app.get('/api/portfolio/history', async (request, response) => {
   await withTransaction(db, (client) => recordSnapshot(client, userId))
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
+})
+// §23: доходность за день, месяц, год и всё время — по тем же снимкам, что и график.
+app.get('/api/portfolio/returns', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  await withTransaction(db, (client) => recordSnapshot(client, userId))
+  const snapshots: Snapshot[] = await listSnapshots(db, userId)
+  response.json(periodReturns(snapshots, localDate()))
 })
 
 // §23: структура портфеля по разрезам, отличным от класса активов (тот уже отдаёт
