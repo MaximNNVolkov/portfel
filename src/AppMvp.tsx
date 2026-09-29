@@ -566,6 +566,16 @@ const payoutTypeLabels: Record<PayoutType, string> = {
   REDEMPTION: "Погашение",
   OTHER: "Прочее",
 };
+// Цвет точки выплаты — из палитры .legend.*: купон и погашение — цвета облигаций,
+// дивиденды — акций, проценты — вкладов, чтобы строка читалась так же, как в «Инструментах».
+const payoutTypeColors: Record<PayoutType, string> = {
+  COUPON: "teal",
+  REDEMPTION: "indigo",
+  DIVIDEND: "coral",
+  INTEREST: "amber",
+  DEPOSIT_PRINCIPAL: "slate",
+  OTHER: "pink",
+};
 const payoutStatusLabels: Record<PayoutStatus, string> = {
   expected: "Ожидается",
   received: "Получено",
@@ -679,35 +689,25 @@ const isUpcoming = (payment: Payment) =>
 // Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
 // доходов», поэтому крупно идёт ожидаемое; полученное — подписью и только если оно есть.
 // Иначе у нового пользователя весь календарь состоял из строк «+₽ 0».
-function PayoutGroupValue({
-  expected,
-  received,
-  overdue,
-}: {
-  expected: number;
-  received: number;
-  overdue: number;
-}) {
+function pluralPayouts(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return "выплата";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "выплаты";
+  return "выплат";
+}
+function payoutGroupValue(expected: number, received: number, overdue: number) {
   if (expected > 0)
-    return (
-      <>
-        <strong>+{money(expected)}</strong>
-        <small>{received > 0 ? `ожидается · получено ${money(received)}` : "ожидается"}</small>
-      </>
-    );
+    return {
+      amount: `+${money(expected)}`,
+      note: received > 0 ? `ожидается · получено ${money(received)}` : "ожидается",
+    };
   if (received > 0)
-    return (
-      <>
-        <strong>+{money(received)}</strong>
-        <small>{overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено"}</small>
-      </>
-    );
-  return (
-    <>
-      <strong>{money(overdue)}</strong>
-      <small>не отмечено полученным</small>
-    </>
-  );
+    return {
+      amount: `+${money(received)}`,
+      note: overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено",
+    };
+  return { amount: money(overdue), note: "не отмечено полученным" };
 }
 const fullDate = (date: string) => {
   const parsed = parseIsoDate(date);
@@ -2398,22 +2398,28 @@ function PaymentRow({
     <div className="list-row">
       <button
         type="button"
-        className="list-row-summary"
+        className="product-row-summary"
         aria-expanded={expanded}
         onClick={onToggle}
       >
-        <span className="list-row-main">
-          <strong>{payment.title}</strong>
-          <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
-          {payment.source === "forecast" && (
-            <span className="type-tag slate">Прогноз</span>
-          )}
+        <span className="product-row-line1">
+          <span className="product-row-name">
+            <i
+              className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+              title={payoutTypeLabels[payment.type]}
+            />
+            <strong>{payment.title}</strong>
+          </span>
+          <span className="product-row-sum">+{money(payment.amount)}</span>
         </span>
-        <span className="list-row-value">
-          <strong>+{money(payment.amount)}</strong>
-          <small>{dateLabel(payment.date)}</small>
+        <span className="product-row-line2">
+          <span className="muted product-row-meta">
+            {payoutTypeLabels[payment.type]}
+            {payment.source === "forecast" && " · прогноз"}
+            {payment.status === "received" && " · получено"}
+          </span>
+          <span className="muted">{dateLabel(payment.date)}</span>
         </span>
-        <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
       </button>
       {expanded && (
         <div className="list-row-details">
@@ -2551,7 +2557,8 @@ function PaymentsPage({
       )}
       <div className="toolbar">
         <Link className="primary-button" to="/payments/new">
-          ＋ Добавить выплату
+          <span className="label-full">＋ Добавить выплату</span>
+          <span className="label-short">＋ Выплата</span>
         </Link>
         <div className="view-mode-switch">
           <button
@@ -2559,21 +2566,24 @@ function PaymentsPage({
             type="button"
             onClick={() => setViewMode("day")}
           >
-            По дням
+            <span className="label-full">По дням</span>
+            <span className="label-short">Дни</span>
           </button>
           <button
             className={viewMode === "month" ? "selected" : ""}
             type="button"
             onClick={() => setViewMode("month")}
           >
-            По месяцам
+            <span className="label-full">По месяцам</span>
+            <span className="label-short">Месяцы</span>
           </button>
           <button
             className={viewMode === "year" ? "selected" : ""}
             type="button"
             onClick={() => setViewMode("year")}
           >
-            По годам
+            <span className="label-full">По годам</span>
+            <span className="label-short">Годы</span>
           </button>
         </div>
       </div>
@@ -2650,20 +2660,26 @@ function PaymentsPage({
               </p>
             </div>
           </div>
-          <div className="list-card">
+          <div className="product-list">
             {overduePaging.visible.map((payment) => (
               <div className="list-row" key={payment.id}>
-                <div className="list-row-summary list-row-static">
-                  <span className="list-row-main">
-                    <strong>{payment.title}</strong>
-                    <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
+                <div className="product-row-summary product-row-static">
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <i
+                        className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+                        title={payoutTypeLabels[payment.type]}
+                      />
+                      <strong>{payment.title}</strong>
+                    </span>
+                    <span className="product-row-sum">+{money(payment.amount)}</span>
                   </span>
-                  <span className="list-row-value">
-                    <strong>+{money(payment.amount)}</strong>
-                    <small className="danger-text">{fullDate(payment.date)} · просрочено</small>
+                  <span className="product-row-line2">
+                    <span className="muted product-row-meta">{payoutTypeLabels[payment.type]}</span>
+                    <span className="danger-text">{dateLabel(payment.date)} · просрочено</span>
                   </span>
                 </div>
-                <div className="list-row-actions">
+                <div className="list-row-actions product-row-actions">
                   <button
                     type="button"
                     className="outline-button"
@@ -2678,13 +2694,13 @@ function PaymentsPage({
                 </div>
               </div>
             ))}
-            <ListPagination
-              hasMore={overduePaging.hasMore}
-              onLoadMore={overduePaging.loadMore}
-              pageSize={overduePaging.pageSize}
-              onPageSizeChange={overduePaging.setPageSize}
-            />
           </div>
+          <ListPagination
+            hasMore={overduePaging.hasMore}
+            onLoadMore={overduePaging.loadMore}
+            pageSize={overduePaging.pageSize}
+            onPageSizeChange={overduePaging.setPageSize}
+          />
           {overduePayments.length > 1 && (
             <div className="list-row-actions">
               <button
@@ -2693,9 +2709,14 @@ function PaymentsPage({
                 disabled={markingId !== null}
                 onClick={() => void markAllReceived()}
               >
-                {markingId === "all"
-                  ? "Сохраняем..."
-                  : `Отметить все полученными (${overduePayments.length})`}
+                {markingId === "all" ? (
+                  "Сохраняем..."
+                ) : (
+                  <>
+                    <span className="label-full">Отметить все полученными ({overduePayments.length})</span>
+                    <span className="label-short">Отметить все ({overduePayments.length})</span>
+                  </>
+                )}
               </button>
             </div>
           )}
@@ -2710,74 +2731,84 @@ function PaymentsPage({
               : "Нет выплат, подходящих под выбранные условия."}
         </p>
       ) : viewMode === "day" ? (
-        <div className="list-card">
-          {dayPaging.visible.map((payment) => (
-            <PaymentRow
-              key={payment.id}
-              payment={payment}
-              expanded={expandedId === payment.id}
-              onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
-            />
-          ))}
+        <>
+          <div className="product-list">
+            {dayPaging.visible.map((payment) => (
+              <PaymentRow
+                key={payment.id}
+                payment={payment}
+                expanded={expandedId === payment.id}
+                onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
+              />
+            ))}
+          </div>
           <ListPagination
             hasMore={dayPaging.hasMore}
             onLoadMore={dayPaging.loadMore}
             pageSize={dayPaging.pageSize}
             onPageSizeChange={dayPaging.setPageSize}
           />
-        </div>
+        </>
       ) : (
-        <div className="list-card">
-          {groupPaging.visible.map((group) => {
-            const expanded = expandedId === group.key;
-            return (
-              <div className="list-row" key={group.key}>
-                <button
-                  type="button"
-                  className="list-row-summary"
-                  aria-expanded={expanded}
-                  onClick={() => setExpandedId(expanded ? null : group.key)}
-                >
-                  <span className="list-row-main">
-                    <strong>{group.label}</strong>
-                  </span>
-                  <span className="list-row-value">
-                    <PayoutGroupValue expected={group.expected} received={group.received} overdue={group.overdue} />
-                  </span>
-                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
-                </button>
-                {expanded && (
-                  <div className="list-row-details">
-                    <div className="list-card">
+        <>
+          <div className="product-list">
+            {groupPaging.visible.map((group) => {
+              const expanded = expandedId === group.key;
+              const value = payoutGroupValue(group.expected, group.received, group.overdue);
+              return (
+                <div className="list-row" key={group.key}>
+                  <button
+                    type="button"
+                    className="product-row-summary"
+                    aria-expanded={expanded}
+                    onClick={() => setExpandedId(expanded ? null : group.key)}
+                  >
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <strong>{group.label}</strong>
+                      </span>
+                      <span className="product-row-sum">{value.amount}</span>
+                    </span>
+                    <span className="product-row-line2 product-row-line2-flush">
+                      <span className="muted product-row-meta">
+                        {group.items.length} {pluralPayouts(group.items.length)}
+                      </span>
+                      <span className="muted">{value.note}</span>
+                    </span>
+                  </button>
+                  {expanded && (
+                    <div className="list-row-details">
                       {group.items.map((payment) => (
-                        <div className="list-row" key={payment.id}>
-                          <div className="list-row-summary list-row-static">
-                            <span className="list-row-main">
-                              <strong>{payment.title}</strong>
-                              <span className="type-tag teal">
-                                {payoutTypeLabels[payment.type]}
-                              </span>
+                        <div className="detail-line" key={payment.id}>
+                          <span className="payout-detail-name">
+                            <i
+                              className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+                              title={payoutTypeLabels[payment.type]}
+                            />
+                            <span>
+                              {payment.title}
+                              <small className="muted">
+                                {dateLabel(payment.date)} · {payoutTypeLabels[payment.type]} ·{" "}
+                                {payoutStatusLabels[payment.status].toLowerCase()}
+                              </small>
                             </span>
-                            <span className="list-row-value">
-                              <strong>+{money(payment.amount)}</strong>
-                              <small>{dateLabel(payment.date)} · {payoutStatusLabels[payment.status]}</small>
-                            </span>
-                          </div>
+                          </span>
+                          <span>+{money(payment.amount)}</span>
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })}
+          </div>
           <ListPagination
             hasMore={groupPaging.hasMore}
             onLoadMore={groupPaging.loadMore}
             pageSize={groupPaging.pageSize}
             onPageSizeChange={groupPaging.setPageSize}
           />
-        </div>
+        </>
       )}
     </Page>
   );
