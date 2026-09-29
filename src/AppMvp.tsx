@@ -828,6 +828,8 @@ function ListPagination({
   onPageSizeChange: (size: number) => void;
 }) {
   const bucket = pageSize <= 20 ? 20 : pageSize <= 50 ? 50 : 100;
+  // Короткий список целиком на экране — переключатель под ним только шумит.
+  if (!hasMore && bucket === 20) return null;
   return (
     <div className="list-pagination">
       {hasMore ? (
@@ -1648,7 +1650,7 @@ function AppMvp() {
               <span className="nav-icon">{icon}</span>
               {label}
               {isV2 && <span className="v2-badge">v2</span>}
-              {label === "Рекомендации" && (
+              {label === "Рекомендации" && attention?.some((item) => item.kind === "insight") && (
                 <span className="notification-dot" />
               )}
             </NavLink>
@@ -1692,7 +1694,17 @@ function AppMvp() {
               }
               to="/attention"
             >
-              ♧{urgentCount > 0 && <span className="attention-badge">{urgentCount}</span>}
+              <svg className="bell-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path
+                  d="M12 3a6 6 0 0 0-6 6v3.6l-1.6 2.9A1 1 0 0 0 5.3 17h13.4a1 1 0 0 0 .9-1.5L18 12.6V9a6 6 0 0 0-6-6Zm-2.3 15.5a2.4 2.4 0 0 0 4.6 0"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              {urgentCount > 0 && <span className="attention-badge">{urgentCount}</span>}
             </Link>
             <button
               className="mobile-menu"
@@ -3020,7 +3032,7 @@ function PaymentsPage({
                 : undefined;
               const typeLabel = payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type];
               return (
-                <div className="list-row attention-row" key={payment.id}>
+                <div className="list-row attention-row attention-row-compact" key={payment.id}>
                   <Link className="product-row-summary" to={`/payments/${payment.id}/edit`}>
                     <span className="product-row-line1">
                       <span className="product-row-name">

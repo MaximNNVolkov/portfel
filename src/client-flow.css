@@ -66,3 +66,12 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .page-heading .primary-button .label-short { display: inline; }
   .page-heading .primary-button .label-full { display: none; }
 }
+
+.icon-button { display: inline-flex; align-items: center; }
+.bell-icon { display: block; }
+/* Просроченная выплата: короткая кнопка остаётся справа и на телефоне. */
+@media (max-width: 680px) {
+  .attention-row-compact { flex-direction: row; align-items: center; }
+  .attention-row-compact .attention-actions { flex: 0 0 auto; padding: 0 14px 0 0; }
+}
+.connection-state { white-space: nowrap; }
