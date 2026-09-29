@@ -36,6 +36,7 @@ import {
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
+import { parseCsv, parseMapping, statementRows, type StatementRow } from './statement-import.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
@@ -94,7 +95,12 @@ const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHe
 const forgotPasswordEmailLimiter = new EmailRateLimiter()
 
 app.use(helmet())
-app.use(express.json())
+// Выписка из банка приходит текстом в JSON и бывает больше стандартных 100 КБ — лимит
+// поднят только для импорта, остальным запросам большие тела не нужны.
+const STATEMENT_IMPORT_PATH = /^\/api\/imports\/statement/
+const defaultJson = express.json()
+const statementJson = express.json({ limit: '5mb' })
+app.use((request, response, next) => (STATEMENT_IMPORT_PATH.test(request.path) ? statementJson : defaultJson)(request, response, next))
 app.use('/api', apiLimiter)
 // CSRF (§28): cookie браузер прикладывает сам, поэтому изменяющий запрос без Bearer обязан
 // нести заголовок X-Requested-With. Чужой сайт не может выставить его без CORS-preflight,
@@ -753,6 +759,57 @@ app.get('/api/portfolio/history', async (request, response) => {
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
 })
+// Импорт банковской выписки (§27): предпросмотр показывает, что найдено, что с ошибкой и
+// что уже загружалось, — и ничего не пишет; загрузка заводит денежные операции
+// (пополнение, снятие, проценты) с ключом повторной загрузки, так что тот же файл
+// второй раз ничего не задваивает.
+async function statementInputs(client: Db, userId: string, body: unknown) {
+  const { text, mapping } = (body ?? {}) as { text?: unknown; mapping?: unknown }
+  if (typeof text !== 'string' || !text.trim()) throw new Error('Файл выписки пустой')
+  const parsed = parseCsv(text)
+  if (!parsed.headers.length || !parsed.records.length) throw new Error('В файле нет строк с операциями')
+  const chosen = parseMapping(mapping, parsed.headers)
+  const rows = statementRows(parsed, chosen)
+  const known = new Set((await listTransactions(client, userId)).map((item) => item.externalId).filter(Boolean))
+  const withStatus = rows.map((row) => ({ ...row, duplicate: Boolean(row.externalId && known.has(row.externalId)) }))
+  return { headers: parsed.headers, mapping: chosen, rows: withStatus }
+}
+const importCounts = (rows: (StatementRow & { duplicate: boolean })[]) => ({
+  found: rows.length,
+  errors: rows.filter((row) => row.error).length,
+  duplicates: rows.filter((row) => !row.error && row.duplicate).length,
+  toImport: rows.filter((row) => !row.error && !row.duplicate).length,
+})
+app.post('/api/imports/statement/preview', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const result = await statementInputs(db, userId, request.body)
+    response.json({ ...result, counts: importCounts(result.rows) })
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось прочитать выписку' }) }
+})
+app.post('/api/imports/statement', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const counts = await withTransaction(db, async (client) => {
+      const { rows } = await statementInputs(client, userId, request.body)
+      const accountId = await defaultAccountId(client, userId)
+      for (const row of rows) {
+        if (row.error || row.duplicate || !row.type || !row.date || row.amount === undefined) continue
+        const transaction: Transaction = {
+          id: randomUUID(), accountId, type: row.type, date: row.date, amount: row.amount, currency: row.currency,
+          commission: 0, tax: 0, source: 'manual', externalId: row.externalId,
+          description: row.description || (row.type === 'WITHDRAW' ? 'Списание по выписке' : row.type === 'INTEREST' ? 'Проценты по выписке' : 'Зачисление по выписке'),
+        }
+        await insertTransaction(client, transaction)
+        await syncPayoutForTransaction(client, transaction)
+      }
+      await recordSnapshot(client, userId)
+      return importCounts(rows)
+    })
+    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors })
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось загрузить выписку' }) }
+})
+
 // Оценка НДФЛ за год и доходы для 3-НДФЛ. Налог считается в рублях при любой базовой
 // валюте портфеля; валюта пересчитывается по текущему курсу ЦБ (исторические — v2).
 async function taxInputs(request: Request, userId: string) {

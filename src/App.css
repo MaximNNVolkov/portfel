@@ -101,3 +101,13 @@
 .tax-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
 .tax-controls select { margin-left: 6px; }
 .tax-row { display: grid; gap: 4px; }
+/* Импорт выписки. */
+.file-picker { display: flex; align-items: center; gap: 12px; padding: 18px; border: 1px dashed var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); cursor: pointer; }
+.file-picker input { max-width: 100%; }
+.import-mapping { margin: 20px 0 12px; }
+.import-mapping h2 { margin: 0 0 10px; font-size: 18px; }
+.import-mapping-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.import-mapping-grid label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.file-picker { position: relative; }
+.file-picker:focus-within { outline: 2px solid var(--mint); outline-offset: 2px; }
