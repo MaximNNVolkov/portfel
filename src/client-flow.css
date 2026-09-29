@@ -20,7 +20,7 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .attention-row .product-row-summary { flex: 1; min-width: 0; }
 .attention-meta { flex: 0 0 auto; font-size: 11px; white-space: nowrap; }
 .attention-text { display: block; margin-top: 4px; padding-left: 15px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
-.attention-actions { flex: 0 0 auto; padding: 0 16px 0 0; }
+.attention-actions { flex: 0 0 190px; padding: 0 16px 0 0; text-align: right; }
 .attention-actions .outline-button { display: inline-block; white-space: nowrap; }
 .list-row > .attention-actions { padding: 0 16px 12px 31px; }
 .attention-section + .attention-section { margin-top: 26px; }
@@ -62,7 +62,7 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .category-block .donut-wrap { display: none; }
   .slice-totals { grid-template-columns: 1fr 1fr; padding: 14px; }
   .attention-row { flex-direction: column; align-items: stretch; gap: 0; }
-  .attention-actions { padding: 0 16px 12px 31px; }
+  .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; text-align: left; }
   .page-heading .primary-button .label-short { display: inline; }
   .page-heading .primary-button .label-full { display: none; }
 }
