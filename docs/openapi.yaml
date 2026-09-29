@@ -446,6 +446,69 @@ paths:
                     percent: { type: [number, 'null'] }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/imports/statement/preview:
+    post:
+      tags: [transactions]
+      summary: Предпросмотр импорта банковской выписки (CSV)
+      description: |
+        Разбирает CSV, угадывает колонки (или берёт выбранные) и показывает, сколько строк
+        найдено, сколько с ошибкой и сколько уже загружалось. Ничего не записывает.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatementImportRequest' }
+      responses:
+        '200':
+          description: Колонки, выбранное сопоставление, строки и счётчики
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  headers: { type: array, items: { type: string } }
+                  mapping: { $ref: '#/components/schemas/StatementMapping' }
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        line: { type: integer }
+                        date: { type: string, format: date }
+                        amount: { type: number }
+                        type: { type: string, enum: [DEPOSIT, WITHDRAW, INTEREST] }
+                        currency: { type: string }
+                        description: { type: string }
+                        error: { type: string }
+                        duplicate: { type: boolean }
+                  counts: { $ref: '#/components/schemas/StatementImportCounts' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/imports/statement:
+    post:
+      tags: [transactions]
+      summary: Загрузить операции из банковской выписки
+      description: Строки с ошибкой и уже загруженные пропускаются; повторная загрузка того же файла ничего не задваивает.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatementImportRequest' }
+      responses:
+        '201':
+          description: Сколько операций добавлено и пропущено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: { type: integer }
+                  duplicates: { type: integer }
+                  errors: { type: integer }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
   /api/tax/estimate:
     get:
       tags: [portfolio]
@@ -666,6 +729,29 @@ components:
       schema: { type: integer, minimum: 0 }
 
   schemas:
+    StatementMapping:
+      type: object
+      description: Номера колонок (с 0); null — колонка не используется.
+      properties:
+        date: { type: [integer, 'null'] }
+        amount: { type: [integer, 'null'] }
+        income: { type: [integer, 'null'] }
+        expense: { type: [integer, 'null'] }
+        description: { type: [integer, 'null'] }
+        currency: { type: [integer, 'null'] }
+    StatementImportRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, description: Содержимое CSV-файла выписки }
+        mapping: { $ref: '#/components/schemas/StatementMapping' }
+    StatementImportCounts:
+      type: object
+      properties:
+        found: { type: integer }
+        errors: { type: integer }
+        duplicates: { type: integer }
+        toImport: { type: integer }
     Error:
       type: object
       properties:

@@ -451,7 +451,7 @@ const navItems = [
   ["Рекомендации", "✦", "/recommendations", false],
   ["Отчёты", "▤", "/reports", true],
   ["Интеграции", "⇄", "/integrations", false],
-  ["Импорт", "⇩", "/import", true],
+  ["Импорт", "⇩", "/import", false],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -1850,12 +1850,7 @@ function AppMvp() {
           />
           <Route
             path="/import"
-            element={
-              <ComingSoonPage
-                title="Импорт"
-                text="Импорт из Excel/CSV появится в следующей версии приложения. Сейчас добавить активы можно вручную, со скриншота или через Т-Инвестиции."
-              />
-            }
+            element={<StatementImportPage token={token} onImported={() => setReloadKey((key) => key + 1)} />}
           />
           <Route
             path="/settings"
@@ -1991,9 +1986,9 @@ function Dashboard({
               <span className="empty-option-icon">⇩</span>
               <div>
                 <strong>
-                  Импортировать Excel / CSV <span className="v2-badge">v2</span>
+                  Загрузить выписку из банка
                 </strong>
-                <small>Пока недоступно, появится в следующей версии</small>
+                <small>CSV из интернет-банка: пополнения, снятия и проценты</small>
               </div>
             </Link>
           </div>
@@ -3850,6 +3845,226 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
     </section>
   );
 }
+type StatementMapping = {
+  date: number | null;
+  amount: number | null;
+  income: number | null;
+  expense: number | null;
+  description: number | null;
+  currency: number | null;
+};
+type StatementPreviewRow = {
+  line: number;
+  date?: string;
+  amount?: number;
+  type?: "DEPOSIT" | "WITHDRAW" | "INTEREST";
+  currency: string;
+  description: string;
+  error?: string;
+  duplicate: boolean;
+};
+type StatementPreview = {
+  headers: string[];
+  mapping: StatementMapping;
+  rows: StatementPreviewRow[];
+  counts: { found: number; errors: number; duplicates: number; toImport: number };
+};
+const MAPPING_FIELDS: [keyof StatementMapping, string][] = [
+  ["date", "Дата"],
+  ["amount", "Сумма (со знаком)"],
+  ["income", "Приход"],
+  ["expense", "Расход"],
+  ["description", "Описание"],
+  ["currency", "Валюта"],
+];
+const STATEMENT_TYPE_LABELS: Record<NonNullable<StatementPreviewRow["type"]>, string> = {
+  DEPOSIT: "Пополнение",
+  WITHDRAW: "Снятие",
+  INTEREST: "Проценты",
+};
+function operationsWord(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return "операцию";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "операции";
+  return "операций";
+}
+// Файлы из интернет-банков бывают в UTF-8 и в Windows-1251: сначала строгий UTF-8,
+// при ошибке — кириллическая кодировка, иначе вместо заголовков была бы каша.
+async function readStatementFile(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch {
+    return new TextDecoder("windows-1251").decode(buffer);
+  }
+}
+// Импорт банковской выписки (§27): файл → предпросмотр с найденными колонками и счётчиками
+// (найдено, ошибки, уже загружено) → загрузка. Разбор и проверки — на бэкенде; страница
+// только показывает результат и даёт поправить колонки. Все шаги — на одной странице
+// со своим URL, без модальных окон (§40.7).
+function StatementImportPage({ token, onImported }: { token: string; onImported: () => void }) {
+  const [fileName, setFileName] = useState("");
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState<StatementPreview | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number } | null>(null);
+  const [visible, setVisible] = useState(20);
+
+  async function requestPreview(content: string, mapping?: StatementMapping) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/imports/statement/preview`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text: content, mapping }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Не удалось прочитать выписку");
+      setPreview(result as StatementPreview);
+    } catch (reason) {
+      setPreview(null);
+      setError(reason instanceof Error ? reason.message : "Не удалось прочитать выписку");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseFile(file: File | undefined) {
+    if (!file) return;
+    setDone(null);
+    setVisible(20);
+    setFileName(file.name);
+    const content = await readStatementFile(file);
+    setText(content);
+    await requestPreview(content);
+  }
+
+  async function commit() {
+    if (!preview) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/imports/statement`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text, mapping: preview.mapping }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Не удалось загрузить выписку");
+      setDone(result);
+      setPreview(null);
+      onImported();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось загрузить выписку");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Page title="Импорт выписки" subtitle="Пополнения, снятия и проценты из CSV-выписки банка">
+      {done ? (
+        <div className="empty-state">
+          <p>
+            Загружено операций: <strong>{done.imported}</strong>
+            {done.duplicates > 0 ? ` · уже были раньше: ${done.duplicates}` : ""}
+            {done.errors > 0 ? ` · пропущено с ошибкой: ${done.errors}` : ""}
+          </p>
+          <div className="tax-controls">
+            <Link className="primary-button" to="/transactions">К операциям</Link>
+            <button type="button" className="outline-button" onClick={() => { setDone(null); setFileName(""); setText(""); }}>
+              Загрузить ещё файл
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <label className="file-picker">
+            <span className="outline-button">Выбрать файл</span>
+            <span className="muted">{fileName || "CSV-файл выписки из интернет-банка"}</span>
+            <input className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => chooseFile(event.target.files?.[0])} />
+          </label>
+          <p className="muted small-note">
+            В интернет-банке выгрузите выписку по счёту или карте в CSV. Каждая строка станет операцией
+            со свободными деньгами: приход — пополнением, расход — снятием, начисленные проценты — доходом.
+          </p>
+        </>
+      )}
+      {error && <p className="form-error">{error}</p>}
+      {busy && <p>Читаем файл…</p>}
+      {preview && !busy && (
+        <>
+          <section className="import-mapping">
+            <h2>Колонки</h2>
+            <div className="import-mapping-grid">
+              {MAPPING_FIELDS.map(([field, label]) => (
+                <label key={field}>
+                  {label}
+                  <select
+                    value={preview.mapping[field] ?? ""}
+                    onChange={(event) =>
+                      requestPreview(text, { ...preview.mapping, [field]: event.target.value === "" ? null : Number(event.target.value) })
+                    }
+                  >
+                    <option value="">— не использовать</option>
+                    {preview.headers.map((header, index) => (
+                      <option key={index} value={index}>{header || `Колонка ${index + 1}`}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          </section>
+          <div className="stat-strip">
+            <article className="stat-card"><span>Найдено строк</span><strong>{preview.counts.found}</strong></article>
+            <article className="stat-card"><span>Будет загружено</span><strong className="teal-text">{preview.counts.toImport}</strong></article>
+            <article className="stat-card">
+              <span>Пропустим</span>
+              <strong className={preview.counts.errors + preview.counts.duplicates > 0 ? "warning-text" : "muted"}>
+                {preview.counts.errors + preview.counts.duplicates}
+              </strong>
+              <small>ошибки: {preview.counts.errors} · уже загружены: {preview.counts.duplicates}</small>
+            </article>
+          </div>
+          <div className="product-list">
+            {preview.rows.slice(0, visible).map((row) => (
+              <article className="list-row" key={row.line}>
+                <div className="product-row-summary product-row-static tax-row">
+                  <span className="product-row-line1">
+                    <strong>{row.description || (row.type ? STATEMENT_TYPE_LABELS[row.type] : `Строка ${row.line}`)}</strong>
+                    <span className={row.type === "WITHDRAW" ? "danger-text" : row.type ? "teal-text" : "muted"}>
+                      {row.amount !== undefined
+                        ? `${row.type === "WITHDRAW" ? "−" : "+"}${row.amount.toLocaleString("ru-RU")} ${row.currency}`
+                        : "—"}
+                    </span>
+                  </span>
+                  <small className={row.error ? "warning-text" : "muted"}>
+                    {row.error
+                      ? `Строка ${row.line}: ${row.error}`
+                      : `${row.date ? dateLabel(row.date) : ""} · ${row.type ? STATEMENT_TYPE_LABELS[row.type] : ""}${row.duplicate ? " · уже загружено" : ""}`}
+                  </small>
+                </div>
+              </article>
+            ))}
+          </div>
+          {preview.rows.length > visible && (
+            <button type="button" className="outline-button" onClick={() => setVisible((count) => count + 20)}>
+              Загрузить ещё
+            </button>
+          )}
+          <div className="tax-controls">
+            <button type="button" className="primary-button" disabled={preview.counts.toImport === 0} onClick={commit}>
+              Загрузить {preview.counts.toImport} {operationsWord(preview.counts.toImport)}
+            </button>
+          </div>
+        </>
+      )}
+    </Page>
+  );
+}
 type TaxLine = { key: string; label: string; income: number; exempt: number; taxBase: number; how: string };
 type TaxEstimate = {
   year: number;
@@ -3929,12 +4144,12 @@ function TaxPage({ token }: { token: string }) {
             <article className="stat-card">
               <span>Уже удержано</span>
               <strong>{rub(estimate.withheld)}</strong>
-              <small>по операциям с налогом</small>
+              <small>по налогу, указанному в операциях</small>
             </article>
             <article className="stat-card">
               <span>Остаётся</span>
               <strong className={estimate.toPay > 0 ? "warning-text" : "muted"}>{rub(estimate.toPay)}</strong>
-              <small>оценка к уплате</small>
+              <small>если не удержано — сверьте со справкой брокера</small>
             </article>
           </div>
           <div className="product-list">

@@ -550,6 +550,33 @@ async function run() {
       assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    await test('импорт выписки: предпросмотр, загрузка, повторная загрузка не задваивает', async () => {
+      const before = await api('/api/portfolio/summary', { token: tokenA })
+      const text = [
+        'Дата операции;Сумма операции;Валюта;Описание',
+        '10.03.2026;50 000,00;RUB;Смоук-тест пополнение',
+        '11.03.2026;-1 500,50;RUB;Смоук-тест снятие',
+        '31.03.2026;321,45;RUB;Смоук-тест выплата процентов',
+        'не дата;1;RUB;битая строка',
+      ].join('\r\n')
+      const preview = await api('/api/imports/statement/preview', { method: 'POST', token: tokenA, body: { text } })
+      assert.equal(preview.status, 200)
+      assert.deepEqual(preview.json.counts, { found: 4, errors: 1, duplicates: 0, toImport: 3 })
+      const imported = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text } })
+      assert.equal(imported.status, 201)
+      assert.deepEqual(imported.json, { imported: 3, duplicates: 0, errors: 1 })
+      const after = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(Math.round((after.json.cash - before.json.cash) * 100) / 100, 48820.95)
+      assert.equal(Math.round((after.json.paid - before.json.paid) * 100) / 100, 321.45)
+      const again = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text } })
+      assert.deepEqual(again.json, { imported: 0, duplicates: 3, errors: 1 })
+      assert.equal((await api('/api/imports/statement/preview', { method: 'POST', token: tokenA, body: { text: '' } })).status, 400)
+      const transactions = await api('/api/transactions', { token: tokenA })
+      for (const item of transactions.json.filter((row: { description?: string }) => row.description?.startsWith('Смоук-тест ') && /пополнение|снятие|выплата процентов/.test(row.description))) {
+        assert.equal((await api(`/api/transactions/${item.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      }
+    })
+
     await test('доходность за периоды отдаётся списком (§23)', async () => {
       const returns = await api('/api/portfolio/returns', { token: tokenA })
       assert.equal(returns.status, 200)
