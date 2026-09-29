@@ -116,3 +116,5 @@
 .import-row { grid-template-columns: auto 1fr; column-gap: 10px; }
 .import-row > input[type="checkbox"] { grid-row: span 2; align-self: center; }
 .import-row > :not(input) { grid-column: 2; }
+/* Банковские описания без пробелов («ОПЛАТА_ПО_ДОГОВОРУ_…») не вылезают за карточку (Т25). */
+.confirm-card, .detail-line span, .import-row > :not(input), .list-row-details { overflow-wrap: anywhere; min-width: 0; }

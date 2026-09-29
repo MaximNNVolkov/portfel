@@ -142,6 +142,14 @@ function groupPayouts(payouts: AttentionPayout[]): PayoutGroup[] {
   return [...groups.values()]
 }
 
+// Как назвать одну просроченную выплату: погашение и возврат вклада — не «выплата»
+// дохода (тестировщик Т26), в «Выплатах» они тоже подписаны по типу.
+function overdueLabel(payouts: AttentionPayout[]): [string, string] {
+  if (payouts.some((payout) => payout.type === 'REDEMPTION')) return ['Погашение', 'ожидалось']
+  if (payouts.some((payout) => payout.type === 'DEPOSIT_PRINCIPAL')) return ['Возврат вклада', 'ожидался']
+  return ['Выплата', 'ожидалась']
+}
+
 type PositionLookup = (payout: AttentionPayout) => AttentionPosition | undefined
 function payoutSubject(group: PayoutGroup, positionOf: PositionLookup): { name: string; position?: AttentionPosition } {
   const first = group.payouts[0]
@@ -198,7 +206,7 @@ export function buildAttention(
       title: position?.name ?? (first.title || 'Выплата'),
       text: dates.size > 1
         ? `${dates.size} ${paymentsWord(dates.size)} на ${formatMoney(amount, first.currency)} не отмечены полученными — отметьте, если деньги пришли`
-        : `Выплата ${formatMoney(amount, first.currency)} ожидалась ${inDaysAgo(daysBetween(first.date, today))} — отметьте, если деньги пришли`,
+        : `${overdueLabel(payouts)[0]} ${formatMoney(amount, first.currency)} ${overdueLabel(payouts)[1]} ${inDaysAgo(daysBetween(first.date, today))} — отметьте, если деньги пришли`,
       action: 'mark_received',
       date: first.date,
       amount,
@@ -289,12 +297,15 @@ export function buildAttention(
         })
       }
       if (position.forecastNote) {
+        // Прошедшее погашение без номинала — деньги, возможно, уже пришли, а бумага висит
+        // в портфеле: это важно, а не «к сведению» (тестировщик Т20).
+        const maturityPassed = position.forecastNote.startsWith('Срок погашения прошёл')
         items.push({
           id: `forecast:${position.id}`,
           kind: 'forecast_missing',
-          severity: 3,
+          severity: maturityPassed ? 2 : 3,
           title: position.name,
-          text: `${position.forecastNote} — выплаты по нему не прогнозируются`,
+          text: maturityPassed ? position.forecastNote : `${position.forecastNote} — выплаты по нему не прогнозируются`,
           action: position.source === 'broker' ? 'open_position' : 'edit_position',
           institution: position.institution,
           positionId: position.id,

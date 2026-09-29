@@ -45,7 +45,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumCashBalances, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  sumCashBalances, insertTransactions, deleteTransactionsByExternalPrefix, updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -99,7 +99,10 @@ app.use(helmet())
 // поднят только для импорта, остальным запросам большие тела не нужны.
 const STATEMENT_IMPORT_PATH = /^\/api\/imports\/statement/
 const defaultJson = express.json()
-const statementJson = express.json({ limit: '5mb' })
+// 10 МБ: выписка в windows-1251 после перекодировки и упаковки в JSON растёт в ~1,4 раза,
+// а nginx пропускает тело до 12 МБ.
+const STATEMENT_LIMIT_MB = 10
+const statementJson = express.json({ limit: `${STATEMENT_LIMIT_MB}mb` })
 app.use((request, response, next) => (STATEMENT_IMPORT_PATH.test(request.path) ? statementJson : defaultJson)(request, response, next))
 app.use('/api', apiLimiter)
 // CSRF (§28): cookie браузер прикладывает сам, поэтому изменяющий запрос без Bearer обязан
@@ -699,7 +702,13 @@ app.get('/api/portfolio/summary', async (request, response) => {
     ? null
     : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
   const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
+  // Расходов в операциях больше, чем поступлений (типично для выписки по карте, Т19):
+  // минус в стоимость не идёт, но и молчать о нём нельзя — экран просит начальный остаток.
+  const cashShortfall = (await sumCashBalances(db, userId))
+    .filter((item) => item.shortfall >= 0.005)
+    .map((item) => ({ currency: item.currency, amount: Math.round(item.shortfall * 100) / 100 }))
   response.json({
+    cashShortfall,
     total: aggregate.value,
     invested: aggregate.invested,
     profit: aggregate.pnl,
@@ -800,15 +809,19 @@ app.post('/api/imports/statement', async (request, response) => {
         ? (await ensureAccount(client, (await ensurePortfolio(client, userId, randomUUID())).id, randomUUID(), { type: 'bank', provider: institution, currency: 'RUB' })).id
         : await defaultAccountId(client, userId)
       const batch = randomUUID().slice(0, 8)
+      const transactions: Transaction[] = []
       for (const row of rows) {
         if (!importable(row) || !row.type || !row.date || row.amount === undefined || !row.externalId) continue
-        const transaction: Transaction = {
+        transactions.push({
           id: randomUUID(), accountId, type: row.type, date: row.date, amount: row.amount, currency: row.currency,
           commission: 0, tax: 0, source: 'manual', externalId: `import:${batch}:${row.externalId.split(':').pop()}`,
           description: row.description || (row.type === 'WITHDRAW' ? 'Списание по выписке' : row.type === 'INTEREST' ? 'Проценты по выписке' : 'Зачисление по выписке'),
-        }
-        await insertTransaction(client, transaction)
-        await syncPayoutForTransaction(client, transaction)
+        })
+      }
+      await insertTransactions(client, transactions)
+      // Выплата нужна только процентам; пополнения и снятия её не порождают.
+      for (const transaction of transactions) {
+        if (transaction.type === 'INTEREST') await syncPayoutForTransaction(client, transaction)
       }
       await recordSnapshot(client, userId)
       return { ...importCounts(rows), batch }
@@ -823,14 +836,9 @@ app.delete('/api/imports/statement/:batch', async (request, response) => {
   const batch = String(request.params.batch)
   if (!/^[0-9a-f]{8}$/.test(batch)) return response.status(404).json({ error: 'Загрузка не найдена' })
   const deleted = await withTransaction(db, async (client) => {
-    const prefix = `import:${batch}:`
-    const own = (await listTransactions(client, userId)).filter((item) => item.externalId?.startsWith(prefix))
-    for (const item of own) {
-      await deletePayoutsForTransaction(client, item.id)
-      await deleteTransaction(client, userId, item.id)
-    }
-    if (own.length) await recordSnapshot(client, userId)
-    return own.length
+    const count = await deleteTransactionsByExternalPrefix(client, userId, `import:${batch}:`)
+    if (count) await recordSnapshot(client, userId)
+    return count
   })
   if (!deleted) return response.status(404).json({ error: 'Загрузка не найдена' })
   response.json({ deleted })
@@ -900,7 +908,8 @@ app.get('/api/portfolio/structure', async (request, response) => {
   // движок их не оценивает, и без фильтра они попадали в разрезы как «цена недоступна».
   const keyed = (keyOf: (position: Position) => string | null): KeyedValuation[] =>
     positions
-      .filter((position) => !position.closedOn)
+      // Полностью проданная позиция (количество 0) — тоже уже не в портфеле (тестировщик Т27).
+      .filter((position) => !position.closedOn && position.quantity !== 0)
       .map((position) => ({ key: keyOf(position), valuation: valuationById.get(position.id) }))
       .filter((item): item is { key: string; valuation: typeof item.valuation } => item.key !== null)
       .map(({ key, valuation }) => ({
@@ -1403,6 +1412,14 @@ app.delete('/api/transactions/:id', async (request, response) => {
 })
 
 app.use((error: Error, request: Request, response: Response, _next: express.NextFunction) => {
+  // Слишком большое тело — не «внутренняя ошибка», а понятная просьба (тестировщик Т16).
+  if ((error as { type?: string }).type === 'entity.too.large') {
+    return response.status(413).json({
+      error: STATEMENT_IMPORT_PATH.test(request.path)
+        ? `Файл выписки слишком большой (больше ${STATEMENT_LIMIT_MB} МБ). Выгрузите выписку за более короткий период.`
+        : 'Запрос слишком большой',
+    })
+  }
   logError(`${request.method} ${request.path}`, error)
   response.status(500).json({ error: 'Внутренняя ошибка сервера' })
 })

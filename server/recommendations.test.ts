@@ -287,5 +287,14 @@ test('все 4 правила собираются в один список', ()
   assert.ok(types.has('payout_gap'))
 })
 
+test('погашенная бумага не попадает в концентрацию по инструменту (Т26)', () => {
+  const positions = [
+    { id: 'm', name: 'Погашенная', group: 'Облигации' as const, maturityDate: '2026-09-01', valueBase: 450, pnlPercent: 0 },
+    { id: 'c', name: 'Деньги', group: 'Деньги' as const, valueBase: 550, pnlPercent: 0 },
+  ]
+  const result = detectConcentration(positions, 1000, undefined, new Date('2026-09-29T12:00:00Z'))
+  assert.ok(!result.some((item) => item.payload.kind === 'instrument' && item.payload.id === 'm'))
+})
+
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
 process.exit(failed ? 1 : 0)

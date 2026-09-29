@@ -977,6 +977,14 @@ components:
         overdue: { type: number }
         paid: { type: number }
         cash: { type: [number, 'null'] }
+        cashShortfall:
+          type: array
+          description: Валюты, где расходов в операциях больше поступлений; минус в стоимость не входит.
+          items:
+            type: object
+            properties:
+              currency: { type: string }
+              amount: { type: number }
         positions: { type: integer }
         financialResult: { type: [number, 'null'], description: 'изменение стоимости + выплаты − комиссии − налоги (§10.6)' }
         returnPercent: { type: [number, 'null'] }

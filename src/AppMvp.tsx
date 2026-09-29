@@ -317,6 +317,7 @@ type PortfolioSummary = {
   // Свободные деньги (§7.1, §12) — сальдо денежных операций, посчитанное на бэкенде.
   // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
   cash: number | null;
+  cashShortfall?: { currency: string; amount: number }[];
   groups: GroupSummary[];
   /** Целевая структура: цель, текущая доля и сумма до цели по категориям. Пусто — цель не задана. */
   rebalance?: RebalanceRow[];
@@ -1211,11 +1212,15 @@ function AppMvp() {
       }
     };
   }
+  // Сводка и история меняются вместе: иначе под графиком оставалось старое «Сейчас»,
+  // а общая стоимость уже новая (тестировщик Т21).
   async function refreshSummary() {
-    const response = await apiFetch(`${apiUrl}/portfolio/summary`, {
-      headers: authHeaders,
-    });
+    const [response, historyResponse] = await Promise.all([
+      apiFetch(`${apiUrl}/portfolio/summary`, { headers: authHeaders }),
+      apiFetch(`${apiUrl}/portfolio/history`, { headers: authHeaders }),
+    ]);
     if (response.ok) setSummary((await response.json()) as PortfolioSummary);
+    if (historyResponse.ok) setHistory((await historyResponse.json()) as Snapshot[]);
   }
   async function refreshBrokerStatus() {
     const response = await apiFetch(`${apiUrl}/brokers/tinkoff`, {
@@ -1958,7 +1963,10 @@ function Dashboard({
     );
   }
   // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
-  if (products.length === 0 && !cash) {
+  // cash === null — деньги есть, но курса их валюты нет (Т18); минус по операциям (Т19)
+  // тоже не «пустой портфель».
+  const cashShortfall = summary?.cashShortfall ?? [];
+  if (products.length === 0 && cash === 0 && cashShortfall.length === 0) {
     return (
       <div className="content-wrap">
         <section className="empty-portfolio">
@@ -2067,6 +2075,16 @@ function Dashboard({
             часть портфеля. <Link to="/integrations">Повторить подключение</Link>
           </div>
         )}
+        {cashShortfall.length > 0 && (
+          <div className="demo-note warn">
+            ⚠ Расходов в операциях больше, чем поступлений:{" "}
+            {cashShortfall
+              .map((item) => `−${item.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${currencySigns[item.currency] ?? item.currency}`)
+              .join(", ")}. В свободные деньги
+            минус не идёт — добавьте начальный остаток или пополнения.{" "}
+            <Link to="/transactions/new">Добавить пополнение</Link>
+          </div>
+        )}
         {valuation.incomplete && (
           <div className="demo-note warn">
             ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
@@ -2098,8 +2116,9 @@ function Dashboard({
             <div>
               {/* Число в заголовке — то же, что на колокольчике (критик К9): срочное и важное.
                   «К сведению» считается отдельно, чтобы два счётчика не спорили. */}
-              <h2>Требует внимания{urgentAttention > 0 ? ` · ${urgentAttention}` : ""}</h2>
-              {attention.length > urgentAttention && (
+              {/* Срочного нет — заголовок «К сведению», а не повисшее «и N к сведению» (Т22). */}
+              <h2>{urgentAttention > 0 ? `Требует внимания · ${urgentAttention}` : attention.length > 0 ? `К сведению · ${attention.length}` : "Требует внимания"}</h2>
+              {urgentAttention > 0 && attention.length > urgentAttention && (
                 <p className="muted">и {attention.length - urgentAttention} к сведению</p>
               )}
             </div>
@@ -3160,7 +3179,9 @@ function PaymentsPage({
             ? "Пока нет добавленных выплат."
             : rangeInverted
               ? "Период задан наоборот — поменяйте «С» и «По» местами."
-              : "Нет выплат, подходящих под выбранные условия."}
+              : overduePayments.length > 0
+                ? "Других выплат, кроме просроченных выше, нет."
+                : "Нет выплат, подходящих под выбранные условия."}
         </p>
       ) : viewMode === "day" ? (
         <>
@@ -3947,6 +3968,14 @@ function ImportUndoPage({ token, onUndone }: { token: string; onUndone: () => vo
     </Page>
   );
 }
+const STATEMENT_MAX_BYTES = 6 * 1024 * 1024;
+function importErrorText(status: number, fallback: string) {
+  if (status === 413) return "Файл выписки слишком большой. Выгрузите выписку за более короткий период.";
+  if (status === 502 || status === 504) {
+    return "Сервер не дождался конца загрузки. Проверьте раздел «Операции»: повторная загрузка того же файла ничего не задвоит.";
+  }
+  return fallback;
+}
 function operationsWord(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -3956,8 +3985,12 @@ function operationsWord(count: number) {
 }
 // Файлы из интернет-банков бывают в UTF-8 и в Windows-1251: сначала строгий UTF-8,
 // при ошибке — кириллическая кодировка, иначе вместо заголовков была бы каша.
+// Excel «Текст в Юникоде» — UTF-16 с BOM (тестировщик Т17): узнаём по первым байтам.
 async function readStatementFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
+  const head = new Uint8Array(buffer.slice(0, 2));
+  if (head[0] === 0xff && head[1] === 0xfe) return new TextDecoder("utf-16le").decode(buffer);
+  if (head[0] === 0xfe && head[1] === 0xff) return new TextDecoder("utf-16be").decode(buffer);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
   } catch {
@@ -3973,7 +4006,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   const [text, setText] = useState("");
   const [preview, setPreview] = useState<StatementPreview | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"" | "reading" | "saving">("");
   const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number; skipped: number; batch?: string } | null>(null);
   const [visible, setVisible] = useState(20);
   const [pageSize, setPageSize] = useState(20);
@@ -3984,7 +4017,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   const [excluded, setExcluded] = useState<number[]>([]);
 
   async function requestPreview(content: string, mapping?: StatementMapping, options?: { only?: "all" | "income"; exclude?: number[] }) {
-    setBusy(true);
+    setBusy("reading");
     setError("");
     try {
       const response = await apiFetch(`${apiUrl}/imports/statement/preview`, {
@@ -3992,14 +4025,14 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ text: content, mapping, only: options?.only ?? only, exclude: options?.exclude ?? excluded }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Не удалось прочитать выписку");
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? importErrorText(response.status, "Не удалось прочитать выписку"));
       setPreview(result as StatementPreview);
     } catch (reason) {
       setPreview(null);
       setError(reason instanceof Error ? reason.message : "Не удалось прочитать выписку");
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   }
 
@@ -4016,6 +4049,11 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
       setError("Нужен CSV-файл. В интернет-банке выберите выгрузку выписки в формате CSV; PDF и Excel пока не читаются.");
       return;
     }
+    if (file.size > STATEMENT_MAX_BYTES) {
+      setPreview(null);
+      setError("Файл выписки слишком большой. Выгрузите выписку за более короткий период — например, по полугодиям.");
+      return;
+    }
     const content = await readStatementFile(file);
     setText(content);
     await requestPreview(content);
@@ -4023,7 +4061,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
 
   async function commit() {
     if (!preview) return;
-    setBusy(true);
+    setBusy("saving");
     setError("");
     try {
       const response = await apiFetch(`${apiUrl}/imports/statement`, {
@@ -4031,15 +4069,15 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ text, mapping: preview.mapping, only, exclude: excluded, institution }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Не удалось загрузить выписку");
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? importErrorText(response.status, "Не удалось загрузить выписку"));
       setDone(result);
       setPreview(null);
       onImported();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось загрузить выписку");
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   }
 
@@ -4077,7 +4115,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
         </>
       )}
       {error && <p className="form-error">{error}</p>}
-      {busy && <p>Читаем файл…</p>}
+      {busy && <p>{busy === "saving" ? `Загружаем ${preview?.counts.toImport ?? ""} ${operationsWord(preview?.counts.toImport ?? 0)}…` : "Читаем файл…"}</p>}
       {preview && !busy && (
         <>
           <section className="import-mapping">
@@ -4088,9 +4126,15 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
                   {label}
                   <select
                     value={preview.mapping[field] ?? ""}
-                    onChange={(event) =>
-                      requestPreview(text, { ...preview.mapping, [field]: event.target.value === "" ? null : Number(event.target.value) })
-                    }
+                    onChange={(event) => {
+                      const value = event.target.value === "" ? null : Number(event.target.value);
+                      const next = { ...preview.mapping, [field]: value };
+                      // Сумма со знаком и пара «приход/расход» — два разных способа: выбор одного
+                      // сбрасывает другой, иначе выбранное молча игнорировалось (Т24).
+                      if (value !== null && field === "amount") Object.assign(next, { income: null, expense: null });
+                      if (value !== null && (field === "income" || field === "expense")) next.amount = null;
+                      requestPreview(text, next);
+                    }}
                   >
                     <option value="">— не использовать</option>
                     {preview.headers.map((header, index) => (

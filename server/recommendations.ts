@@ -135,8 +135,10 @@ export function detectConcentration(
   positions: PositionSnapshot[],
   totalValue: number,
   rules: RecommendationRules = DEFAULT_RULES,
+  today: Date = new Date(),
 ): Recommendation[] {
   if (totalValue <= 0) return []
+  const todayIso = today.toISOString().slice(0, 10)
   const results: Recommendation[] = []
 
   // Доля инструмента — по всем его позициям: бумага, разложенная по двум счетам, не должна
@@ -156,6 +158,9 @@ export function detectConcentration(
   for (const { position, value } of byInstrument.values()) {
     const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
+    // Бумага с прошедшей датой погашения ждёт отметки «деньги пришли» — совет про её долю
+    // бессмыслен (тестировщик Т26): после отметки она уйдёт в свободные деньги.
+    if (position.maturityDate && position.maturityDate < todayIso) continue
     if (position.issuer) flaggedByIssuer.set(position.issuer, (flaggedByIssuer.get(position.issuer) ?? 0) + value)
     flaggedByGroup.set(position.group, (flaggedByGroup.get(position.group) ?? 0) + value)
     results.push({
@@ -330,7 +335,7 @@ export function buildRecommendations(
   today: Date = new Date(),
 ): Recommendation[] {
   return [
-    ...detectConcentration(positions, totalValue, rules),
+    ...detectConcentration(positions, totalValue, rules, today),
     ...detectMaturity(positions, totalValue, rules, today),
     ...detectDrawdown(positions, rules, today),
     ...detectPayoutGaps(payouts, rules, today),
