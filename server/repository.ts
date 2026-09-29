@@ -721,18 +721,22 @@ export async function deleteTransaction(db: Db, userId: string, id: string): Pro
 
 // Комиссии (§10.4) и налоги (§10.5) портфеля: и отдельные операции FEE/TAX, и поля
 // commission/tax внутри обычных операций. Считаются в базе, а не переносом всех строк в Node.
-export async function sumTransactionCosts(db: Db, userId: string): Promise<{ commissions: number; taxes: number }> {
+export async function sumTransactionCosts(db: Db, userId: string): Promise<{ commissions: MoneyRow[]; taxes: MoneyRow[] }> {
   const result = await db.query(
-    `SELECT
+    `SELECT t.currency,
        COALESCE(SUM(t.commission), 0) + COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'FEE'), 0) AS commissions,
        COALESCE(SUM(t.tax), 0) + COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'TAX'), 0) AS taxes
      FROM portfolio.transactions t
      JOIN portfolio.accounts a ON a.id = t.account_id
      JOIN portfolio.portfolios f ON f.id = a.portfolio_id
-     WHERE f.user_id = $1`,
+     WHERE f.user_id = $1
+     GROUP BY t.currency`,
     [userId],
   )
-  return { commissions: Number(result.rows[0]?.commissions ?? 0), taxes: Number(result.rows[0]?.taxes ?? 0) }
+  return {
+    commissions: result.rows.map((row) => ({ currency: row.currency, amount: Number(row.commissions ?? 0) })),
+    taxes: result.rows.map((row) => ({ currency: row.currency, amount: Number(row.taxes ?? 0) })),
+  }
 }
 
 // Денежный остаток (§12, BUG-05): сальдо денежных движений по операциям, по валютам.
@@ -875,20 +879,23 @@ export async function deleteForecastPayouts(db: Db, userId: string): Promise<voi
 // BUG-22 (§22): ожидаемая выплата с датой в прошлом — не «ожидается», а «просрочено»:
 // деньги либо пришли и не отмечены, либо не пришли вовсе. Считается отдельно и в
 // «Ожидается» не складывается. today — дата «сегодня» по часам сервера (YYYY-MM-DD).
-export async function sumPayouts(db: Db, userId: string, today: string): Promise<{ expected: number; overdue: number; received: number }> {
+// Суммы выплат по валютам: складывать их в одно число здесь нельзя — пересчёт в базовую
+// валюту делает Portfolio Engine (sumInBase, §13).
+export type PayoutTotals = { expected: MoneyRow[]; overdue: MoneyRow[]; received: MoneyRow[] }
+export type MoneyRow = { amount: number; currency: string }
+
+export async function sumPayouts(db: Db, userId: string, today: string): Promise<PayoutTotals> {
   const result = await db.query(
-    `SELECT
+    `SELECT o.currency,
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date >= $2::date), 0) AS expected,
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date < $2::date), 0) AS overdue,
        COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received' AND o.type NOT IN (${PRINCIPAL_PAYOUT_SQL})), 0) AS received
-     ${PAYOUT_FROM} WHERE f.user_id = $1`,
+     ${PAYOUT_FROM} WHERE f.user_id = $1 GROUP BY o.currency`,
     [userId, today],
   )
-  return {
-    expected: Number(result.rows[0]?.expected ?? 0),
-    overdue: Number(result.rows[0]?.overdue ?? 0),
-    received: Number(result.rows[0]?.received ?? 0),
-  }
+  const column = (name: 'expected' | 'overdue' | 'received'): MoneyRow[] =>
+    result.rows.map((row) => ({ currency: row.currency, amount: Number(row[name] ?? 0) }))
+  return { expected: column('expected'), overdue: column('overdue'), received: column('received') }
 }
 
 // ---------------------------------------------------------------------------

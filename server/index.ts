@@ -17,8 +17,8 @@ import {
 import { sendPasswordResetEmail } from './mailer.ts'
 import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
-  aggregateByGroup, aggregateByKey, calculateReturns, evaluatePosition,
-  type Breakdown, type KeyedValuation,
+  aggregateByGroup, aggregateByKey, calculateReturns, convertCurrency, evaluatePosition, sumInBase,
+  type Breakdown, type EngineContext, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import { buildAttention } from './attention.ts'
@@ -130,11 +130,15 @@ function localToday(): string {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
-function payoutToWire(payout: Payout, today = localToday()) {
+// context — для amountBase: сумма в базовой валюте портфеля (§13), чтобы клиент складывал
+// выплаты в разных валютах по курсу ЦБ, а не amount напрямую. null — курса нет (§7.3).
+function payoutToWire(payout: Payout, context?: EngineContext, today = localToday()) {
   return {
     id: payout.id,
     title: payout.description ?? '',
     amount: payout.amount,
+    amountBase: context ? convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates) : null,
+    baseCurrency: context?.baseCurrency ?? null,
     date: payout.date,
     type: payout.type,
     status: payout.status,
@@ -585,6 +589,14 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const context = await engineContext(baseCurrency)
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
   const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
+  // Выплаты, комиссии и налоги бывают в разных валютах (дивиденды в USD, купоны в CNY) —
+  // складываются только после пересчёта в базовую валюту (§13).
+  const expected = sumInBase(payouts.expected, context)
+  const overdue = sumInBase(payouts.overdue, context)
+  const received = sumInBase(payouts.received, context)
+  const commissions = sumInBase(costs.commissions, context)
+  const taxes = sumInBase(costs.taxes, context)
+  const unconverted = [...new Set([expected, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
   // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
   // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
   const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
@@ -597,18 +609,18 @@ app.get('/api/portfolio/summary', async (request, response) => {
     currentValue: aggregate.pnlValue,
     invested: aggregate.pnlInvested,
     // Полученный доход плюс реализованный результат закрытых вкладов и погашенных бумаг (§10.2).
-    payoutsReceived: payouts.received + realized,
-    commissions: costs.commissions,
-    taxes: costs.taxes,
+    payoutsReceived: received.total + realized,
+    commissions: commissions.total,
+    taxes: taxes.total,
   })
   response.json({
     total: aggregate.value,
     invested: aggregate.invested,
     profit: aggregate.pnl,
     profitPercent: aggregate.pnlPercent,
-    expected: payouts.expected,
-    overdue: payouts.overdue,
-    paid: payouts.received,
+    expected: expected.total,
+    overdue: overdue.total,
+    paid: received.total,
     cash,
     positions: positions.length,
     baseCurrency: aggregate.baseCurrency,
@@ -624,6 +636,8 @@ app.get('/api/portfolio/summary', async (request, response) => {
       incomplete: aggregate.valuationIncomplete,
       unavailable: aggregate.unavailable,
       estimated: aggregate.positions.filter((item) => item.estimated).map((item) => ({ id: item.id, name: item.name, group: item.group })),
+      // Валюты выплат/комиссий без курса ЦБ: их суммы в expected/paid/commissions не вошли.
+      unconvertedCurrencies: unconverted,
     },
   })
 })
@@ -646,10 +660,13 @@ app.get('/api/portfolio/structure', async (request, response) => {
   // только в разрезы по валютам и по инструментам (§12, §23).
   const cashKeyed = (keyOf: (currency: string) => string): KeyedValuation[] => aggregate.positions
     .filter((valuation) => isCashInput(valuation.id))
-    .map((valuation) => ({ key: keyOf(valuation.currency), investedBase: valuation.investedBase, valueBase: valuation.valueBase, priceUnavailable: valuation.priceUnavailable }))
+    .map((valuation) => ({ key: keyOf(valuation.currency), investedBase: valuation.investedBase, valueBase: valuation.valueBase, priceUnavailable: valuation.priceUnavailable, estimated: valuation.estimated }))
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
+  // Закрытые позиции (погашенные, вклады с истёкшим сроком) в портфеле уже не лежат —
+  // движок их не оценивает, и без фильтра они попадали в разрезы как «цена недоступна».
   const keyed = (keyOf: (position: Position) => string | null): KeyedValuation[] =>
     positions
+      .filter((position) => !position.closedOn)
       .map((position) => ({ key: keyOf(position), valuation: valuationById.get(position.id) }))
       .filter((item): item is { key: string; valuation: typeof item.valuation } => item.key !== null)
       .map(({ key, valuation }) => ({
@@ -657,6 +674,7 @@ app.get('/api/portfolio/structure', async (request, response) => {
         investedBase: valuation?.investedBase ?? null,
         valueBase: valuation?.valueBase ?? null,
         priceUnavailable: valuation?.priceUnavailable ?? true,
+        estimated: valuation?.estimated ?? false,
       }))
   const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf))
   response.json({
@@ -677,9 +695,10 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
   const baseCurrency = await resolveBaseCurrency(db, userId)
   // Доли считаются от всего портфеля, включая свободные деньги (§12); правила
   // применяются к инструментам — сам денежный остаток инструментом не является.
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), await engineContext(baseCurrency))
+  const context = await engineContext(baseCurrency)
+  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
-  const positionSnapshots: PositionSnapshot[] = positions.map((position) => {
+  const positionSnapshots: PositionSnapshot[] = positions.filter((position) => !position.closedOn).map((position) => {
     const valuation = valuationById.get(position.id)
     return {
       id: position.id,
@@ -692,7 +711,11 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
       pnlPercent: valuation?.pnlPercent ?? null,
     }
   })
-  const payoutSnapshots: PayoutSnapshot[] = payouts.map((payout) => ({ date: payout.date, amount: payout.amount, status: payout.status }))
+  // Разрывы в выплатах ищутся по суммам в базовой валюте: 100 USD и 100 ₽ — не одно и то же.
+  const payoutSnapshots: PayoutSnapshot[] = payouts.flatMap((payout) => {
+    const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
+    return amount === null ? [] : [{ date: payout.date, amount, status: payout.status }]
+  })
   return { recommendations: buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots), valuationById }
 }
 app.get('/api/recommendations', async (request, response) => {
@@ -771,7 +794,8 @@ async function defaultAccountId(client: Db, userId: string, currency = 'RUB'): P
 app.get('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const payouts = await listPayouts(db, userId, listOptions(request))
-  response.json(payouts.map((payout) => payoutToWire(payout)))
+  const context = await engineContext(await resolveBaseCurrency(db, userId))
+  response.json(payouts.map((payout) => payoutToWire(payout, context)))
 })
 // Привязка выплаты к инструменту (§22, BUG-23): клиент передаёт позицию, из неё берутся
 // инструмент, счёт и валюта. undefined — поле не прислано; null — выплата «ничья».
@@ -812,7 +836,7 @@ app.post('/api/payouts', async (request, response) => {
       await insertPayout(client, record)
       return record
     })
-    response.status(201).json(payoutToWire(payout))
+    response.status(201).json(payoutToWire(payout, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
 })
 app.patch('/api/payouts/:id', async (request, response) => {
@@ -839,7 +863,7 @@ app.patch('/api/payouts/:id', async (request, response) => {
       source: existing.source === 'forecast' ? 'manual' : existing.source,
     }
     await updatePayout(db, userId, updated)
-    response.json(payoutToWire(updated))
+    response.json(payoutToWire(updated, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
 })
 app.delete('/api/payouts/:id', async (request, response) => {
