@@ -714,7 +714,7 @@ components:
         positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
     TransactionInput:
       type: object
-      description: При создании обязательны type, amount, date; для BUY и SELL — positionId
+      description: При создании обязательны type, amount, date; для BUY и SELL — positionId. COUPON, DIVIDEND и INTEREST можно привязать к позиции (positionId, null — отвязать)
       properties:
         type: { $ref: '#/components/schemas/TransactionType' }
         amount: { type: number, exclusiveMinimum: 0 }
