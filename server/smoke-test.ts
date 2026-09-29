@@ -240,6 +240,22 @@ async function run() {
       assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Главный результат (§10.6) учитывает выплаты; «внесено своих» = итог − результат,
+    // пришедший дивиденд его не увеличивает.
+    await test('дивиденд увеличивает результат, но не «внесено своих»', async () => {
+      const before = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(before.contributed, Math.round((before.total - before.financialResult) * 100) / 100)
+      const dividend = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'DIVIDEND', amount: 1000, date: '2026-02-11', positionId: sharePositionId },
+      })
+      const after = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(after.contributed, before.contributed)
+      assert.equal(after.financialResult, before.financialResult + 1000)
+      assert.equal(after.valueChange, before.valueChange)
+      assert.equal((await api(`/api/transactions/${dividend.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // Целевая структура: сохраняется в настройках, сводка показывает сумму до цели.
     await test('целевая структура: проверка, сохранение, сумма до цели, снятие', async () => {
       const bad = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 30 } } })
