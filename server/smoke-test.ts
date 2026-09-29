@@ -532,6 +532,24 @@ async function run() {
       assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    await test('оценка НДФЛ учитывает купон года, выгрузка — CSV', async () => {
+      const year = new Date().getFullYear()
+      const before = await api(`/api/tax/estimate?year=${year}`, { token: tokenA })
+      assert.equal(before.status, 200)
+      const coupon = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'COUPON', amount: 10000, date: `${year}-01-15`, title: 'Смоук-тест налоговый купон' } })
+      assert.equal(coupon.status, 201)
+      const after = await api(`/api/tax/estimate?year=${year}`, { token: tokenA })
+      const line = (estimate: { json: { lines: { key: string; income: number }[] } }) => estimate.json.lines.find((item) => item.key === 'coupons')!.income
+      assert.equal(line(after), line(before) + 10000)
+      assert.equal(after.json.tax - before.json.tax, 1300)
+      const csv = await fetch(`${BASE_URL}/api/tax/export?year=${year}`, { headers: { Authorization: `Bearer ${tokenA}` } })
+      assert.equal(csv.status, 200)
+      assert.match(csv.headers.get('content-type') ?? '', /text\/csv/)
+      assert.match(await csv.text(), /Купон;Смоук-тест налоговый купон;10000/)
+      assert.equal((await api(`/api/tax/estimate?year=${year + 1}`, { token: tokenA })).status, 400)
+      assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     await test('доходность за периоды отдаётся списком (§23)', async () => {
       const returns = await api('/api/portfolio/returns', { token: tokenA })
       assert.equal(returns.status, 200)

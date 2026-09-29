@@ -35,6 +35,7 @@ import {
   performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
+import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
@@ -752,6 +753,38 @@ app.get('/api/portfolio/history', async (request, response) => {
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
 })
+// Оценка НДФЛ за год и доходы для 3-НДФЛ. Налог считается в рублях при любой базовой
+// валюте портфеля; валюта пересчитывается по текущему курсу ЦБ (исторические — v2).
+async function taxInputs(request: Request, userId: string) {
+  const current = new Date().getFullYear()
+  const year = Number(request.query.year ?? current)
+  if (!Number.isInteger(year) || year < 2000 || year > current) throw new Error('Год указан неверно')
+  const [transactions, positions, context] = await Promise.all([listTransactions(db, userId), listPositions(db, userId), engineContext('RUB')])
+  const names = new Map(positions.map((position) => [position.instrumentId, position.instrument.name]))
+  const toRub = (amount: number, currency: string) => convertCurrency(amount, currency, 'RUB', context.rates)
+  const nameOf = (transaction: Transaction) =>
+    (transaction.instrumentId && names.get(transaction.instrumentId))
+    || (transaction.description !== transaction.type ? transaction.description : undefined)
+    || transaction.institution || '—'
+  return { year, transactions, toRub, nameOf }
+}
+app.get('/api/tax/estimate', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const { year, transactions, toRub } = await taxInputs(request, userId)
+    response.json(estimateTax(transactions, year, toRub))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Некорректный запрос' }) }
+})
+app.get('/api/tax/export', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const { year, transactions, toRub, nameOf } = await taxInputs(request, userId)
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    response.setHeader('Content-Disposition', `attachment; filename="dohody-${year}.csv"`)
+    response.send(taxRowsToCsv(taxIncomeRows(transactions, year, toRub, nameOf)))
+  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Некорректный запрос' }) }
+})
+
 // §23: доходность за день, месяц, год и всё время — по тем же снимкам, что и график.
 app.get('/api/portfolio/returns', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
