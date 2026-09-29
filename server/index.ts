@@ -22,6 +22,8 @@ import {
   type Breakdown, type EngineContext, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
+import { buildAttention } from './attention.ts'
+import { couponForecastGap } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
   positionToWire, positiveNumber, reconcileInvested, requiredText, MANUAL_PROVIDER, type PositionBody,
@@ -123,6 +125,7 @@ function transactionToWire(transaction: Transaction) {
     instrumentId: transaction.instrumentId,
     accountId: transaction.accountId,
     source: transaction.source,
+    institution: transaction.institution,
   }
 }
 // «Сегодня» по местным часам сервера — граница между ожидаемыми и просроченными
@@ -148,6 +151,7 @@ function payoutToWire(payout: Payout, context?: EngineContext, today = localToda
     instrumentId: payout.instrumentId,
     accountId: payout.accountId,
     transactionId: payout.transactionId,
+    institution: payout.institution,
     // Ожидалась, но дата уже прошла (§22, BUG-22) — отдельная группа «Просрочено».
     overdue: payout.status === 'expected' && payout.date < today,
   }
@@ -681,6 +685,9 @@ app.get('/api/portfolio/structure', async (request, response) => {
     byCurrency: aggregateByKey([...keyed((position) => position.instrument.currency || 'RUB'), ...cashKeyed((currency) => currency)]),
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
+    // «Где хранится» (CLIENT_FLOW_PLAN §4.1): банки и брокеры одним списком, включая
+    // записи без банка («Ручной ввод»). Денежный остаток сюда не входит — как и в byBroker.
+    byProvider: breakdown((position) => position.account.provider),
     byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
@@ -688,9 +695,8 @@ app.get('/api/portfolio/structure', async (request, response) => {
 
 // §24 (Этап 5): 4 базовых правила рекомендаций. Считаются на лету из текущего состояния
 // портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
-app.get('/api/recommendations', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  const [positions, payouts, baseCurrency] = await Promise.all([listPositions(db, userId), listPayouts(db, userId), resolveBaseCurrency(db, userId)])
+async function recommendationsFor(userId: string, positions: Position[], payouts: Payout[]) {
+  const baseCurrency = await resolveBaseCurrency(db, userId)
   // Доли считаются от всего портфеля, включая свободные деньги (§12); правила
   // применяются к инструментам — сам денежный остаток инструментом не является.
   const context = await engineContext(baseCurrency)
@@ -714,7 +720,51 @@ app.get('/api/recommendations', async (request, response) => {
     const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
     return amount === null ? [] : [{ date: payout.date, amount, status: payout.status }]
   })
-  response.json(buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots))
+  return { recommendations: buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots), valuationById }
+}
+app.get('/api/recommendations', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const [positions, payouts] = await Promise.all([listPositions(db, userId), listPayouts(db, userId)])
+  response.json((await recommendationsFor(userId, positions, payouts)).recommendations)
+})
+
+// «Требует внимания» (CLIENT_FLOW_PLAN §4.4): одна лента сигналов — просроченные и скорые
+// выплаты, деньги к реинвестированию, окончание вкладов, нет цены, ошибка брокера, правила §24.
+app.get('/api/attention', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const [positions, payouts, tinkoff] = await Promise.all([
+    listPositions(db, userId), listPayouts(db, userId), findBrokerConnection(db, userId, 'tinkoff'),
+  ])
+  const { recommendations, valuationById } = await recommendationsFor(userId, positions, payouts)
+  response.json(buildAttention({
+    today: localToday(),
+    positions: positions.map((position) => ({
+      id: position.id,
+      instrumentId: position.instrumentId,
+      name: position.instrument.name,
+      institution: position.account.provider,
+      isCash: position.instrument.groupType === 'cash',
+      maturityDate: position.instrument.maturityDate,
+      termEndDate: position.instrument.termEndDate,
+      closedOn: position.closedOn,
+      priceUnavailable: valuationById.get(position.id)?.priceUnavailable ?? false,
+      forecastNote: couponForecastGap(position, position.instrument) ?? undefined,
+      source: position.source,
+    })),
+    payouts: payouts.map((payout) => ({
+      id: payout.id,
+      instrumentId: payout.instrumentId,
+      title: payout.description ?? '',
+      date: payout.date,
+      type: payout.type,
+      amount: payout.amount,
+      currency: payout.currency,
+      status: payout.status,
+      institution: payout.institution,
+    })),
+    brokers: tinkoff ? [{ name: 'Т-Инвестиции', status: tinkoff.status, lastSyncAt: tinkoff.lastSyncAt }] : [],
+    recommendations,
+  }))
 })
 
 // ---------------------------------------------------------------------------

@@ -300,6 +300,22 @@ async function run() {
       }
     })
 
+    // CLIENT_FLOW_PLAN §4.4: лента «Требует внимания» и банк у выплат и в структуре.
+    await test('просроченная выплата попадает в «Требует внимания», у выплаты есть банк', async () => {
+      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест внимание', amount: 4321, date: '2020-05-06', type: 'COUPON' } })
+      assert.equal(past.status, 201)
+      const attention = await api('/api/attention', { token: tokenA })
+      assert.equal(attention.status, 200)
+      const item = attention.json.find((entry: { payoutIds?: string[] }) => entry.payoutIds?.includes(past.json.id))
+      assert.equal(item?.kind, 'payout_overdue')
+      assert.equal(item?.action, 'mark_received')
+      const listed = (await api('/api/payouts', { token: tokenA })).json.find((payout: { id: string }) => payout.id === past.json.id)
+      assert.equal(typeof listed.institution, 'string')
+      const structure = await api('/api/portfolio/structure', { token: tokenA })
+      assert.ok(Array.isArray(structure.json.byProvider))
+      assert.equal((await api(`/api/payouts/${past.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // BUG-15 (FIX_PLAN 2.3): тот же файл повторно не обрабатывается — сервер возвращает
     // прошлый документ. Воркер OCR в тесте не запущен, первый документ остаётся в очереди,
     // этого достаточно: совпадение ищется и среди ещё не обработанных загрузок.

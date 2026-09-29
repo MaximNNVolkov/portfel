@@ -104,6 +104,8 @@ export type Transaction = {
   description?: string
   /** Идентификатор операции у брокера — ключ идемпотентности повторной синхронизации. */
   externalId?: string
+  /** Банк или брокер счёта (accounts.provider). Только для чтения — выводится джойном. */
+  institution?: string
 }
 
 export type Payout = {
@@ -118,6 +120,8 @@ export type Payout = {
   instrumentId?: string
   transactionId?: string
   description?: string
+  /** Банк или брокер счёта (accounts.provider). Только для чтения — выводится джойном. */
+  institution?: string
 }
 
 export type BrokerConnection = {
@@ -635,7 +639,8 @@ export async function deletePosition(db: Db, userId: string, id: string): Promis
 
 const TRANSACTION_FIELDS = `
   t.id, t.account_id, t.instrument_id, t.type, t.tx_date, t.quantity, t.price, t.amount,
-  t.currency, t.commission, t.tax, t.description, t.source, t.external_id, p.id AS position_id`
+  t.currency, t.commission, t.tax, t.description, t.source, t.external_id, p.id AS position_id,
+  a.provider AS account_provider`
 
 const TRANSACTION_FROM = `
   FROM portfolio.transactions t
@@ -660,6 +665,7 @@ function mapTransaction(row: any): Transaction {
     price: num(row.price),
     description: text(row.description),
     externalId: text(row.external_id),
+    institution: text(row.account_provider),
   }
 }
 
@@ -779,7 +785,7 @@ export async function sumCashBalances(db: Db, userId: string): Promise<{ currenc
 
 const PAYOUT_FIELDS = `
   o.id, o.account_id, o.instrument_id, o.transaction_id, o.payout_date, o.type,
-  o.amount, o.currency, o.status, o.source, o.description`
+  o.amount, o.currency, o.status, o.source, o.description, a.provider AS account_provider`
 
 const PAYOUT_FROM = `
   FROM portfolio.payouts o
@@ -799,6 +805,7 @@ function mapPayout(row: any): Payout {
     instrumentId: text(row.instrument_id),
     transactionId: text(row.transaction_id),
     description: text(row.description),
+    institution: text(row.account_provider),
   }
 }
 
