@@ -583,6 +583,21 @@ const transactionTypeLabels: Record<TransactionType, string> = {
   REDEMPTION: "Погашение",
   OTHER: "Прочее",
 };
+// Цвет точки операции — из той же палитры .legend.*, что и typeColors: покупка/продажа,
+// движение денег, выплаты и расходы различимы в списке «Операций» с первого взгляда.
+const transactionTypeColors: Record<TransactionType, string> = {
+  BUY: "indigo",
+  SELL: "coral",
+  DEPOSIT: "teal",
+  WITHDRAW: "slate",
+  COUPON: "amber",
+  DIVIDEND: "amber",
+  INTEREST: "amber",
+  REDEMPTION: "amber",
+  FEE: "pink",
+  TAX: "pink",
+  OTHER: "slate",
+};
 const POSITION_TRANSACTION_TYPES: TransactionType[] = ["BUY", "SELL"];
 const CASH_CREDIT_TYPES: TransactionType[] = [
   "DEPOSIT",
@@ -2307,37 +2322,47 @@ function TransactionsPage({
     <Page title="Операции" subtitle="История пополнений, покупок и выплат">
       <div className="toolbar">
         <Link className="primary-button" to="/transactions/new">
-          ＋ Новая операция
+          <span className="label-full">＋ Новая операция</span>
+          <span className="label-short">＋ Операция</span>
         </Link>
       </div>
       {transactions.length === 0 ? (
         <p className="muted">Пока нет операций.</p>
       ) : (
-        <div className="list-card">
+        <>
+        <div className="product-list">
           {visible.map((transaction) => {
             const expanded = expandedId === transaction.id;
             const position = products.find(
               (product) => product.id === transaction.positionId,
             );
+            const typeLabel = transactionTypeLabels[transaction.type];
             return (
               <div className="list-row" key={transaction.id}>
                 <button
                   type="button"
-                  className="list-row-summary"
+                  className="product-row-summary"
                   aria-expanded={expanded}
                   onClick={() => setExpandedId(expanded ? null : transaction.id)}
                 >
-                  <span className="list-row-main">
-                    <strong>{transaction.title}</strong>
-                    <span className="type-tag teal">
-                      {transactionTypeLabels[transaction.type]}
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <i
+                        className={`legend type-dot ${transactionTypeColors[transaction.type]}`}
+                        title={typeLabel}
+                      />
+                      <strong>{transaction.title}</strong>
                     </span>
+                    <span className="product-row-sum">{money(transaction.amount)}</span>
                   </span>
-                  <span className="list-row-value">
-                    <strong>{money(transaction.amount)}</strong>
-                    <small>{dateLabel(transaction.date)}</small>
+                  <span className="product-row-line2">
+                    <span className="muted product-row-meta">
+                      {position && position.name !== transaction.title
+                        ? `${typeLabel} · ${position.name}`
+                        : typeLabel}
+                    </span>
+                    <span className="muted">{dateLabel(transaction.date)}</span>
                   </span>
-                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
                 </button>
                 {expanded && (
                   <div className="list-row-details">
@@ -2374,13 +2399,14 @@ function TransactionsPage({
               </div>
             );
           })}
-          <ListPagination
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            pageSize={pageSize}
-            onPageSizeChange={setPageSize}
-          />
         </div>
+        <ListPagination
+          hasMore={hasMore}
+          onLoadMore={loadMore}
+          pageSize={pageSize}
+          onPageSizeChange={setPageSize}
+        />
+        </>
       )}
     </Page>
   );
