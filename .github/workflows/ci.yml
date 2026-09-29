@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck (frontend)
+        run: npx tsc -b
+
+      - name: Typecheck (server)
+        run: npx tsc -p tsconfig.server.json
+
+      - name: Lint
+        run: npm run lint
+
+      # Юнит-тесты без БД. server/smoke-test.ts (npm test) требует живой Postgres и сюда не входит.
+      - name: Unit tests
+        run: |
+          failed=0
+          for f in server/*.test.ts; do
+            echo "::group::$f"
+            npx tsx "$f" || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed

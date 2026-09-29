@@ -309,7 +309,7 @@ async function run() {
         const form = new FormData()
         form.append('image', new Blob([png], { type: 'image/png' }), 'smoke.png')
         const response = await fetch(`${BASE_URL}/api/ocr/upload`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form })
-        return { status: response.status, json: await response.json() }
+        return { status: response.status, json: (await response.json()) as Record<string, unknown> }
       }
       const first = await upload()
       assert.equal(first.status, 202)
