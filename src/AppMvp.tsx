@@ -3207,20 +3207,6 @@ function AnalyticsPage({
           <small>от общей стоимости</small>
         </article>
       </div>
-      <div className="product-list insight-list">
-        <div className="list-row">
-          <div className="product-row-summary product-row-static recommendation-row">
-            <i className="legend type-dot amber" />
-            <span>
-              <strong>Распределение выглядит сбалансированным</strong>
-              <small className="muted">
-                Более половины капитала находится в инструментах с регулярными
-                выплатами.
-              </small>
-            </span>
-          </div>
-        </div>
-      </div>
       {structureError && <p className="form-error">{structureError}</p>}
       {structure && (
         <>
