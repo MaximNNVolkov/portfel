@@ -58,3 +58,19 @@
 /* Портфель, интеграции и OCR-сводка в стиле «Инструментов» (REDESIGN_PLAN, волны 4-5). */
 .holding-list .holding-row { display: block; padding: 10px 0; }.holding-list .holding-row + .holding-row { border-top: 1px solid var(--line); }.holding-list .product-row-name, .holding-list .product-row-sum { font-size: 12px; }.upcoming-row { padding: 12px 0; border-top: 1px solid var(--line); }.upcoming-row .product-row-name, .upcoming-row .product-row-sum { font-size: 12px; }.section-heading .outline-button { white-space: nowrap; }.integration-facts { margin: 16px 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-subtle); }.integration-facts .detail-line:first-child { padding-top: 0; }.integration-facts .detail-line:last-child { padding-bottom: 0; }.ocr-failures { margin-top: 14px; }.ocr-removed-note { margin: 0 0 12px; font-size: 12px; }
 @media (max-width: 680px) { .sync-button { width: 100%; }.integration-card { padding: 18px 16px; } }
+/* Масштаб интерфейса на больших экранах. Размеры в стилях подобраны под телефон, где
+   интерфейс выглядит хорошо; на ноутбуке и мониторе те же пиксели читаются слишком мелко.
+   Вместо правки каждого размера весь интерфейс пропорционально увеличивается через zoom —
+   пропорции и плотность остаются теми же, что на телефоне. Мобильная (≤ 680px) и
+   планшетная ширина не затрагиваются. min-height в vh делится на масштаб, иначе после
+   zoom экран становится выше окна и появляется лишняя прокрутка. */
+@media (min-width: 1200px) { :root { --ui-scale: 1.15; } }
+@media (min-width: 1400px) { :root { --ui-scale: 1.25; } }
+@media (min-width: 1800px) { :root { --ui-scale: 1.35; } }
+@media (min-width: 1200px) {
+  #root { zoom: var(--ui-scale); min-height: calc(100vh / var(--ui-scale)); }
+  .app-shell, .login-screen { min-height: calc(100vh / var(--ui-scale)); }
+  /* После увеличения меню может не влезть по высоте в окно ноутбука — тогда оно
+     прокручивается само, а не растягивает страницу, и остаётся на месте при прокрутке. */
+  .sidebar { position: sticky; top: 0; height: calc(100vh / var(--ui-scale)); min-height: 0; overflow-y: auto; }
+}
