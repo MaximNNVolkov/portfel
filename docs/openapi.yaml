@@ -446,6 +446,61 @@ paths:
                     percent: { type: [number, 'null'] }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/tax/estimate:
+    get:
+      tags: [portfolio]
+      summary: Оценка НДФЛ за год по операциям
+      description: |
+        Оценка, а не расчёт налогового агента: валюта пересчитывается по текущему курсу ЦБ,
+        убытки прошлых лет, ИИС и льготы не учитываются. Проценты по вкладам облагаются
+        сверх 1 млн ₽ × максимальная ключевая ставка года.
+      parameters:
+        - { name: year, in: query, schema: { type: integer }, description: Год, по умолчанию текущий }
+      responses:
+        '200':
+          description: Строки оценки и итог
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  year: { type: integer }
+                  lines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string, enum: [deposit_interest, coupons, dividends, sales] }
+                        label: { type: string }
+                        income: { type: number }
+                        exempt: { type: number }
+                        taxBase: { type: number }
+                        how: { type: string }
+                  taxBase: { type: number }
+                  tax: { type: number }
+                  withheld: { type: number }
+                  toPay: { type: number }
+                  keyRate: { type: number }
+                  keyRateAssumed: { type: boolean }
+                  unconverted: { type: array, items: { type: string } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/tax/export:
+    get:
+      tags: [portfolio]
+      summary: Доходы за год в CSV для 3-НДФЛ
+      parameters:
+        - { name: year, in: query, schema: { type: integer }, description: Год, по умолчанию текущий }
+      responses:
+        '200':
+          description: CSV для Excel (точка с запятой, UTF-8 с BOM)
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
   /api/portfolio/structure:
     get:
       tags: [portfolio]

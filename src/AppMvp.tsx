@@ -1818,6 +1818,7 @@ function AppMvp() {
               <AnalyticsPage summary={summary} token={token} />
             }
           />
+          <Route path="/analytics/taxes" element={<TaxPage token={token} />} />
           <Route
             path="/recommendations"
             element={<Recommendations token={token} />}
@@ -3781,6 +3782,9 @@ function AnalyticsPage({
         </article>
       </div>
       <PeriodReturns rows={returns} />
+      <p className="target-hint muted">
+        <Link to="/analytics/taxes">Оценка НДФЛ и доходы для 3-НДФЛ</Link> — сколько налога набегает за год.
+      </p>
       <BreakdownList
         title="По категориям"
         items={byGroup}
@@ -3844,6 +3848,126 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
       )}
       <p className="muted small-note">Изменение стоимости без учёта покупок и пополнений; выплаты не входят.</p>
     </section>
+  );
+}
+type TaxLine = { key: string; label: string; income: number; exempt: number; taxBase: number; how: string };
+type TaxEstimate = {
+  year: number;
+  lines: TaxLine[];
+  taxBase: number;
+  tax: number;
+  withheld: number;
+  toPay: number;
+  keyRate: number;
+  keyRateAssumed: boolean;
+  unconverted: string[];
+};
+// Оценка НДФЛ считается на бэкенде; страница только показывает строки и скачивает CSV.
+// Налог всегда в рублях, поэтому суммы — рублёвые, а не в базовой валюте портфеля.
+function TaxPage({ token }: { token: string }) {
+  const currentYear = new Date().getFullYear();
+  const [year, setYear] = useState(currentYear);
+  const [estimate, setEstimate] = useState<TaxEstimate | null>(null);
+  const [error, setError] = useState("");
+  const rub = (value: number) => `${Math.round(value).toLocaleString("ru-RU")} ₽`;
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`${apiUrl}/tax/estimate?year=${year}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error();
+        const result = (await response.json()) as TaxEstimate;
+        if (!cancelled) { setEstimate(result); setError(""); }
+      })
+      .catch(() => { if (!cancelled) setError("Не удалось посчитать налог"); });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, year]);
+
+  async function download() {
+    try {
+      const response = await apiFetch(`${apiUrl}/tax/export?year=${year}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error();
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `dohody-${year}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Не удалось выгрузить доходы");
+    }
+  }
+
+  const years = [currentYear, currentYear - 1, currentYear - 2, currentYear - 3];
+  return (
+    <Page title="Налоги" subtitle="Оценка НДФЛ с инвестиционных доходов за год" back>
+      <div className="tax-controls">
+        <label>
+          Год{" "}
+          <select value={year} onChange={(event) => setYear(Number(event.target.value))}>
+            {years.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="outline-button" onClick={download}>
+          Скачать доходы для 3-НДФЛ (CSV)
+        </button>
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      {!error && !estimate && <p>Считаем…</p>}
+      {estimate && (
+        <>
+          <div className="stat-strip">
+            <article className="stat-card">
+              <span>Налог за {estimate.year}</span>
+              <strong>{rub(estimate.tax)}</strong>
+              <small>с базы {rub(estimate.taxBase)}</small>
+            </article>
+            <article className="stat-card">
+              <span>Уже удержано</span>
+              <strong>{rub(estimate.withheld)}</strong>
+              <small>по операциям с налогом</small>
+            </article>
+            <article className="stat-card">
+              <span>Остаётся</span>
+              <strong className={estimate.toPay > 0 ? "warning-text" : "muted"}>{rub(estimate.toPay)}</strong>
+              <small>оценка к уплате</small>
+            </article>
+          </div>
+          <div className="product-list">
+            {estimate.lines.map((line) => (
+              <article className="list-row" key={line.key}>
+                <div className="product-row-summary product-row-static tax-row">
+                  <span className="product-row-line1">
+                    <strong>{line.label}</strong>
+                    <span>{rub(line.taxBase)}</span>
+                  </span>
+                  <small className="muted">
+                    Доход {rub(line.income)}
+                    {line.exempt > 0 ? ` · не облагается ${rub(line.exempt)}` : ""}
+                  </small>
+                  <small className="muted">{line.how}</small>
+                </div>
+              </article>
+            ))}
+          </div>
+          {estimate.unconverted.length > 0 && (
+            <div className="demo-note warn">
+              ⚠ Суммы в {estimate.unconverted.join(", ")} не вошли: курса ЦБ для них нет.
+            </div>
+          )}
+          <p className="muted small-note">
+            Это оценка, а не расчёт налогового агента. Необлагаемый процент по вкладам — 1 млн ₽ ×{" "}
+            {estimate.keyRate}%{estimate.keyRateAssumed ? " (ставка года ещё не известна, взята последняя)" : ""}. Шкала
+            13%, сверх {estimate.year >= 2025 ? "2,4" : "5"} млн ₽ — 15%. Валюта — по текущему курсу ЦБ; убытки прошлых
+            лет, ИИС и льгота долгосрочного владения не учитываются.
+          </p>
+        </>
+      )}
+    </Page>
   );
 }
 type RecommendationRuleType =
