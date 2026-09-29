@@ -590,6 +590,25 @@ export async function updatePositionMarketPrice(db: Db, userId: string, position
   )
 }
 
+// §20: история котировок — одна цена на инструмент в день, последняя за день побеждает.
+export async function recordInstrumentPrice(db: Db, instrumentId: string, date: string, price: number, source = 'moex'): Promise<void> {
+  await db.query(
+    `INSERT INTO portfolio.instrument_prices (instrument_id, price_date, price, source)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (instrument_id, price_date) DO UPDATE SET price = EXCLUDED.price, source = EXCLUDED.source, fetched_at = NOW()`,
+    [instrumentId, date, price, source],
+  )
+}
+
+// Просроченные сессии и давно использованные/истёкшие ссылки сброса пароля (§28) никому
+// не нужны: они только копятся в базе и в бэкапах. Ссылки живут ещё неделю, чтобы старое
+// письмо объясняло «уже использована», а не «недействительна». Чистит суточный цикл.
+export async function deleteExpiredAuthRecords(db: Db): Promise<{ sessions: number; resetTokens: number }> {
+  const sessions = await db.query('DELETE FROM sessions WHERE expires_at <= NOW()')
+  const resetTokens = await db.query(`DELETE FROM password_reset_tokens WHERE expires_at < NOW() - INTERVAL '7 days' OR used_at < NOW() - INTERVAL '7 days'`)
+  return { sessions: sessions.rowCount ?? 0, resetTokens: resetTokens.rowCount ?? 0 }
+}
+
 // Брокерские позиции, которых нет в свежем ответе брокера (продано, погашено, счёт закрыт),
 // из портфеля убираются: брокер — источник истины о составе своих счетов (§19).
 export async function deleteStaleBrokerPositions(db: Db, portfolioId: string, provider: string, keepIds: string[]): Promise<void> {

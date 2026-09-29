@@ -12,7 +12,7 @@ import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
-  updatePositionMarketPrice, upsertSnapshot,
+  recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
 } from './repository.ts'
 
@@ -347,6 +347,7 @@ export async function refreshMarketPrices(client: Db, userId: string): Promise<{
       value: quote.price * position.quantity,
       accruedInterest: quote.accruedInterest === null ? undefined : quote.accruedInterest * position.quantity,
     })
+    await recordInstrumentPrice(client, position.instrumentId, new Date().toISOString().slice(0, 10), quote.price)
     item.status = 'updated'
     item.priceUpdatedAt = new Date().toISOString()
     updated += 1
