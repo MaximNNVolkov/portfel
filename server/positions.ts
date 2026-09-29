@@ -230,6 +230,8 @@ export function positionToWire(position: Position, valuation?: PositionValuation
       priceUnavailable: valuation.priceUnavailable,
       priceUnavailableReason: valuation.priceUnavailableReason,
       estimated: valuation.estimated,
+      // НКД облигации или начисленные проценты вклада (оценка движка) в валюте инструмента.
+      accruedInterest: valuation.accruedInterest,
     } : undefined,
   }
 }

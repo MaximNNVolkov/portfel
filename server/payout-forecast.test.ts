@@ -3,7 +3,7 @@
 // `npx tsx server/payout-forecast.test.ts`. Ненулевой код возврата = провал.
 
 import assert from 'node:assert/strict'
-import { addMonths, couponForecastGap, forecastPayouts } from './payout-forecast.ts'
+import { addMonths, couponForecastGap, depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
 import type { Instrument, PositionRecord } from './repository.ts'
 
 let failed = 0
@@ -34,6 +34,24 @@ test('addMonths прижимает к последнему дню месяца',
   assert.equal(addMonths('2026-01-31', 1), '2026-02-28')
   assert.equal(addMonths('2026-03-15', 6), '2026-09-15')
   assert.equal(addMonths('2026-12-31', 2), '2027-02-28')
+})
+
+test('начисленные проценты вклада: в конце срока — с открытия, ежемесячно — за текущий месяц', () => {
+  const atEnd = instrument({ rate: 16, termEndDate: '2027-01-01' })
+  // 100 000 × 16% × 146 дней / 365
+  assert.equal(depositAccruedInterest(position({ openedOn: '2026-01-01' }), atEnd, '2026-05-27'), 6400)
+  const monthly = instrument({ rate: 12, termEndDate: '2027-01-01', interestPayoutFrequency: 'Ежемесячно' })
+  // Период 01.05–01.06, прошло 10 дней: 100 000 × 12% × 10 / 365
+  assert.equal(depositAccruedInterest(position({ openedOn: '2026-01-01' }), monthly, '2026-05-11'), 328.77)
+  const capitalized = instrument({ rate: 12, termEndDate: '2027-01-01', interestPayoutFrequency: 'Ежемесячно', capitalization: true })
+  assert.ok(depositAccruedInterest(position({ openedOn: '2026-01-01' }), capitalized, '2026-05-11')! > 4000)
+})
+
+test('начисленные проценты: до открытия и после окончания — ноль, без ставки — нет оценки', () => {
+  const deposit = instrument({ rate: 16, termEndDate: '2027-01-01' })
+  assert.equal(depositAccruedInterest(position({ openedOn: '2026-01-01' }), deposit, '2025-12-01'), 0)
+  assert.equal(depositAccruedInterest(position({ openedOn: '2026-01-01' }), deposit, '2027-02-01'), 0)
+  assert.equal(depositAccruedInterest(position({ openedOn: '2026-01-01' }), instrument({ termEndDate: '2027-01-01' }), '2026-05-01'), null)
 })
 
 test('вклад в конце срока: одни проценты и возврат тела', () => {

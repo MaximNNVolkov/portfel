@@ -68,6 +68,8 @@ type ProductValuation = {
   priceUnavailableReason: string | null;
   /** Котируемый инструмент без котировки: стоимость — введённая сумма, P&L нет (§7.3, BUG-09). */
   estimated?: boolean;
+  /** НКД облигации или начисленные, но не выплаченные проценты вклада. */
+  accruedInterest?: number | null;
 };
 type ProductDetails = {
   isin: string;
@@ -3300,6 +3302,10 @@ function PaymentsPage({
     </Page>
   );
 }
+// Периодичность приходит и из формы («Ежемесячно»), и через API/OCR (monthly) — клиент
+// видит её по-русски, а не сырым значением (критик К12).
+const frequencyLabels: Record<string, string> = { monthly: "Ежемесячно", quarterly: "Ежеквартально", yearly: "Ежегодно", annually: "Ежегодно", "at maturity": "В конце срока", end: "В конце срока" };
+const frequencyLabel = (value: string | undefined) => (value ? frequencyLabels[value.trim().toLowerCase()] ?? value : undefined);
 const yesNo = (value: boolean | undefined) => (value === undefined ? undefined : value ? "да" : "нет");
 const percentText = (value: number | undefined) =>
   value === undefined ? undefined : `${value.toLocaleString("ru-RU", { maximumFractionDigits: 3 })}%`;
@@ -3319,7 +3325,11 @@ function instrumentParams(product: Product): [string, React.ReactNode][] {
           ["Ставка", product.rate !== undefined ? `${percentText(product.rate)}${product.effectiveRate ? ` (эффективная ${percentText(product.effectiveRate)})` : ""}` : undefined],
           ["Открыт", date(product.date)],
           ["Окончание", date(product.termEndDate)],
-          ["Выплата процентов", product.interestPayoutFrequency],
+          ["Выплата процентов", frequencyLabel(product.interestPayoutFrequency)],
+          [
+            "Начислено, не выплачено",
+            product.valuation?.accruedInterest ? `≈ ${preciseMoney(product.valuation.accruedInterest)} · оценка по ставке` : undefined,
+          ],
           ["Капитализация", yesNo(product.capitalization)],
           ["Пополнение", yesNo(product.replenishable)],
           ["Частичное снятие", yesNo(product.partialWithdrawal)],
