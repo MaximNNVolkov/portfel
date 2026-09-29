@@ -161,21 +161,35 @@ export function buildAttention(
   const reinvestStart = addDays(today, -rules.reinvestReminderDays)
 
   // Просроченные: дата прошла, а выплата не отмечена — самое срочное, иначе итоги врут.
-  for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'expected' && payout.date < today))) {
-    const { name, position } = payoutSubject(group, positionsByInstrument)
+  // Вклад, заведённый задним числом, приносит пачку прошедших выплат — по одному
+  // инструменту это одно дело «отметить полученными», а не десяток строк.
+  const overdueByInstrument = new Map<string, AttentionPayout[]>()
+  for (const payout of input.payouts) {
+    if (payout.status !== 'expected' || payout.date >= today) continue
+    const key = `${payout.instrumentId ?? payout.id}:${payout.currency}`
+    overdueByInstrument.set(key, [...(overdueByInstrument.get(key) ?? []), payout])
+  }
+  for (const [key, payouts] of overdueByInstrument) {
+    payouts.sort((left, right) => left.date.localeCompare(right.date))
+    const amount = payouts.reduce((sum, payout) => sum + payout.amount, 0)
+    const first = payouts[0]
+    const position = first.instrumentId ? positionsByInstrument.get(first.instrumentId) : undefined
+    const dates = new Set(payouts.map((payout) => payout.date))
     items.push({
-      id: `overdue:${group.key}`,
+      id: `overdue:${key}`,
       kind: 'payout_overdue',
       severity: 1,
-      title: name,
-      text: `Выплата ${formatMoney(group.amount, group.payouts[0].currency)} ожидалась ${inDaysAgo(daysBetween(group.date, today))} — отметьте, если деньги пришли`,
+      title: position?.name ?? (first.title || 'Выплата'),
+      text: dates.size > 1
+        ? `${dates.size} ${paymentsWord(dates.size)} на ${formatMoney(amount, first.currency)} не отмечены полученными — отметьте, если деньги пришли`
+        : `Выплата ${formatMoney(amount, first.currency)} ожидалась ${inDaysAgo(daysBetween(first.date, today))} — отметьте, если деньги пришли`,
       action: 'mark_received',
-      date: group.date,
-      amount: group.amount,
-      currency: group.payouts[0].currency,
-      institution: group.payouts[0].institution ?? position?.institution,
+      date: first.date,
+      amount,
+      currency: first.currency,
+      institution: first.institution ?? position?.institution,
       positionId: position?.id,
-      payoutIds: group.payouts.map((payout) => payout.id),
+      payoutIds: payouts.map((payout) => payout.id),
     })
   }
 
@@ -327,4 +341,13 @@ function inDaysAgo(days: number): string {
   const mod10 = days % 10
   const word = mod100 >= 11 && mod100 <= 14 ? 'дней' : mod10 === 1 ? 'день' : mod10 >= 2 && mod10 <= 4 ? 'дня' : 'дней'
   return `${days} ${word} назад`
+}
+
+function paymentsWord(count: number): string {
+  const mod100 = count % 100
+  const mod10 = count % 10
+  if (mod100 >= 11 && mod100 <= 14) return 'выплат'
+  if (mod10 === 1) return 'выплата'
+  if (mod10 >= 2 && mod10 <= 4) return 'выплаты'
+  return 'выплат'
 }

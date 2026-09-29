@@ -1,0 +1,68 @@
+/* Экраны по сценарию клиента (docs/CLIENT_FLOW_PLAN.md): главная, категория, карточка
+   инструмента, «Требует внимания». Отдельный файл, чтобы не пересекаться с правками
+   в конце App.css; подключается после него. */
+
+/* Строка-ссылка: тот же вид, что у кнопки-строки .product-row-summary. */
+a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hover { display: block; color: inherit; text-decoration: none; }
+
+/* Итог портфеля и карточки инструмента: три-четыре цифры строкой под главной суммой. */
+.portfolio-total { margin-top: 28px; }
+.total-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px 18px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.total-stats > * { display: grid; gap: 4px; min-width: 0; color: inherit; text-decoration: none; }
+.total-stats span { color: var(--muted); font-size: 11px; }
+.total-stats strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.total-stats a:hover span { color: var(--mint); }
+.instrument-hero { margin-top: 24px; }
+.instrument-hero .muted { margin: 6px 0 0; font-size: 12px; }
+
+/* «Требует внимания»: название + банк/дата, ниже — что случилось и одно действие. */
+.attention-row { display: flex; align-items: center; gap: 12px; }
+.attention-row .product-row-summary { flex: 1; min-width: 0; }
+.attention-meta { flex: 0 0 auto; font-size: 11px; white-space: nowrap; }
+.attention-text { display: block; margin-top: 4px; padding-left: 15px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
+.attention-actions { flex: 0 0 auto; padding: 0 16px 0 0; }
+.attention-actions .outline-button { display: inline-block; white-space: nowrap; }
+.list-row > .attention-actions { padding: 0 16px 12px 31px; }
+.attention-section + .attention-section { margin-top: 26px; }
+.attention-badge { position: absolute; top: -6px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; color: #17423e; background: #e6b961; font: 700 10px/16px 'DM Sans', sans-serif; text-align: center; }
+
+/* Категории на главной: кольцо слева, строки категорий справа. */
+.category-block { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 24px; }
+.category-block .donut-wrap { display: grid; place-items: center; }
+.category-block .donut { position: relative; }
+
+.chart-card { padding-top: 16px; }
+
+/* Список инструментов блоками по категориям и итоги среза (категория или банк). */
+.product-section + .product-section { margin-top: 22px; }
+.product-section-title { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--ink); font: 700 14px 'Manrope', sans-serif; }
+.slice-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 18px; margin: 24px 0 18px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.slice-totals > div { display: grid; gap: 4px; min-width: 0; }
+.slice-totals span { color: var(--muted); font-size: 11px; }
+.slice-totals strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Карточка инструмента: подробности свёрнуты, действия внизу. */
+.more-details { margin-top: 26px; }
+.more-details summary { cursor: pointer; color: var(--mint); font-size: 12px; font-weight: 700; }
+.more-details .confirm-card { margin-top: 12px; }
+.detail-actions { justify-content: flex-start; margin-top: 22px; }
+
+/* Фильтры выплат свёрнуты в одну строку. */
+.filters-disclosure { margin-bottom: 16px; }
+.filters-disclosure summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.filters-disclosure .filters-bar { margin-top: 12px; }
+.payout-forecast-note { margin: 12px 0 0; font-size: 11px; }
+
+.profile > span { min-width: 0; }
+.profile strong, .profile small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 680px) {
+  .total-stats { grid-template-columns: 1fr 1fr; }
+  .category-block { grid-template-columns: 1fr; gap: 16px; }
+  .category-block .donut-wrap { display: none; }
+  .slice-totals { grid-template-columns: 1fr 1fr; padding: 14px; }
+  .attention-row { flex-direction: column; align-items: stretch; gap: 0; }
+  .attention-actions { padding: 0 16px 12px 31px; }
+  .page-heading .primary-button .label-short { display: inline; }
+  .page-heading .primary-button .label-full { display: none; }
+}

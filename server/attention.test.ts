@@ -40,6 +40,18 @@ test('просроченная выплата — срочно, с действ�
   assert.deepEqual(items[0].payoutIds, ['x'])
 })
 
+test('пачка просроченных выплат одного вклада — одно дело', () => {
+  const items = build([position({ id: 'd', instrumentId: 'i1', name: 'Накопительный' })], [
+    payout({ id: 'a', instrumentId: 'i1', date: '2026-07-10', amount: 100 }),
+    payout({ id: 'b', instrumentId: 'i1', date: '2026-08-10', amount: 200 }),
+    payout({ id: 'c', instrumentId: 'i1', date: '2026-09-10', amount: 300 }),
+  ])
+  assert.equal(items.length, 1)
+  assert.deepEqual(items[0].payoutIds, ['a', 'b', 'c'])
+  assert.equal(items[0].amount, 600)
+  assert.match(items[0].text, /^3 выплаты на 600 ₽/)
+})
+
 test('выплата в горизонте 14 дней попадает, за горизонтом — нет', () => {
   const items = build([], [payout({ id: 'a', date: '2026-10-05' }), payout({ id: 'b', date: '2026-10-20' })])
   assert.deepEqual(items.map((item) => item.payoutIds), [['a']])
