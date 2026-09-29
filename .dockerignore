@@ -6,3 +6,4 @@ server/*.json
 .env
 *.log
 certbot
+dist-server
