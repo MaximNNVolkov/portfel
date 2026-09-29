@@ -253,7 +253,7 @@ type Transaction = {
   amount: number;
   date: string;
   type: TransactionType;
-  positionId?: string;
+  positionId?: string | null;
   accountId?: string;
   instrumentId?: string;
   currency?: string;
@@ -631,6 +631,8 @@ const transactionTypeColors: Record<TransactionType, string> = {
   OTHER: "slate",
 };
 const POSITION_TRANSACTION_TYPES: TransactionType[] = ["BUY", "SELL"];
+// Доход можно (но не обязательно) привязать к инструменту — тогда он виден в его карточке.
+const INCOME_TRANSACTION_TYPES: TransactionType[] = ["COUPON", "DIVIDEND", "INTEREST"];
 const CASH_CREDIT_TYPES: TransactionType[] = [
   "DEPOSIT",
   "COUPON",
@@ -659,8 +661,8 @@ function applyLocalTransactionEffect(
     );
   };
   const cashId = next.find((product) => product.type === "Деньги")?.id;
-  if (transaction.type === "BUY") shift(transaction.positionId, amount);
-  if (transaction.type === "SELL") shift(transaction.positionId, -amount);
+  if (transaction.type === "BUY") shift(transaction.positionId ?? undefined, amount);
+  if (transaction.type === "SELL") shift(transaction.positionId ?? undefined, -amount);
   if (CASH_CREDIT_TYPES.includes(transaction.type)) shift(cashId, amount);
   if (CASH_DEBIT_TYPES.includes(transaction.type)) shift(cashId, -amount);
   return next;
@@ -2761,7 +2763,9 @@ function PaymentRow({
   // («Купон «ОФЗ 26238» (прогноз, …)») повторяют и то и другое и не влезают в строку.
   const title = product?.name || payment.title || typeLabel;
   const meta = [
-    product ? (payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : typeLabel) : null,
+    // Тип нужен и выплате без инструмента (купон, проведённый операцией), если он
+    // уже не стоит в названии строки.
+    product ? (payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : typeLabel) : title !== typeLabel ? typeLabel : null,
     institution,
     payment.source === "forecast" && payment.status === "expected" ? "прогноз" : null,
     payment.status === "received" ? "получено" : null,
@@ -5847,6 +5851,45 @@ function PaymentFormPage({
     </Page>
   );
 }
+const tradableProducts = (products: Product[]) => products.filter((product) => product.type !== "Деньги");
+// Покупка и продажа всегда привязаны к инструменту (по умолчанию — к первому в списке),
+// доход — только если пользователь выбрал инструмент, остальные операции — никогда.
+function transactionPositionId(type: TransactionType, positionId: string, products: Product[]) {
+  if (POSITION_TRANSACTION_TYPES.includes(type)) return positionId || tradableProducts(products)[0]?.id;
+  // null, а не undefined: при правке пустое поле не уходит в JSON, и сервер оставил бы прежнюю привязку.
+  if (INCOME_TRANSACTION_TYPES.includes(type)) return positionId || null;
+  return null;
+}
+function TransactionInstrumentSelect({
+  type,
+  products,
+  positionId,
+  onChange,
+}: {
+  type: TransactionType;
+  products: Product[];
+  positionId: string;
+  onChange: (positionId: string) => void;
+}) {
+  const trades = POSITION_TRANSACTION_TYPES.includes(type);
+  if (!trades && !INCOME_TRANSACTION_TYPES.includes(type)) return null;
+  return (
+    <label>
+      Инструмент
+      <select
+        value={trades ? transactionPositionId(type, positionId, products) || "" : positionId}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {!trades && <option value="">Без привязки</option>}
+        {tradableProducts(products).map((product) => (
+          <option value={product.id} key={product.id}>
+            {product.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 function TransactionFormPage({
   products,
   onSubmit,
@@ -5863,7 +5906,7 @@ function TransactionFormPage({
   const [price, setPrice] = useState("");
   // Из карточки инструмента операция открывается уже привязанной к нему.
   const [positionId, setPositionId] = useState(
-    () => products.find((product) => product.id === searchParams.get("position"))?.id || products[0]?.id || "",
+    () => products.find((product) => product.id === searchParams.get("position"))?.id || "",
   );
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -5873,7 +5916,7 @@ function TransactionFormPage({
       amount: Number(amount),
       date,
       type,
-      positionId: tradesPosition ? positionId : undefined,
+      positionId: transactionPositionId(type, positionId, products),
       quantity: tradesPosition && quantity ? Number(quantity) : undefined,
       price: tradesPosition && price ? Number(price) : undefined,
     });
@@ -5902,23 +5945,12 @@ function TransactionFormPage({
             ))}
           </select>
         </label>
-        {POSITION_TRANSACTION_TYPES.includes(type) && (
-          <label>
-            Инструмент
-            <select
-              value={positionId}
-              onChange={(event) => setPositionId(event.target.value)}
-            >
-              {products
-                .filter((product) => product.type !== "Деньги")
-                .map((product) => (
-                  <option value={product.id} key={product.id}>
-                    {product.name}
-                  </option>
-                ))}
-            </select>
-          </label>
-        )}
+        <TransactionInstrumentSelect
+          type={type}
+          products={products}
+          positionId={positionId}
+          onChange={setPositionId}
+        />
         {tradesPosition && (
           <div className="form-row">
             <label>
@@ -6005,16 +6037,14 @@ function EditTransactionPage({
   const [title, setTitle] = useState(transaction?.title || "");
   const [amount, setAmount] = useState(String(transaction?.amount || ""));
   const [date, setDate] = useState(transaction?.date || "");
-  const [positionId, setPositionId] = useState(
-    transaction?.positionId || products[0]?.id || "",
-  );
+  const [positionId, setPositionId] = useState(transaction?.positionId || "");
   useEffect(() => {
     if (!transaction) return;
     setType(transaction.type);
     setTitle(transaction.title);
     setAmount(String(transaction.amount));
     setDate(transaction.date);
-    setPositionId(transaction.positionId || products[0]?.id || "");
+    setPositionId(transaction.positionId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, Boolean(transaction)]);
   if (!transaction) return <MissingRecord to="/transactions" />;
@@ -6026,9 +6056,7 @@ function EditTransactionPage({
       amount: Number(amount),
       date,
       type,
-      positionId: POSITION_TRANSACTION_TYPES.includes(type)
-        ? positionId
-        : undefined,
+      positionId: transactionPositionId(type, positionId, products),
     });
   };
   return (
@@ -6049,23 +6077,12 @@ function EditTransactionPage({
             ))}
           </select>
         </label>
-        {POSITION_TRANSACTION_TYPES.includes(type) && (
-          <label>
-            Инструмент
-            <select
-              value={positionId}
-              onChange={(event) => setPositionId(event.target.value)}
-            >
-              {products
-                .filter((product) => product.type !== "Деньги")
-                .map((product) => (
-                  <option value={product.id} key={product.id}>
-                    {product.name}
-                  </option>
-                ))}
-            </select>
-          </label>
-        )}
+        <TransactionInstrumentSelect
+          type={type}
+          products={products}
+          positionId={positionId}
+          onChange={setPositionId}
+        />
         <label>
           Название
           <input

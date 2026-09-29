@@ -216,6 +216,30 @@ async function run() {
       assert.equal(share.json.valuation.value, 31000)
     })
 
+    // Купон, проведённый операцией, можно привязать к бумаге — выплата попадает в её карточку.
+    await test('доходная операция привязывается к инструменту и отвязывается', async () => {
+      const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      const coupon = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'DIVIDEND', amount: 700, date: '2026-02-10', positionId: sharePositionId },
+      })
+      assert.equal(coupon.status, 201)
+      assert.equal(coupon.json.positionId, sharePositionId)
+      assert.equal(coupon.json.quantity, null)
+      const payouts = await api('/api/payouts', { token: tokenA })
+      const linked = payouts.json.find((item: { transactionId?: string }) => item.transactionId === coupon.json.id)
+      assert.equal(linked.instrumentId, share.json.instrumentId)
+      const unlinked = await api(`/api/transactions/${coupon.json.id}`, { method: 'PATCH', token: tokenA, body: { positionId: null } })
+      assert.equal(unlinked.status, 200)
+      assert.equal(unlinked.json.positionId, undefined)
+      const missing = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'COUPON', amount: 1, date: '2026-02-10', positionId: '00000000-0000-0000-0000-000000000000' },
+      })
+      assert.equal(missing.status, 400)
+      assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // BUG-23 (FIX_PLAN 3.7): ручную выплату можно привязать к инструменту и отвязать.
     await test('ручная выплата привязывается к инструменту', async () => {
       const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })

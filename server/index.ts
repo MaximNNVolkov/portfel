@@ -926,6 +926,9 @@ const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRA
 // Денежные операции позиции не меняют: остаток считается из самих операций
 // (sumCashBalances → portfolioEngineInputs, §12, BUG-05).
 const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
+// Доход можно привязать к инструменту (необязательно): выплата попадёт в его карточку (§9).
+// На денежный остаток привязка не влияет — он считается по валюте, а не по счёту (§12).
+const INCOME_TYPES: TransactionType[] = ['COUPON', 'DIVIDEND', 'INTEREST']
 
 function transactionType(value: unknown): TransactionType {
   const raw = requiredText(value, 'type').toUpperCase()
@@ -1018,11 +1021,12 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
   const date = body.date !== undefined || !existing ? requiredText(body.date, 'date') : existing.date
   const description = body.title !== undefined ? optionalText(body.title) : existing?.description
   // Операции с деньгами не привязаны к инструменту: они меняют денежную позицию (§12).
-  const positionId = POSITION_TYPES.includes(type)
+  const positionId = POSITION_TYPES.includes(type) || INCOME_TYPES.includes(type)
     ? (body.positionId !== undefined ? optionalText(body.positionId) : existing?.positionId)
     : undefined
   const position = positionId ? await findPosition(client, userId, positionId) : undefined
   if (POSITION_TYPES.includes(type) && !position) throw new Error('positionId is required for BUY or SELL')
+  if (positionId && !position) throw new Error('Position not found')
   const quantity = POSITION_TYPES.includes(type) ? transactionQuantity(body, amount, position, existing) : undefined
   const price = POSITION_TYPES.includes(type)
     ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
