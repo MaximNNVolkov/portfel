@@ -63,7 +63,8 @@ function uniqueEmail(label: string): string {
 }
 
 async function api(path: string, options: { method?: string; token?: string; body?: unknown } = {}) {
-  const headers: Record<string, string> = {}
+  // Без Bearer изменяющие запросы (регистрация, вход) проходят CSRF-проверку только с этим заголовком.
+  const headers: Record<string, string> = { 'X-Requested-With': 'portfel' }
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
   if (options.token) headers['Authorization'] = `Bearer ${options.token}`
   const response = await fetch(`${BASE_URL}${path}`, {

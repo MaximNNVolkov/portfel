@@ -384,9 +384,16 @@ const apiUrl = "/api";
 // «Load failed» в Safari) — в русском интерфейсе его показывать нельзя.
 class NetworkError extends Error {}
 const networkErrorText = "Нет связи с сервером. Проверьте подключение и попробуйте ещё раз";
+// Сессия живёт в httpOnly-cookie (§28): браузер прикладывает её сам, а скрипт страницы
+// токена не видит. Authorization, который по старинке собирают вызовы ниже, здесь
+// выкидывается; X-Requested-With — обязательный для сервера признак «запрос из нашего
+// приложения» (защита от CSRF).
 async function apiFetch(input: string, init?: RequestInit) {
+  const headers = new Headers(init?.headers);
+  headers.delete("Authorization");
+  headers.set("X-Requested-With", "portfel");
   try {
-    return await fetch(input, init);
+    return await fetch(input, { ...init, headers, credentials: "same-origin" });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
     throw new NetworkError(networkErrorText);
@@ -403,6 +410,9 @@ function errorText(error: unknown, fallback: string) {
 const OCR_POLL_INTERVAL_MS = 1500;
 const OCR_WAIT_LIMIT_MS = 3 * 60 * 1000;
 const tokenKey = "capital-api-token";
+// В localStorage хранится только признак «вход выполнен», а не сам токен. Всё остальное
+// под этим ключом — токен из версии до cookie-сессий: его стираем, пользователь входит заново.
+const SESSION_MARKER = "cookie-session";
 const themeKey = "capital-theme-preference";
 type ThemePreference = "light" | "dark" | "system";
 const initialProducts: Product[] = [
@@ -1072,9 +1082,11 @@ function AppMvp() {
   const [toast, setToast] = useState("");
   const [priceRefresh, setPriceRefresh] = useState<PriceRefreshResult | null>(null);
   const [hideAmounts, setHideAmounts] = useState(false);
-  const [token, setToken] = useState(
-    () => localStorage.getItem(tokenKey) || "",
-  );
+  const [token, setToken] = useState(() => {
+    const saved = localStorage.getItem(tokenKey);
+    if (saved && saved !== SESSION_MARKER) localStorage.removeItem(tokenKey);
+    return saved === SESSION_MARKER ? SESSION_MARKER : "";
+  });
   const [apiOnline, setApiOnline] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
   const [history, setHistory] = useState<Snapshot[]>([]);
@@ -1566,9 +1578,8 @@ function AppMvp() {
           (mode === "register" ? "Не удалось создать аккаунт" : "Не удалось войти"),
       };
     }
-    const result = (await response.json()) as { token: string };
-    localStorage.setItem(tokenKey, result.token);
-    setToken(result.token);
+    localStorage.setItem(tokenKey, SESSION_MARKER);
+    setToken(SESSION_MARKER);
     setToast(
       mode === "register" ? "Аккаунт создан" : "Добро пожаловать в Капитал",
     );
