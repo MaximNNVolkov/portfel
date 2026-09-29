@@ -756,10 +756,12 @@ async function statementInputs(client: Db, userId: string, body: unknown) {
   // загрузить только поступления и проценты.
   const excluded = new Set(Array.isArray(exclude) ? exclude.map(Number).filter(Number.isInteger) : [])
   const incomeOnly = only === 'income'
-  const known = new Set((await listTransactions(client, userId)).map((item) => item.externalId).filter(Boolean))
+  // Ключ импорта — «import:<загрузка>:<строка>» (старые — «import:<строка>»): дубликат ищется
+  // по последней части, чтобы загрузку можно было отменить целиком (критик К28).
+  const known = new Set((await listTransactions(client, userId)).map((item) => item.externalId?.split(':').pop()).filter(Boolean))
   const rows = statementRows(parsed, chosen).map((row) => ({
     ...row,
-    duplicate: Boolean(row.externalId && known.has(row.externalId)),
+    duplicate: Boolean(row.externalId && known.has(row.externalId.split(':').pop())),
     skipped: excluded.has(row.line) || (incomeOnly && row.type === 'WITHDRAW'),
   }))
   return { headers: parsed.headers, mapping: chosen, rows }
@@ -797,21 +799,41 @@ app.post('/api/imports/statement', async (request, response) => {
       const accountId = institution
         ? (await ensureAccount(client, (await ensurePortfolio(client, userId, randomUUID())).id, randomUUID(), { type: 'bank', provider: institution, currency: 'RUB' })).id
         : await defaultAccountId(client, userId)
+      const batch = randomUUID().slice(0, 8)
       for (const row of rows) {
-        if (!importable(row) || !row.type || !row.date || row.amount === undefined) continue
+        if (!importable(row) || !row.type || !row.date || row.amount === undefined || !row.externalId) continue
         const transaction: Transaction = {
           id: randomUUID(), accountId, type: row.type, date: row.date, amount: row.amount, currency: row.currency,
-          commission: 0, tax: 0, source: 'manual', externalId: row.externalId,
+          commission: 0, tax: 0, source: 'manual', externalId: `import:${batch}:${row.externalId.split(':').pop()}`,
           description: row.description || (row.type === 'WITHDRAW' ? 'Списание по выписке' : row.type === 'INTEREST' ? 'Проценты по выписке' : 'Зачисление по выписке'),
         }
         await insertTransaction(client, transaction)
         await syncPayoutForTransaction(client, transaction)
       }
       await recordSnapshot(client, userId)
-      return importCounts(rows)
+      return { ...importCounts(rows), batch }
     })
-    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors, skipped: counts.skipped })
+    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors, skipped: counts.skipped, batch: counts.batch })
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось загрузить выписку' }) }
+})
+
+// Отмена загрузки целиком: удаляются операции этой загрузки и их выплаты.
+app.delete('/api/imports/statement/:batch', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const batch = String(request.params.batch)
+  if (!/^[0-9a-f]{8}$/.test(batch)) return response.status(404).json({ error: 'Загрузка не найдена' })
+  const deleted = await withTransaction(db, async (client) => {
+    const prefix = `import:${batch}:`
+    const own = (await listTransactions(client, userId)).filter((item) => item.externalId?.startsWith(prefix))
+    for (const item of own) {
+      await deletePayoutsForTransaction(client, item.id)
+      await deleteTransaction(client, userId, item.id)
+    }
+    if (own.length) await recordSnapshot(client, userId)
+    return own.length
+  })
+  if (!deleted) return response.status(404).json({ error: 'Загрузка не найдена' })
+  response.json({ deleted })
 })
 
 // Оценка НДФЛ за год и доходы для 3-НДФЛ. Налог считается в рублях при любой базовой

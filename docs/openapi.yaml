@@ -509,8 +509,28 @@ paths:
                   duplicates: { type: integer }
                   errors: { type: integer }
                   skipped: { type: integer }
+                  batch: { type: string, description: 'Идентификатор загрузки для отмены' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+
+  /api/imports/statement/{batch}:
+    delete:
+      tags: [transactions]
+      summary: Отменить загрузку выписки
+      description: Удаляет операции, добавленные этой загрузкой, вместе с их выплатами.
+      parameters:
+        - { name: batch, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Сколько операций удалено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   /api/tax/estimate:
     get:

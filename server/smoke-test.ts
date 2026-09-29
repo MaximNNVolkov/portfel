@@ -567,17 +567,24 @@ async function run() {
       assert.equal(incomeOnly.json.counts.skipped, 2)
       const imported = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text } })
       assert.equal(imported.status, 201)
-      assert.deepEqual(imported.json, { imported: 3, duplicates: 0, errors: 1, skipped: 0 })
+      const { batch, ...importedCounts } = imported.json
+      assert.match(batch, /^[0-9a-f]{8}$/)
+      assert.deepEqual(importedCounts, { imported: 3, duplicates: 0, errors: 1, skipped: 0 })
       const after = await api('/api/portfolio/summary', { token: tokenA })
       assert.equal(Math.round((after.json.cash - before.json.cash) * 100) / 100, 48820.95)
       assert.equal(Math.round((after.json.paid - before.json.paid) * 100) / 100, 321.45)
       const again = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text } })
-      assert.deepEqual(again.json, { imported: 0, duplicates: 3, errors: 1, skipped: 0 })
+      assert.deepEqual({ ...again.json, batch: undefined }, { imported: 0, duplicates: 3, errors: 1, skipped: 0, batch: undefined })
       assert.equal((await api('/api/imports/statement/preview', { method: 'POST', token: tokenA, body: { text: '' } })).status, 400)
-      const transactions = await api('/api/transactions', { token: tokenA })
-      for (const item of transactions.json.filter((row: { description?: string }) => row.description?.startsWith('Смоук-тест ') && /пополнение|снятие|выплата процентов/.test(row.description))) {
-        assert.equal((await api(`/api/transactions/${item.id}`, { method: 'DELETE', token: tokenA })).status, 204)
-      }
+      // Отмена загрузки одним действием (критик К28): удаляются ровно операции этой
+      // загрузки вместе с выплатами.
+      const undone = await api(`/api/imports/statement/${batch}`, { method: 'DELETE', token: tokenA })
+      assert.equal(undone.status, 200)
+      assert.deepEqual(undone.json, { deleted: 3 })
+      const restored = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(Math.round((restored.json.cash - before.json.cash) * 100) / 100, 0)
+      assert.equal(Math.round((restored.json.paid - before.json.paid) * 100) / 100, 0)
+      assert.equal((await api(`/api/imports/statement/${batch}`, { method: 'DELETE', token: tokenA })).status, 404)
     })
 
     await test('доходность за периоды отдаётся списком (§23)', async () => {

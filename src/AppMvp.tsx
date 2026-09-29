@@ -1853,6 +1853,10 @@ function AppMvp() {
             element={<StatementImportPage token={token} onImported={() => setReloadKey((key) => key + 1)} />}
           />
           <Route
+            path="/import/undo/:batch"
+            element={<ImportUndoPage token={token} onUndone={() => setReloadKey((key) => key + 1)} />}
+          />
+          <Route
             path="/settings"
             element={
               <Settings
@@ -3894,6 +3898,55 @@ const STATEMENT_TYPE_LABELS: Record<NonNullable<StatementPreviewRow["type"]>, st
   WITHDRAW: "Снятие",
   INTEREST: "Проценты",
 };
+// Отмена загрузки выписки — отдельная страница подтверждения, как любое удаление (§40.7).
+function ImportUndoPage({ token, onUndone }: { token: string; onUndone: () => void }) {
+  const { batch } = useParams();
+  const navigate = useNavigate();
+  const [state, setState] = useState<"confirm" | "busy" | "done">("confirm");
+  const [deleted, setDeleted] = useState(0);
+  const [error, setError] = useState("");
+  async function undo() {
+    setState("busy");
+    setError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/imports/statement/${batch}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Не удалось отменить загрузку");
+      setDeleted(result.deleted);
+      setState("done");
+      onUndone();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось отменить загрузку");
+      setState("confirm");
+    }
+  }
+  return (
+    <Page title="Отменить загрузку выписки" subtitle="Операции этой загрузки будут удалены вместе с их выплатами" back>
+      {state === "done" ? (
+        <div className="empty-state">
+          <p>Удалено операций: <strong>{deleted}</strong></p>
+          <Link className="primary-button" to="/import">К импорту</Link>
+        </div>
+      ) : (
+        <div className="confirm-card">
+          <p>Удалятся все операции, добавленные этой загрузкой выписки. Операции, введённые вручную или загруженные другим файлом, останутся.</p>
+          <div className="confirm-actions">
+            <button type="button" className="delete-button primary" disabled={state === "busy"} onClick={undo}>
+              Удалить операции загрузки
+            </button>
+            <button type="button" className="outline-button" onClick={() => navigate(-1)}>
+              Не удалять
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <p className="form-error">{error}</p>}
+    </Page>
+  );
+}
 function operationsWord(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -3921,7 +3974,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   const [preview, setPreview] = useState<StatementPreview | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number; skipped: number } | null>(null);
+  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number; skipped: number; batch?: string } | null>(null);
   const [visible, setVisible] = useState(20);
   const [pageSize, setPageSize] = useState(20);
   const [institution, setInstitution] = useState("");
@@ -4002,6 +4055,9 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
           </p>
           <div className="tax-controls">
             <Link className="primary-button" to="/transactions">К операциям</Link>
+            {done.batch && done.imported > 0 && (
+              <Link className="outline-button" to={`/import/undo/${done.batch}`}>Отменить эту загрузку</Link>
+            )}
             <button type="button" className="outline-button" onClick={() => { setDone(null); setFileName(""); setText(""); }}>
               Загрузить ещё файл
             </button>
