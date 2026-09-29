@@ -42,7 +42,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumCashBalances, sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  sumCashBalances, sumPayouts, sumRealizedSales, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -668,10 +668,12 @@ app.get('/api/ocr/documents/:id', async (request, response) => {
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const [payouts, costs, baseCurrency] = await Promise.all([sumPayouts(db, userId, localToday()), sumTransactionCosts(db, userId), resolveBaseCurrency(db, userId)])
+  const [payouts, costs, sales, baseCurrency] = await Promise.all([sumPayouts(db, userId, localToday()), sumTransactionCosts(db, userId), sumRealizedSales(db, userId), resolveBaseCurrency(db, userId)])
   const context = await engineContext(baseCurrency)
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  // Реализованный результат (§10.2): закрытые вклады и погашенные бумаги плюс продажи.
   const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
+    + sumInBase(sales, context).total
   // Выплаты, комиссии и налоги бывают в разных валютах (дивиденды в USD, купоны в CNY) —
   // складываются только после пересчёта в базовую валюту (§13).
   const expected = sumInBase(payouts.expected, context)
@@ -1056,6 +1058,10 @@ function createPositionCache(client: Db, userId: string) {
     async byId(id: string): Promise<Position | undefined> {
       const cached = loaded.get(id)
       if (cached) return cached
+      // Блокировка строки до конца транзакции: параллельные операции по одной позиции
+      // (двойной клик, несколько вкладок) иначе читали одно и то же количество и
+      // затирали друг друга — 5 покупок давали прирост как от одной (тестер, P1).
+      await client.query('SELECT 1 FROM portfolio.positions WHERE id = $1 FOR UPDATE', [id])
       const position = await findPosition(client, userId, id)
       if (position) loaded.set(id, position)
       return position
@@ -1073,9 +1079,9 @@ type PositionCache = ReturnType<typeof createPositionCache>
 
 // Стоимость меняется только у позиции, у которой она вообще известна: позиция без цены
 // остаётся неоценённой, а не получает выдуманную сумму (§7.3).
-function shiftPosition(position: Position, delta: number, quantityDelta: number | undefined) {
+function shiftPosition(position: Position, delta: number, quantityDelta: number | undefined, investedDelta = delta) {
   if (position.value !== undefined) position.value = position.value + delta
-  position.invested = Math.max(0, position.invested + delta)
+  position.invested = Math.max(0, position.invested + investedDelta)
   // Количество меняется только у позиции, которая вообще учитывается в штуках.
   if (position.quantity !== undefined && quantityDelta !== undefined) {
     position.quantity = Math.max(0, position.quantity + quantityDelta)
@@ -1083,12 +1089,29 @@ function shiftPosition(position: Position, delta: number, quantityDelta: number 
   }
 }
 
-async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'type' | 'amount' | 'positionId' | 'quantity'>, direction: 1 | -1) {
+// Продажа списывает с «вложено» не выручку, а себестоимость проданного по средней цене
+// (тестер, P1): иначе продажа с прибылью обнуляла результат, а удаление продажи оставляло
+// позицию с лишним «вложено». Себестоимость запоминается в самой операции (costBasis) —
+// из неё считается реализованный результат (§10.2), и ровно она возвращается при откате.
+function saleCostBasis(position: Position, transaction: Pick<Transaction, 'amount' | 'quantity'>): number {
+  const share = position.quantity && transaction.quantity !== undefined
+    ? transaction.quantity / position.quantity
+    : position.value ? transaction.amount / position.value : 1
+  return Math.round(position.invested * Math.min(1, Math.max(0, share)) * 100) / 100
+}
+
+async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'type' | 'amount' | 'positionId' | 'quantity' | 'costBasis'>, direction: 1 | -1) {
   const amount = transaction.amount * direction
   const quantity = transaction.quantity !== undefined ? transaction.quantity * direction : undefined
   const position = transaction.positionId ? await positions.byId(transaction.positionId) : undefined
   if (transaction.type === 'BUY' && position) { shiftPosition(position, amount, quantity); positions.mark(position) }
-  if (transaction.type === 'SELL' && position) { shiftPosition(position, -amount, quantity === undefined ? undefined : -quantity); positions.mark(position) }
+  if (transaction.type === 'SELL' && position) {
+    if (direction === 1) transaction.costBasis = saleCostBasis(position, transaction)
+    // Продажа до миграции 012 себестоимости не знает — откатывается как раньше, по выручке.
+    const cost = (transaction.costBasis ?? transaction.amount) * direction
+    shiftPosition(position, -amount, quantity === undefined ? undefined : -quantity, -cost)
+    positions.mark(position)
+  }
 }
 
 // Продать можно не больше, чем есть: по сумме у позиции без количества, по штукам — у бумаг.

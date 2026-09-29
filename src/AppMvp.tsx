@@ -298,6 +298,7 @@ type GroupSummary = {
 };
 type PortfolioSummary = {
   total: number;
+  baseCurrency?: string;
   invested: number;
   profit: number;
   profitPercent: number | null;
@@ -440,121 +441,6 @@ const tokenKey = "capital-api-token";
 const SESSION_MARKER = "cookie-session";
 const themeKey = "capital-theme-preference";
 type ThemePreference = "light" | "dark" | "system";
-const initialProducts: Product[] = [
-  {
-    id: "ofz",
-    name: "ОФЗ 26241",
-    type: "Облигации",
-    amount: 540200,
-    invested: 502000,
-    ticker: "SU26241RMFS8",
-    date: "2026-02-12",
-    institution: "Т-Инвестиции",
-    currency: "RUB",
-    source: "manual",
-  },
-  {
-    id: "sber",
-    name: "Сбербанк",
-    type: "Акции",
-    amount: 342380,
-    invested: 303500,
-    ticker: "SBER",
-    date: "2026-03-18",
-    institution: "Т-Инвестиции",
-    currency: "RUB",
-    source: "manual",
-  },
-  {
-    id: "deposit",
-    name: "Надёжный доход",
-    type: "Вклады",
-    amount: 420000,
-    invested: 400000,
-    ticker: "",
-    date: "2026-01-05",
-    institution: "Т-Банк",
-    currency: "RUB",
-    source: "manual",
-  },
-  {
-    id: "fund",
-    name: "Фонд ликвидности",
-    type: "Фонды",
-    amount: 111740,
-    invested: 107240,
-    ticker: "LQDT",
-    date: "2026-04-21",
-    institution: "Т-Инвестиции",
-    currency: "RUB",
-    source: "manual",
-  },
-  {
-    id: "cash",
-    name: "Свободные деньги",
-    type: "Деньги",
-    amount: 136100,
-    invested: 136100,
-    ticker: "",
-    date: "2026-09-06",
-    institution: "Т-Инвестиции",
-    currency: "RUB",
-    source: "manual",
-  },
-];
-const initialPayments: Payment[] = [
-  {
-    id: "p1",
-    title: "Купон ОФЗ 26241",
-    amount: 12480,
-    date: "2026-09-20",
-    type: "COUPON",
-    status: "expected",
-    currency: "RUB",
-  },
-  {
-    id: "p2",
-    title: "Дивиденд Сбера",
-    amount: 8920,
-    date: "2026-09-27",
-    type: "DIVIDEND",
-    status: "expected",
-    currency: "RUB",
-  },
-  {
-    id: "p3",
-    title: "Проценты по вкладу",
-    amount: 17100,
-    date: "2026-10-10",
-    type: "INTEREST",
-    status: "expected",
-    currency: "RUB",
-  },
-];
-const initialTransactions: Transaction[] = [
-  {
-    id: "t1",
-    title: "Покупка ОФЗ 26241",
-    amount: 502000,
-    date: "2026-02-12",
-    type: "BUY",
-    positionId: "ofz",
-  },
-  {
-    id: "t2",
-    title: "Пополнение брокерского счёта",
-    amount: 250000,
-    date: "2026-03-18",
-    type: "DEPOSIT",
-  },
-  {
-    id: "t3",
-    title: "Купон ОФЗ 26241",
-    amount: 12480,
-    date: "2026-08-20",
-    type: "COUPON",
-  },
-];
 
 const navItems = [
   ["Портфель", "◈", "/portfolio", false],
@@ -692,8 +578,15 @@ function applyLocalTransactionEffect(
   if (CASH_DEBIT_TYPES.includes(transaction.type)) shift(cashId, -amount);
   return next;
 }
+// Суммы портфеля приходят в базовой валюте (§13) — знак берётся из неё, а не всегда «₽»
+// (тестер: портфель в USD показывался в рублях). Выставляется при каждой новой сводке.
+const currencySigns: Record<string, string> = { RUB: "₽", USD: "$", CNY: "¥" };
+let baseCurrencySign = "₽";
+function setBaseCurrencySign(currency: string | undefined) {
+  baseCurrencySign = (currency && currencySigns[currency]) || currency || "₽";
+}
 const money = (value: number) =>
-  `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
+  `${baseCurrencySign} ${Math.round(value).toLocaleString("ru-RU")}`;
 // Единая точка разбора даты (баг со скриншота владельца, iPhone/Safari, 390px): пустая
 // или невалидная строка — законный случай (необязательное поле, повреждённые данные
 // со скриншота), а не повод показывать "Invalid Date"/ронять страницу на
@@ -1123,10 +1016,13 @@ function AppMvp() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [menuOpen]);
-  const [products, setProducts] = useState<Product[]>(initialProducts);
-  const [payments, setPayments] = useState<Payment[]>(initialPayments);
-  const [transactions, setTransactions] =
-    useState<Transaction[]>(initialTransactions);
+  // До ответа сервера портфель пуст, а не демонстрационный: выдуманные ₽ 1,5 млн при
+  // сбое загрузки новый пользователь принимал за свои данные (тестер, P1).
+  const [products, setProducts] = useState<Product[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [toast, setToast] = useState("");
   const [priceRefresh, setPriceRefresh] = useState<PriceRefreshResult | null>(null);
   const [hideAmounts, setHideAmounts] = useState(false);
@@ -1232,31 +1128,21 @@ function AppMvp() {
         setUserEmail((await meResponse.json()).email as string | null);
         setBrokerStatus((await brokerResponse.json()) as BrokerStatus);
         setApiOnline(true);
+        setLoadError(false);
         setDataLoaded(true);
       } catch {
-        const saved = localStorage.getItem(storageKey);
-        if (saved) {
-          const state = JSON.parse(saved) as {
-            products: Product[];
-            payments: Payment[];
-            transactions: Transaction[];
-          };
-          setProducts(state.products);
-          setPayments(state.payments);
-          setTransactions(state.transactions);
-        }
-        // Офлайн-фолбэк тоже окончательный ответ: дальше данных не прибавится.
-        setDataLoaded(true);
+        // Без сервера портфель не показывается и не правится: локальная копия в браузере
+        // расходилась с сервером, а добавленное в ней пропадало (тестер, P1).
+        setLoadError(true);
       }
     }
     void loadPortfolio();
-  }, [token]);
+  }, [token, reloadKey]);
+  // Раньше портфель целиком копировался в localStorage и оставался там после выхода и
+  // удаления аккаунта (тестер, P2) — стираем старую копию.
   useEffect(() => {
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify({ products, payments, transactions }),
-    );
-  }, [products, payments, transactions]);
+    localStorage.removeItem(storageKey);
+  }, []);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 2800);
@@ -1299,15 +1185,23 @@ function AppMvp() {
   };
   // Страницы вызывают эти действия без своего try/catch: без обёртки сетевая ошибка
   // уходит в unhandled rejection, и пользователь не видит вообще ничего (BUG-11).
+  // Одно и то же сохранение не запускается повторно, пока первое не закончилось: двойной
+  // клик по «Провести операцию» создавал две покупки (тестер, P1). Ключ — текст ошибки,
+  // он у каждого действия свой, а сами функции пересоздаются на каждом рендере.
+  const inFlight = useRef(new Set<string>());
   function withErrorToast<A extends unknown[]>(
     action: (...args: A) => Promise<void>,
     fallback: string,
   ) {
     return async (...args: A) => {
+      if (inFlight.current.has(fallback)) return;
+      inFlight.current.add(fallback);
       try {
         await action(...args);
       } catch (error) {
         setToast(errorText(error, fallback));
+      } finally {
+        inFlight.current.delete(fallback);
       }
     };
   }
@@ -1671,10 +1565,28 @@ function AppMvp() {
   // поэтому маршрут проверяется до проверки токена, а не только в неавторизованной ветке.
   // Бейдж у колокольчика — только срочное и важное: «к сведению» не должно висеть вечно.
   const urgentCount = attention?.filter((item) => item.severity <= 2).length ?? 0;
+  setBaseCurrencySign(summary?.baseCurrency);
   if (location.pathname === "/reset-password") return <ResetPasswordPage />;
   if (!token) {
     if (location.pathname === "/forgot-password") return <ForgotPasswordPage />;
     return <Login onSubmit={signIn} />;
+  }
+  if (loadError) {
+    return (
+      <div className="content-wrap load-error">
+        <p className="eyebrow">ПОРТФЕЛЬ</p>
+        <h1>Не удалось загрузить портфель</h1>
+        <p className="muted">Сервер не ответил. Данные хранятся на сервере и никуда не делись — попробуйте ещё раз.</p>
+        <div className="wizard-actions">
+          <button type="button" className="primary-button" onClick={() => { setLoadError(false); setReloadKey((key) => key + 1); }}>
+            Повторить
+          </button>
+          <button type="button" className="outline-button" onClick={() => void signOut()}>
+            Выйти
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -2011,6 +1923,7 @@ function Dashboard({
   storage: StructureBreakdown[] | null;
   onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
+  const dataLoaded = useContext(DataLoadedContext);
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
   const linePath = chartPath(history);
   const areaPath = chartPath(history, true);
@@ -2034,6 +1947,13 @@ function Dashboard({
   const missingTargets = rebalance.filter((row) => !groups.some((group) => group.group === row.group));
   const brokerDegraded = brokerStatus?.status === "error";
   const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
+  if (!dataLoaded) {
+    return (
+      <div className="content-wrap">
+        <p className="muted">Загружаем портфель…</p>
+      </div>
+    );
+  }
   // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
   if (products.length === 0 && !cash) {
     return (
@@ -2102,7 +2022,8 @@ function Dashboard({
           </button>
         </div>
         <div className="total-value">
-          {display(total)}
+          {/* Ни одну позицию не удалось оценить (нет цены или курса ЦБ) — это не «0» (§7.3). */}
+          {total === 0 && valuation.incomplete ? "Оценка недоступна" : display(total)}
         </div>
         <div className="profit-line">
           <span className={`${result.tone}-pill`}>

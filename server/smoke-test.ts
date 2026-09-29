@@ -216,6 +216,64 @@ async function run() {
       assert.equal(share.json.valuation.value, 31000)
     })
 
+    // Продажа списывает себестоимость по средней цене, а не выручку: прибыль от продажи
+    // остаётся в результате, удаление продажи возвращает позицию ровно как была.
+    await test('продажа с прибылью даёт реализованный результат и откатывается точно', async () => {
+      const before = (await api('/api/portfolio/summary', { token: tokenA })).json
+      const sale = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'SELL', amount: 14000, quantity: 4, date: '2026-02-04', positionId: sharePositionId },
+      })
+      assert.equal(sale.status, 201)
+      let share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 6)
+      assert.equal(share.json.invested, 16800)
+      assert.equal(share.json.averagePrice, 2800)
+      let after = (await api('/api/portfolio/summary', { token: tokenA })).json
+      // 4 бумаги проданы по 3 500 при текущей 3 100: +400 × 4 к результату.
+      assert.equal(Math.round(after.financialResult), Math.round(before.financialResult + 1600))
+      assert.equal(Math.round(after.total), Math.round(before.total + 1600))
+      assert.equal(Math.round(after.contributed), Math.round(before.contributed))
+      await api(`/api/transactions/${sale.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 12400, quantity: 4, price: 3100 } })
+      after = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(Math.round(after.financialResult), Math.round(before.financialResult))
+      assert.equal((await api(`/api/transactions/${sale.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 10)
+      assert.equal(share.json.invested, 28000)
+      assert.equal(share.json.averagePrice, 2800)
+    })
+
+    // Параллельные покупки по одной позиции не затирают друг друга (двойной клик, вкладки).
+    await test('параллельные покупки складываются', async () => {
+      const buys = await Promise.all([1, 2, 3, 4, 5].map(() => api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'BUY', amount: 3100, quantity: 1, date: '2026-02-05', positionId: sharePositionId },
+      })))
+      assert.deepEqual(buys.map((buy) => buy.status), [201, 201, 201, 201, 201])
+      const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 15)
+      for (const buy of buys) await api(`/api/transactions/${buy.json.id}`, { method: 'DELETE', token: tokenA })
+      assert.equal((await api(`/api/positions/${sharePositionId}`, { token: tokenA })).json.quantity, 10)
+    })
+
+    // Покупка без записанного пополнения оплачена деньгами извне: остаток не уходит в
+    // скрытый минус, и пришедший потом дивиденд виден в свободных деньгах.
+    await test('покупка без пополнения не съедает следующий доход', async () => {
+      const start = (await api('/api/portfolio/summary', { token: tokenA })).json.cash
+      const buy = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'BUY', amount: start + 3100, date: '2026-02-06', positionId: sharePositionId },
+      })
+      const dividend = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'DIVIDEND', amount: 500, date: '2026-02-07', positionId: sharePositionId },
+      })
+      assert.equal((await api('/api/portfolio/summary', { token: tokenA })).json.cash, 500)
+      for (const id of [dividend.json.id, buy.json.id]) await api(`/api/transactions/${id}`, { method: 'DELETE', token: tokenA })
+      assert.equal((await api('/api/portfolio/summary', { token: tokenA })).json.cash, start)
+    })
+
     // Купон, проведённый операцией, можно привязать к бумаге — выплата попадает в её карточку.
     await test('доходная операция привязывается к инструменту и отвязывается', async () => {
       const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
