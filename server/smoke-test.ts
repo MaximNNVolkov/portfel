@@ -256,6 +256,47 @@ async function run() {
       assert.equal((await api(`/api/transactions/${dividend.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Критик К3/К4: полученная выплата — это пришедшие деньги, реинвестирование их тратит.
+    await test('выплата «получена» зачисляет деньги, реинвестирование их списывает', async () => {
+      const cashOf = async () => (await api('/api/portfolio/summary', { token: tokenA })).json
+      const start = await cashOf()
+      const payout = await api('/api/payouts', {
+        method: 'POST', token: tokenA,
+        body: { title: 'Смоук-тест купон', amount: 5000, date: '2026-03-02', type: 'COUPON', positionId: sharePositionId },
+      })
+      assert.equal((await cashOf()).cash, start.cash, 'ожидаемая выплата денег не приносит')
+      await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })
+      assert.equal((await cashOf()).cash, start.cash + 5000)
+      await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 6000 } })
+      const received = await cashOf()
+      assert.equal(received.cash, start.cash + 6000)
+      assert.equal(received.contributed, start.contributed, 'пришедший купон — не свои вложения')
+
+      const tooMuch = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: received.cash + 100000, date: '2026-03-03', fromCash: true },
+      })
+      assert.equal(tooMuch.status, 400)
+      assert.match(tooMuch.json.error, /не хватает/)
+      const reinvested = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: 6000, date: '2026-03-03', fromCash: true },
+      })
+      assert.equal(reinvested.status, 201)
+      const after = await cashOf()
+      assert.equal(after.cash, start.cash)
+      assert.equal(after.total, received.total, 'деньги превратились во вклад, итог не удвоился')
+      const buy = (await api('/api/transactions', { token: tokenA })).json
+        .find((item: { positionId?: string; type: string }) => item.type === 'BUY' && item.positionId === reinvested.json.id)
+      assert.ok(buy, 'покупка из свободных денег видна в операциях')
+      assert.equal((await api(`/api/transactions/${buy.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await api(`/api/positions/${reinvested.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+
+      await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      assert.equal((await cashOf()).cash, start.cash, 'снятая отметка возвращает деньги назад')
+      assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // Целевая структура: сохраняется в настройках, сводка показывает сумму до цели.
     await test('целевая структура: проверка, сохранение, сумма до цели, снятие', async () => {
       const bad = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 30 } } })
@@ -377,10 +418,16 @@ async function run() {
       assert.equal(closed.json.valuation.value, 0)
       assert.equal(closed.json.valuation.pnl, 0)
       const summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(summary.json.total, before.json.total)
-      assert.equal(summary.json.invested, before.json.invested)
+      // Вклад закрыт, а тело и проценты вернулись в свободные деньги (критик К3):
+      // итог не теряет 200 000 ₽, а доход учитывается один раз.
+      assert.equal(Math.round(summary.json.total), Math.round(before.json.total + 200000 + interest))
+      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 200000 + interest))
       assert.equal(summary.json.paid, before.json.paid + interest)
       assert.equal(Math.round(summary.json.financialResult), Math.round(before.json.financialResult + interest))
+      assert.equal(Math.round(summary.json.contributed), Math.round(before.json.contributed + 200000))
+      for (const payout of own) {
+        await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      }
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
