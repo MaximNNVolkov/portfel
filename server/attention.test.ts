@@ -29,11 +29,16 @@ function build(positions: AttentionPosition[], payouts: AttentionPayout[] = []) 
 
 console.log('\nВыплаты')
 
-test('просроченная выплата — срочно, с действием «отметить»', () => {
+test('просроченный купон — важно, просроченное погашение — срочно', () => {
+  const redemption = build([position({ id: 'p1', instrumentId: 'i1', name: 'ОФЗ 26238' })], [payout({ id: 'r', instrumentId: 'i1', date: '2026-09-20', type: 'REDEMPTION' })])
+  assert.equal(redemption[0].severity, 1)
+})
+
+test('просроченная выплата — с действием «отметить»', () => {
   const items = build([position({ id: 'p1', instrumentId: 'i1', name: 'ОФЗ 26238' })], [payout({ id: 'x', instrumentId: 'i1', date: '2026-09-20' })])
   assert.equal(items.length, 1)
   assert.equal(items[0].kind, 'payout_overdue')
-  assert.equal(items[0].severity, 1)
+  assert.equal(items[0].severity, 2)
   assert.equal(items[0].action, 'mark_received')
   assert.equal(items[0].title, 'ОФЗ 26238')
   assert.equal(items[0].institution, 'ВТБ')
@@ -129,7 +134,7 @@ test('сортировка: срочность, затем дата', () => {
     payouts: [
       payout({ id: 'soon2', date: '2026-10-10' }),
       payout({ id: 'soon1', date: '2026-10-01' }),
-      payout({ id: 'overdue', date: '2026-09-28' }),
+      payout({ id: 'overdue', date: '2026-09-28', type: 'REDEMPTION' }),
     ],
     brokers: [{ name: 'Т-Инвестиции', status: 'error', lastSyncAt: '2026-09-26T10:00:00Z' }],
     recommendations: [],

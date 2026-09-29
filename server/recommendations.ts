@@ -34,6 +34,12 @@ export type PositionSnapshot = {
   group: AssetGroup
   issuer?: string
   maturityDate?: string
+  /**
+   * Сколько придёт в дату погашения по календарю выплат (номинал + последний купон), в базовой
+   * валюте. Без неё правило называло рыночную стоимость — третью сумму для того же погашения
+   * рядом с номиналом и прогнозом (критик К6).
+   */
+  maturityAmount?: number
   /** Стоимость в базовой валюте портфеля; null — оценка недоступна (§7.3), позиция пропускается. */
   valueBase: number | null
   pnlPercent: number | null
@@ -210,8 +216,10 @@ export function detectMaturity(
     if (daysLeft < 0 || daysLeft > rules.maturityWithinDays) continue
     results.push({
       ruleType: 'maturity',
-      text: `Через ${daysLeft} ${daysWord(daysLeft)} погашается «${position.name}» на ${formatMoney(position.valueBase)}`,
-      payload: { id: position.id, name: position.name, daysLeft, valueBase: position.valueBase, maturityDate: position.maturityDate },
+      text: position.maturityAmount
+        ? `Через ${daysLeft} ${daysWord(daysLeft)} погашается «${position.name}»: придёт ${formatMoney(position.maturityAmount)}`
+        : `Через ${daysLeft} ${daysWord(daysLeft)} погашается «${position.name}» на ${formatMoney(position.valueBase)}`,
+      payload: { id: position.id, name: position.name, daysLeft, valueBase: position.valueBase, maturityAmount: position.maturityAmount, maturityDate: position.maturityDate },
     })
   }
 
@@ -223,13 +231,20 @@ export function detectMaturity(
 // продавать — только констатация факта (явное требование SPEC §24).
 // ---------------------------------------------------------------------------
 
+// Облигация, которая скоро погасится, вернётся по номиналу — её «просадка» к цене покупки
+// не сигнал, а шум рядом с напоминанием о погашении (критик К6).
+const DRAWDOWN_MATURITY_GRACE_DAYS = 180
+
 export function detectDrawdown(
   positions: PositionSnapshot[],
   rules: RecommendationRules = DEFAULT_RULES,
+  today: Date = new Date(),
 ): Recommendation[] {
   const results: Recommendation[] = []
+  const graceEnd = new Date(today.getTime() + DRAWDOWN_MATURITY_GRACE_DAYS * MS_PER_DAY).toISOString().slice(0, 10)
   for (const position of positions) {
     if (position.pnlPercent === null || position.pnlPercent >= -rules.drawdownThresholdPercent) continue
+    if (position.group === 'Облигации' && position.maturityDate && position.maturityDate <= graceEnd) continue
     const dropPercent = round1(Math.abs(position.pnlPercent))
     results.push({
       ruleType: 'drawdown',
@@ -303,7 +318,7 @@ export function buildRecommendations(
   return [
     ...detectConcentration(positions, totalValue, rules),
     ...detectMaturity(positions, totalValue, rules, today),
-    ...detectDrawdown(positions, rules),
+    ...detectDrawdown(positions, rules, today),
     ...detectPayoutGaps(payouts, rules, today),
   ]
 }
