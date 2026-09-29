@@ -677,11 +677,12 @@ app.get('/api/portfolio/summary', async (request, response) => {
   // Выплаты, комиссии и налоги бывают в разных валютах (дивиденды в USD, купоны в CNY) —
   // складываются только после пересчёта в базовую валюту (§13).
   const expected = sumInBase(payouts.expected, context)
+  const expectedPrincipal = sumInBase(payouts.expectedPrincipal, context)
   const overdue = sumInBase(payouts.overdue, context)
   const received = sumInBase(payouts.received, context)
   const commissions = sumInBase(costs.commissions, context)
   const taxes = sumInBase(costs.taxes, context)
-  const unconverted = [...new Set([expected, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
+  const unconverted = [...new Set([expected, expectedPrincipal, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
   // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
   // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
   const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
@@ -705,6 +706,7 @@ app.get('/api/portfolio/summary', async (request, response) => {
     profit: aggregate.pnl,
     profitPercent: aggregate.pnlPercent,
     expected: expected.total,
+    expectedPrincipal: expectedPrincipal.total,
     overdue: overdue.total,
     paid: received.total,
     cash,
@@ -776,8 +778,10 @@ app.get('/api/portfolio/structure', async (request, response) => {
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
     // «Где хранится» (CLIENT_FLOW_PLAN §4.1): банки и брокеры одним списком, включая
-    // записи без банка («Ручной ввод»). Денежный остаток сюда не входит — как и в byBroker.
-    byProvider: breakdown((position) => position.account.provider),
+    // записи без банка («Ручной ввод»). Свободные деньги — отдельной строкой (критик К5):
+    // к банку они не привязаны (пополнение вводится без счёта), но без них строки не
+    // складывались в итог портфеля.
+    byProvider: aggregateByKey([...keyed((position) => position.account.provider), ...cashKeyed(() => 'Свободные деньги')], aggregate.value),
     byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
@@ -792,6 +796,18 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
   const context = await engineContext(baseCurrency)
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
+  // Сумма к погашению — из календаря: всё ожидаемое по бумаге в дату погашения (номинал и
+  // последний купон), в базовой валюте. Так правило, «Требует внимания» и календарь называют
+  // одну и ту же сумму.
+  const maturityAmountFor = (position: Position): number | undefined => {
+    const date = position.instrument.maturityDate
+    if (!date) return undefined
+    const due = payouts.filter((payout) => payout.status === 'expected' && payout.instrumentId === position.instrumentId
+      && payout.accountId === position.accountId && payout.date === date)
+    if (!due.some((payout) => payout.type === 'REDEMPTION')) return undefined
+    const amounts = due.map((payout) => convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates))
+    return amounts.some((amount) => amount === null) ? undefined : amounts.reduce((sum: number, amount) => sum + (amount ?? 0), 0)
+  }
   const positionSnapshots: PositionSnapshot[] = positions.filter((position) => !position.closedOn).map((position) => {
     const valuation = valuationById.get(position.id)
     return {
@@ -801,6 +817,7 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
       group: valuation?.group ?? GROUP_LABELS[position.instrument.groupType] ?? 'Прочее',
       issuer: position.instrument.issuer,
       maturityDate: position.instrument.maturityDate,
+      maturityAmount: maturityAmountFor(position),
       valueBase: valuation?.valueBase ?? null,
       pnlPercent: valuation?.pnlPercent ?? null,
     }

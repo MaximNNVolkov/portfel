@@ -172,6 +172,24 @@ test('позиция без оценки P&L (null) не считается пр
   assert.deepEqual(detectDrawdown(positions), [])
 })
 
+test('облигация, погашаемая в ближайшие полгода, просадкой не считается', () => {
+  const today = new Date('2026-09-10T00:00:00Z')
+  const positions: PositionSnapshot[] = [
+    position({ id: 'soon', name: 'Скоро погасится', pnlPercent: -12, maturityDate: '2026-10-01' }),
+    position({ id: 'far', name: 'Далеко', pnlPercent: -12, maturityDate: '2030-01-01' }),
+    position({ id: 'share', name: 'Акция', group: 'Акции', pnlPercent: -12, maturityDate: '2026-10-01' }),
+  ]
+  assert.deepEqual(detectDrawdown(positions, undefined, today).map((item) => item.payload.id), ['far', 'share'])
+})
+
+test('погашение называет сумму из календаря выплат, а не рыночную стоимость', () => {
+  const today = new Date('2026-09-10T00:00:00Z')
+  const result = detectMaturity([
+    position({ id: 'ofz', name: 'ОФЗ 26207', valueBase: 310000, maturityAmount: 517750, maturityDate: '2026-10-01' }),
+  ], 1000000, undefined, today)
+  assert.match(result[0].text, /придёт 517\s750/)
+})
+
 console.log('\nВыплаты (§24)')
 
 function payout(date: string, amount: number, status: PayoutSnapshot['status'] = 'expected'): PayoutSnapshot {

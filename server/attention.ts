@@ -192,7 +192,9 @@ export function buildAttention(
     items.push({
       id: `overdue:${key}`,
       kind: 'payout_overdue',
-      severity: 1,
+      // Непришедший возврат тела или погашение — срочно: крупная сумма, и итог без отметки
+      // её не видит. Неотмеченный купон — важно, но не выше скорого погашения (критик К8).
+      severity: payouts.some((payout) => PRINCIPAL_TYPES.has(payout.type)) ? 1 : 2,
       title: position?.name ?? (first.title || 'Выплата'),
       text: dates.size > 1
         ? `${dates.size} ${paymentsWord(dates.size)} на ${formatMoney(amount, first.currency)} не отмечены полученными — отметьте, если деньги пришли`

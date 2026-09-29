@@ -521,6 +521,10 @@ async function run() {
       assert.equal(typeof listed.institution, 'string')
       const structure = await api('/api/portfolio/structure', { token: tokenA })
       assert.ok(Array.isArray(structure.json.byProvider))
+      // «Где хранится» складывается в итог портфеля: свободные деньги — отдельной строкой.
+      const summary = (await api('/api/portfolio/summary', { token: tokenA })).json
+      const stored = structure.json.byProvider.reduce((sum: number, row: { value: number }) => sum + row.value, 0)
+      assert.equal(Math.round(stored), Math.round(summary.total))
       assert.equal((await api(`/api/payouts/${past.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 

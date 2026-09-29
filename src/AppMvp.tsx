@@ -935,14 +935,17 @@ function AttentionList({
   );
 }
 // Разрез «Где хранится» (CLIENT_FLOW_PLAN §4.1) — byProvider из /api/portfolio/structure.
+const CASH_STORAGE_KEY = "Свободные деньги";
 function StorageList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
   return (
     <div className="product-list">
       {items.map((item) => {
         const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+        // Свободные деньги — не банк: ведут к операциям, где видно, откуда они взялись.
+        const isCash = item.key === CASH_STORAGE_KEY;
         return (
           <div className="list-row" key={item.key}>
-            <Link className="product-row-summary" to={`/products?bank=${encodeURIComponent(item.key)}`}>
+            <Link className="product-row-summary" to={isCash ? "/transactions" : `/products?bank=${encodeURIComponent(item.key)}`}>
               <span className="product-row-line1">
                 <span className="product-row-name">
                   <strong>{item.key}</strong>
@@ -951,11 +954,11 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
               </span>
               <span className="product-row-line2 product-row-line2-flush">
                 <span className="muted product-row-meta">
-                  {item.positions} {pluralInstruments(item.positions)}
+                  {isCash ? "пополнения, выплаты и продажи" : `${item.positions} ${pluralInstruments(item.positions)}`}
                   {!unvalued(item) && ` · ${Math.round(item.share ?? 0)}% портфеля`}
                   {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
                 </span>
-                <span className={pnl.className}>{pnl.percentText}</span>
+                {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
               </span>
             </Link>
           </div>
@@ -2910,11 +2913,17 @@ function PaymentsPage({
   }
   const overduePaging = usePagedList(overduePayments);
 
-  const currentMonthKey = periodKey(todayIsoDate(), "month");
-  const forecast = sumPayoutsBase(
-    payments.filter((payment) => isUpcoming(payment) && periodKey(payment.date, "month") === currentMonthKey),
-  );
-  const forecastAmount = forecast.total;
+  // Прогноз на 30 дней, доход отдельно от возврата вложений (критик К7): «ожидается 517 000»
+  // из погашения на 500 000 и купонов на 17 000 обещало доход, которого нет.
+  const horizon = (() => {
+    const end = new Date(`${todayIsoDate()}T12:00:00`);
+    end.setDate(end.getDate() + 30);
+    return `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`;
+  })();
+  const nextMonth = payments.filter((payment) => isUpcoming(payment) && payment.date <= horizon);
+  const forecastIncome = sumPayoutsBase(nextMonth.filter((payment) => !isPrincipalPayout(payment)));
+  const forecastPrincipal = sumPayoutsBase(nextMonth.filter(isPrincipalPayout));
+  const forecastPartial = forecastIncome.partial || forecastPrincipal.partial;
 
   const groups = useMemo(() => {
     const map = new Map<string, Payment[]>();
@@ -2940,10 +2949,14 @@ function PaymentsPage({
 
   return (
     <Page title="Выплаты" subtitle="Календарь ожидаемых доходов">
-      {forecastAmount > 0 && (
+      {(forecastIncome.total > 0 || forecastPrincipal.total > 0) && (
         <div className="demo-note">
-          📅 В {periodLabel(currentMonthKey, "month").toLowerCase()} ожидается {money(forecastAmount)}
-          {forecast.partial && " — без выплат в валюте, для которой нет курса ЦБ"}
+          📅 В ближайшие 30 дней:{" "}
+          {[
+            forecastIncome.total > 0 ? `доход ${money(forecastIncome.total)}` : null,
+            forecastPrincipal.total > 0 ? `возврат вложений ${money(forecastPrincipal.total)}` : null,
+          ].filter(Boolean).join(" · ")}
+          {forecastPartial && " — без выплат в валюте, для которой нет курса ЦБ"}
         </div>
       )}
       <div className="toolbar">

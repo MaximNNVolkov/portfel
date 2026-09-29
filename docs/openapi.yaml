@@ -778,7 +778,8 @@ components:
         invested: { type: number }
         profit: { type: number }
         profitPercent: { type: [number, 'null'] }
-        expected: { type: number, description: 'Ожидаемые выплаты с сегодняшнего дня' }
+        expected: { type: number, description: 'Ожидаемый доход с сегодняшнего дня: купоны, проценты, дивиденды' }
+        expectedPrincipal: { type: number, description: 'Ожидаемый возврат вложений: тело вклада и погашение номинала' }
         overdue: { type: number }
         paid: { type: number }
         cash: { type: [number, 'null'] }
