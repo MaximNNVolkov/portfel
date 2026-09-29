@@ -71,6 +71,31 @@ export function convertCurrency(amount: number | null | undefined, from: string,
   return (amount * fromRate) / toRate
 }
 
+export type MoneyAmount = { amount: number; currency: string }
+export type BaseSum = {
+  /** Сумма в базовой валюте по тем слагаемым, курс которых известен. */
+  total: number
+  /** Валюты, по которым курса нет: их суммы в total не вошли (§7.3) — итог неполный. */
+  unconverted: string[]
+}
+
+/**
+ * Сумма денежных величин в разных валютах, приведённая к базовой (§13): выплаты,
+ * комиссии, налоги. Складывать amount напрямую нельзя — 100 USD и 100 RUB не 200 ₽.
+ * Слагаемое без курса не превращается в 0 молча: его валюта попадает в unconverted.
+ */
+export function sumInBase(items: MoneyAmount[], context: EngineContext): BaseSum {
+  let total = 0
+  const unconverted = new Set<string>()
+  for (const item of items) {
+    const currency = (item.currency || context.baseCurrency).trim().toUpperCase()
+    const converted = convertCurrency(item.amount, currency, context.baseCurrency, context.rates)
+    if (converted === null) { if (Number.isFinite(item.amount) && item.amount !== 0) unconverted.add(currency) }
+    else total += converted
+  }
+  return { total: round2(total) as number, unconverted: [...unconverted].sort() }
+}
+
 // ---------------------------------------------------------------------------
 // Оценка позиции (§9, §10.1, §14)
 // ---------------------------------------------------------------------------
@@ -295,7 +320,11 @@ export function aggregateByGroup(positions: PositionInput[], context: EngineCont
 // инструментам, эмитентам. По классам активов — уже покрыто aggregateByGroup выше.
 // ---------------------------------------------------------------------------
 
-export type KeyedValuation = { key: string; investedBase: number | null; valueBase: number | null; priceUnavailable: boolean }
+export type KeyedValuation = {
+  key: string; investedBase: number | null; valueBase: number | null; priceUnavailable: boolean
+  /** Приблизительная оценка без котировки: в стоимость входит, в P&L — нет (§7.3). */
+  estimated?: boolean
+}
 
 export type Breakdown = {
   key: string
@@ -316,6 +345,9 @@ export type Breakdown = {
  */
 export function aggregateByKey(items: KeyedValuation[]): Breakdown[] {
   const buckets = new Map<string, Breakdown>()
+  // P&L разреза — только по позициям, где известны и вложено, и стоимость: позиция без
+  // цены иначе дала бы «−вложено» (как в aggregateByGroup, §7.3).
+  const pnlBase = new Map<string, { invested: number; value: number }>()
   let totalValue = 0
   for (const item of items) {
     const bucket = buckets.get(item.key) ?? { key: item.key, invested: 0, value: 0, pnl: 0, pnlPercent: null, share: null, positions: 0, priceUnavailable: 0 }
@@ -323,16 +355,22 @@ export function aggregateByKey(items: KeyedValuation[]): Breakdown[] {
     if (item.investedBase !== null) bucket.invested += item.investedBase
     if (item.valueBase !== null) { bucket.value += item.valueBase; totalValue += item.valueBase }
     if (item.priceUnavailable) bucket.priceUnavailable += 1
+    if (item.investedBase !== null && item.valueBase !== null && !item.priceUnavailable && !item.estimated) {
+      const base = pnlBase.get(item.key) ?? { invested: 0, value: 0 }
+      base.invested += item.investedBase; base.value += item.valueBase
+      pnlBase.set(item.key, base)
+    }
     buckets.set(item.key, bucket)
   }
   const list = [...buckets.values()].map((bucket) => {
-    const pnl = bucket.value - bucket.invested
+    const base = pnlBase.get(bucket.key) ?? { invested: 0, value: 0 }
+    const pnl = base.value - base.invested
     return {
       ...bucket,
       invested: round2(bucket.invested) as number,
       value: round2(bucket.value) as number,
       pnl: round2(pnl) as number,
-      pnlPercent: bucket.invested > 0 ? round4((pnl / bucket.invested) * 100) : null,
+      pnlPercent: base.invested > 0 ? round4((pnl / base.invested) * 100) : null,
     }
   })
   for (const bucket of list) bucket.share = totalValue > 0 ? round4((bucket.value / totalValue) * 100) : null
