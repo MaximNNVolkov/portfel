@@ -240,6 +240,23 @@ async function run() {
       assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Целевая структура: сохраняется в настройках, сводка показывает сумму до цели.
+    await test('целевая структура: проверка, сохранение, сумма до цели, снятие', async () => {
+      const bad = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 30 } } })
+      assert.equal(bad.status, 400)
+      assert.match(bad.json.error, /должна быть 100%/)
+      const saved = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 50 } } })
+      assert.equal(saved.status, 200)
+      assert.deepEqual(saved.json.targetAllocation, { Акции: 50, Вклады: 50 })
+      const summary = await api('/api/portfolio/summary', { token: tokenA })
+      const deposits = summary.json.rebalance.find((row: { group: string }) => row.group === 'Вклады')
+      assert.equal(deposits.target, 50)
+      assert.equal(deposits.toTarget, Math.round(summary.json.total / 2 - 100000))
+      const cleared = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: {} } })
+      assert.deepEqual(cleared.json.targetAllocation, {})
+      assert.deepEqual((await api('/api/portfolio/summary', { token: tokenA })).json.rebalance, [])
+    })
+
     // BUG-23 (FIX_PLAN 3.7): ручную выплату можно привязать к инструменту и отвязать.
     await test('ручная выплата привязывается к инструменту', async () => {
       const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })

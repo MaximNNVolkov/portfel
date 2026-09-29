@@ -27,7 +27,7 @@ export type PayoutStatus = 'expected' | 'received'
 export type PayoutSource = 'manual' | 'forecast' | 'broker'
 export type BrokerStatus = 'disconnected' | 'pending' | 'connected' | 'error'
 
-export type Portfolio = { id: string; name: string; baseCurrency: string }
+export type Portfolio = { id: string; name: string; baseCurrency: string; targetAllocation: Record<string, number> }
 export type Account = {
   id: string; portfolioId: string; type: AccountType; provider: string
   accountNumberMasked?: string; currency: string; status: string
@@ -176,12 +176,12 @@ function paginate(options: ListOptions | undefined, nextParam: number): { clause
 // ---------------------------------------------------------------------------
 
 function mapPortfolio(row: any): Portfolio {
-  return { id: row.id, name: row.name, baseCurrency: row.base_currency }
+  return { id: row.id, name: row.name, baseCurrency: row.base_currency, targetAllocation: row.target_allocation ?? {} }
 }
 
 export async function findPortfolio(db: Db, userId: string): Promise<Portfolio | undefined> {
   const result = await db.query(
-    'SELECT id, name, base_currency FROM portfolio.portfolios WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
+    'SELECT id, name, base_currency, target_allocation FROM portfolio.portfolios WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
     [userId],
   )
   return result.rows[0] ? mapPortfolio(result.rows[0]) : undefined
@@ -202,7 +202,7 @@ export async function ensurePortfolio(db: Db, userId: string, id: string, baseCu
   if (existing) return existing
   const result = await db.query(
     `INSERT INTO portfolio.portfolios (id, user_id, name, base_currency) VALUES ($1, $2, 'Основной портфель', $3)
-     RETURNING id, name, base_currency`,
+     RETURNING id, name, base_currency, target_allocation`,
     [id, userId, baseCurrency],
   )
   return mapPortfolio(result.rows[0])
@@ -211,11 +211,12 @@ export async function ensurePortfolio(db: Db, userId: string, id: string, baseCu
 // §13/§6.10: настройки портфеля (название, базовая валюта) — правит уже существующие
 // колонки Portfolio, а не отдельное JSONB-хранилище, чтобы не заводить второй источник
 // истины для полей, для которых схема §11 уже даёт первоклассные колонки.
-export async function updatePortfolio(db: Db, userId: string, portfolioId: string, patch: { name?: string; baseCurrency?: string }): Promise<Portfolio> {
+export async function updatePortfolio(db: Db, userId: string, portfolioId: string, patch: { name?: string; baseCurrency?: string; targetAllocation?: Record<string, number> }): Promise<Portfolio> {
   const result = await db.query(
-    `UPDATE portfolio.portfolios SET name = COALESCE($3, name), base_currency = COALESCE($4, base_currency)
-     WHERE id = $1 AND user_id = $2 RETURNING id, name, base_currency`,
-    [portfolioId, userId, patch.name ?? null, patch.baseCurrency ?? null],
+    `UPDATE portfolio.portfolios SET name = COALESCE($3, name), base_currency = COALESCE($4, base_currency),
+       target_allocation = COALESCE($5::jsonb, target_allocation)
+     WHERE id = $1 AND user_id = $2 RETURNING id, name, base_currency, target_allocation`,
+    [portfolioId, userId, patch.name ?? null, patch.baseCurrency ?? null, patch.targetAllocation ? JSON.stringify(patch.targetAllocation) : null],
   )
   return mapPortfolio(result.rows[0])
 }

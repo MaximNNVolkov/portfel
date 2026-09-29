@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Link,
@@ -305,6 +305,8 @@ type PortfolioSummary = {
   // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
   cash: number | null;
   groups: GroupSummary[];
+  /** Целевая структура: цель, текущая доля и сумма до цели по категориям. Пусто — цель не задана. */
+  rebalance?: RebalanceRow[];
   valuation: {
     incomplete: boolean;
     unavailable: { id: string; name: string; group: string; reason: string }[];
@@ -314,6 +316,17 @@ type PortfolioSummary = {
     unconvertedCurrencies?: string[];
   };
 };
+type RebalanceRow = { group: string; target: number; actual: number; deviation: number; toTarget: number };
+const TARGET_GROUPS = ["Вклады", "Облигации", "Акции", "Фонды", "Деньги", "Прочее"];
+const targetsToInputs = (allocation?: Record<string, number>) =>
+  Object.fromEntries(Object.entries(allocation ?? {}).map(([group, share]) => [group, String(share)]));
+// «Докупить на ₽ 45 000» / «выше цели на ₽ 20 000»; расхождение меньше 1 п. п. — в пределах цели.
+function rebalanceText(row: RebalanceRow, display: (value: number) => string) {
+  if (Math.abs(row.deviation) < 1) return `цель ${Math.round(row.target)}% · в пределах цели`;
+  return row.toTarget > 0
+    ? `цель ${Math.round(row.target)}% · докупить на ${display(row.toTarget)}`
+    : `цель ${Math.round(row.target)}% · выше цели на ${display(-row.toTarget)}`;
+}
 type BrokerStatus = {
   status: string;
   lastSyncAt?: string;
@@ -1907,6 +1920,7 @@ function AppMvp() {
                 token={token}
                 themePreference={themePreference}
                 onThemeChange={setThemePreference}
+                onTargetsSaved={() => void refreshSummary()}
               />
             }
           />
@@ -1975,8 +1989,11 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, invested, profit, profitPercent, paid, overdue, cash, groups, valuation } =
+  const { total, invested, profit, profitPercent, paid, overdue, cash, groups, valuation, rebalance = [] } =
     summary ?? localSummary(products, payments);
+  const rebalanceByGroup = new Map(rebalance.map((row) => [row.group, row]));
+  // Категория с целью, которой в портфеле ещё нет, — отдельной строкой «докупить».
+  const missingTargets = rebalance.filter((row) => !groups.some((group) => group.group === row.group));
   const brokerDegraded = brokerStatus?.status === "error";
   const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
   // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
@@ -2175,12 +2192,40 @@ function Dashboard({
                     </span>
                     {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
                   </span>
+                  {rebalanceByGroup.has(groupSummary.group) && (
+                    <span className="product-row-line2">
+                      <span className={`product-row-meta ${Math.abs(rebalanceByGroup.get(groupSummary.group)!.deviation) >= 5 ? "warning-text" : "muted"}`}>
+                        {rebalanceText(rebalanceByGroup.get(groupSummary.group)!, display)}
+                      </span>
+                    </span>
+                  )}
                 </Link>
               </div>
             );
           })}
+          {missingTargets.map((row) => (
+            <div className="list-row" key={row.group}>
+              <Link className="product-row-summary" to="/products/new">
+                <span className="product-row-line1">
+                  <span className="product-row-name">
+                    <i className={`legend type-dot ${typeColors[row.group as AssetType] ?? "slate"}`} />
+                    <strong>{row.group}</strong>
+                  </span>
+                  <span className="product-row-sum muted">нет в портфеле</span>
+                </span>
+                <span className="product-row-line2">
+                  <span className="product-row-meta warning-text">{rebalanceText(row, display)}</span>
+                </span>
+              </Link>
+            </div>
+          ))}
         </div>
       </div>
+      {apiOnline && rebalance.length === 0 && groups.length > 1 && (
+        <p className="muted target-hint">
+          <Link to="/settings#target">Задать целевую структуру</Link> — и приложение подскажет, что докупить.
+        </p>
+      )}
       {storage && storage.length > 0 && (
         <>
           <section className="section-heading">
@@ -3759,7 +3804,8 @@ type RecommendationRuleType =
   | "concentration"
   | "maturity"
   | "drawdown"
-  | "payout_gap";
+  | "payout_gap"
+  | "rebalance";
 type RecommendationItem = {
   ruleType: RecommendationRuleType;
   text: string;
@@ -3775,6 +3821,7 @@ const RECOMMENDATION_STYLE: Record<
   maturity: { label: "Погашение", color: "amber", warning: true },
   drawdown: { label: "Просадка", color: "pink", warning: true },
   payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
+  rebalance: { label: "Целевая структура", color: "indigo", warning: false },
 };
 
 function Recommendations({ token }: { token: string }) {
@@ -3845,10 +3892,12 @@ function Settings({
   token,
   themePreference,
   onThemeChange,
+  onTargetsSaved,
 }: {
   token: string;
   themePreference: ThemePreference;
   onThemeChange: (value: ThemePreference) => void;
+  onTargetsSaved: () => void;
 }) {
   const [portfolioName, setPortfolioName] = useState("");
   const [baseCurrency, setBaseCurrency] = useState("RUB");
@@ -3859,6 +3908,46 @@ function Settings({
   ]);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [targets, setTargets] = useState<Record<string, string>>({});
+  const [targetMessage, setTargetMessage] = useState("");
+  const [targetSaved, setTargetSaved] = useState(false);
+  const [savingTargets, setSavingTargets] = useState(false);
+  const targetSum = TARGET_GROUPS.reduce((sum, group) => sum + (Number(targets[group]) || 0), 0);
+  const location = useLocation();
+  const targetRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (location.hash === "#target") targetRef.current?.scrollIntoView({ block: "start" });
+  }, [location.hash]);
+
+  const saveTargets = async (event: FormEvent, clear = false) => {
+    event.preventDefault();
+    setSavingTargets(true);
+    setTargetMessage("");
+    setTargetSaved(false);
+    try {
+      const targetAllocation = clear
+        ? {}
+        : Object.fromEntries(TARGET_GROUPS.filter((group) => targets[group]).map((group) => [group, Number(targets[group])]));
+      const response = await apiFetch(`${apiUrl}/settings`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ targetAllocation }),
+      });
+      const result = (await response.json()) as { targetAllocation?: Record<string, number>; error?: string };
+      if (!response.ok) {
+        setTargetMessage(result.error || "Не удалось сохранить целевую структуру");
+        return;
+      }
+      setTargets(targetsToInputs(result.targetAllocation));
+      setTargetMessage(clear ? "Целевая структура снята" : "Целевая структура сохранена");
+      setTargetSaved(true);
+      onTargetsSaved();
+    } catch (error) {
+      setTargetMessage(errorText(error, "Не удалось сохранить целевую структуру"));
+    } finally {
+      setSavingTargets(false);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -3870,9 +3959,11 @@ function Settings({
         portfolioName?: string;
         baseCurrency?: string;
         availableCurrencies?: string[];
+        targetAllocation?: Record<string, number>;
       };
       setPortfolioName(result.portfolioName || "");
       setBaseCurrency(result.baseCurrency || "RUB");
+      setTargets(targetsToInputs(result.targetAllocation));
       if (result.availableCurrencies) {
         setAvailableCurrencies(result.availableCurrencies);
       }
@@ -3955,6 +4046,44 @@ function Settings({
         <Link className="delete-button" to="/settings/delete-account">
           Удалить аккаунт
         </Link>
+      </form>
+      <form className="settings-card target-card" id="target" ref={targetRef} onSubmit={(event) => saveTargets(event)}>
+        <div>
+          <h2>Целевая структура</h2>
+          <p className="muted">
+            Какую долю портфеля вы хотите держать в каждой категории. На главной появится,
+            сколько докупить до цели, а сильное отклонение — в «Требует внимания».
+          </p>
+        </div>
+        <div className="target-grid">
+          {TARGET_GROUPS.map((group) => (
+            <label key={group}>
+              {group}, %
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                max="100"
+                step="any"
+                value={targets[group] ?? ""}
+                onChange={(event) => setTargets((current) => ({ ...current, [group]: event.target.value }))}
+                placeholder="0"
+              />
+            </label>
+          ))}
+        </div>
+        <p className={Math.abs(targetSum - 100) <= 0.5 || targetSum === 0 ? "muted" : "form-error"}>
+          Сумма: {String(Math.round(targetSum * 10) / 10).replace(".", ",")}% из 100%
+        </p>
+        {targetMessage && <p className={targetSaved ? "teal-text" : "form-error"}>{targetMessage}</p>}
+        <div className="form-actions">
+          <button className="primary-button" type="submit" disabled={savingTargets}>
+            {savingTargets ? "Сохранение…" : "Сохранить цель"}
+          </button>
+          <button className="outline-button" type="button" disabled={savingTargets} onClick={(event) => saveTargets(event, true)}>
+            Снять цель
+          </button>
+        </div>
       </form>
     </Page>
   );

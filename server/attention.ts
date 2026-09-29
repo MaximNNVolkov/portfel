@@ -347,6 +347,7 @@ const insightTitles: Record<string, string> = {
   concentration: 'Концентрация',
   drawdown: 'Просадка',
   payout_gap: 'Разрыв в выплатах',
+  rebalance: 'Целевая структура',
 }
 
 function inDaysAgo(days: number): string {
