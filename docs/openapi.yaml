@@ -421,6 +421,7 @@ paths:
                     date: { type: string, format: date }
                     value: { type: number }
                     invested: { type: [number, 'null'] }
+                    result: { type: [number, 'null'], description: Финансовый результат на дату снимка }
         '401': { $ref: '#/components/responses/Error' }
 
   /api/portfolio/returns:
@@ -428,8 +429,8 @@ paths:
       tags: [portfolio]
       summary: Доходность за день, месяц, год и всё время по снимкам (§23)
       description: |
-        Результат периода — изменение «стоимость − вложено» между снимками, процент — к
-        стоимости на начало периода. Период без снимка рядом с его началом не возвращается.
+        Результат периода — изменение финансового результата (§10.6) между снимками, процент —
+        к стоимости на начало периода. Период без снимка рядом с его началом не возвращается.
       responses:
         '200':
           description: Периоды, для которых хватает истории
@@ -481,6 +482,7 @@ paths:
                         description: { type: string }
                         error: { type: string }
                         duplicate: { type: boolean }
+                        skipped: { type: boolean }
                   counts: { $ref: '#/components/schemas/StatementImportCounts' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
@@ -506,8 +508,29 @@ paths:
                   imported: { type: integer }
                   duplicates: { type: integer }
                   errors: { type: integer }
+                  skipped: { type: integer }
+                  batch: { type: string, description: 'Идентификатор загрузки для отмены' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+
+  /api/imports/statement/{batch}:
+    delete:
+      tags: [transactions]
+      summary: Отменить загрузку выписки
+      description: Удаляет операции, добавленные этой загрузкой, вместе с их выплатами.
+      parameters:
+        - { name: batch, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Сколько операций удалено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   /api/tax/estimate:
     get:
@@ -739,19 +762,26 @@ components:
         expense: { type: [integer, 'null'] }
         description: { type: [integer, 'null'] }
         currency: { type: [integer, 'null'] }
+        status: { type: [integer, 'null'], description: Статус операции; непроведённые не загружаются }
     StatementImportRequest:
       type: object
       required: [text]
       properties:
         text: { type: string, description: Содержимое CSV-файла выписки }
         mapping: { $ref: '#/components/schemas/StatementMapping' }
+        exclude: { type: array, items: { type: integer }, description: Номера строк файла, которые не загружать }
+        only: { type: string, enum: [all, income], description: income — только поступления и проценты }
+        institution: { type: string, description: Банк выписки — операции попадут на его счёт }
     StatementImportCounts:
       type: object
       properties:
         found: { type: integer }
         errors: { type: integer }
         duplicates: { type: integer }
+        skipped: { type: integer }
         toImport: { type: integer }
+        incomeRub: { type: number }
+        expenseRub: { type: number }
     Error:
       type: object
       properties:

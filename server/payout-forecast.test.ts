@@ -210,7 +210,8 @@ test('акции и фонды не прогнозируются', () => {
 test('облигация с прошедшим погашением получает строку погашения, чтобы её можно было закрыть (Т8)', () => {
   const bond = instrument({ groupType: 'bond', name: 'Старая', nominal: 1000, couponRate: 7, maturityDate: '2026-03-01' })
   const owed = forecastPayouts(position({ quantity: 5, openedOn: '2025-01-10' }), bond, TODAY)
-  assert.deepEqual(owed.map((payout) => [payout.type, payout.date, payout.amount]), [['REDEMPTION', '2026-03-01', 5000]])
+  // Последний купон приходит вместе с номиналом (К40).
+  assert.deepEqual(owed.map((payout) => [payout.type, payout.date, payout.amount]), [['COUPON', '2026-03-01', 175], ['REDEMPTION', '2026-03-01', 5000]])
   // Брокерское погашение приходит синхронизацией, покупка после погашения — ошибка ввода.
   assert.deepEqual(forecastPayouts(position({ quantity: 5, source: 'broker' }), bond, TODAY), [])
   assert.deepEqual(forecastPayouts(position({ quantity: 5, openedOn: '2026-04-01' }), bond, TODAY), [])

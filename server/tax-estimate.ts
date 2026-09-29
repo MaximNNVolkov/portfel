@@ -35,6 +35,8 @@ export type TaxEstimate = {
   keyRateAssumed: boolean
   /** Валюты операций без курса ЦБ: их суммы в оценку не вошли. */
   unconverted: string[]
+  /** Продажи без себестоимости (например, из синхронизации брокера): в оценку не вошли. */
+  salesWithoutCost: number
 }
 export type TaxIncomeRow = {
   date: string
@@ -48,8 +50,12 @@ export type TaxIncomeRow = {
 }
 
 // Максимальная ключевая ставка ЦБ на 1-е число месяцев года, % (ст. 214.2 НК РФ).
-const MAX_KEY_RATE: Record<number, number> = { 2023: 15, 2024: 21, 2025: 21 }
+// За 2021–2022 годы проценты по вкладам не облагаются вовсе (ФЗ № 67-ФЗ от 26.03.2022),
+// поэтому для них лимит не нужен. 2026 — ставка на 1 января; до конца года это нижняя
+// оценка лимита, и экран помечает её допущением (критик К34).
+const MAX_KEY_RATE: Record<number, number> = { 2023: 15, 2024: 21, 2025: 21, 2026: 16 }
 const LAST_KNOWN_YEAR = Math.max(...Object.keys(MAX_KEY_RATE).map(Number))
+const DEPOSIT_INTEREST_EXEMPT_YEARS = new Set([2021, 2022])
 
 // Шкала для инвестиционных доходов: с 2025 года 13% до 2,4 млн ₽ и 15% сверху, до 2025 —
 // 13% до 5 млн ₽.
@@ -71,6 +77,9 @@ export function estimateTax(
   transactions: Transaction[],
   year: number,
   toRub: (amount: number, currency: string) => number | null,
+  /** Себестоимость погашенной облигации: погашение выше цены покупки — доход (критик К33). */
+  redemptionCost: (transaction: Transaction) => number | undefined = () => undefined,
+  today = new Date().toISOString().slice(0, 10),
 ): TaxEstimate {
   const inYear = transactions.filter((item) => item.date.startsWith(`${year}-`))
   const unconverted = new Set<string>()
@@ -84,6 +93,7 @@ export function estimateTax(
   let coupons = 0
   let dividends = 0
   let salesResult = 0
+  let salesWithoutCost = 0
   let withheld = 0
   for (const item of inYear) {
     withheld += rub(item.tax || 0, item.currency)
@@ -92,8 +102,15 @@ export function estimateTax(
     // у брокера это доход с удержанием агентом — он ближе к купонам.
     if (item.type === 'INTEREST') {
       if (item.source === 'broker') coupons += rub(item.amount, item.currency)
+      // Проценты по валютным вкладам за 2023–2024 годы освобождены (ФЗ № 323-ФЗ, критик К37).
+      else if (item.currency !== 'RUB' && (year === 2023 || year === 2024)) continue
       else depositInterest += rub(item.amount, item.currency)
     }
+    if (item.type === 'REDEMPTION') {
+      const cost = redemptionCost(item)
+      if (cost !== undefined) salesResult += rub(item.amount - cost, item.currency)
+    }
+    if (item.type === 'SELL' && item.costBasis === undefined) salesWithoutCost += 1
     if (item.type === 'COUPON') coupons += rub(item.amount, item.currency)
     if (item.type === 'DIVIDEND') dividends += rub(item.amount, item.currency)
     // Прибыль продажи — выручка минус себестоимость проданного и комиссия. Продажа без
@@ -104,14 +121,22 @@ export function estimateTax(
     }
   }
 
-  const keyRateAssumed = MAX_KEY_RATE[year] === undefined
-  const keyRate = MAX_KEY_RATE[year] ?? MAX_KEY_RATE[LAST_KNOWN_YEAR]
-  const depositExempt = Math.min(depositInterest, 1_000_000 * (keyRate / 100))
+  const exemptYear = DEPOSIT_INTEREST_EXEMPT_YEARS.has(year)
+  // Год ещё не закончился — максимальная ставка за год ещё может вырасти.
+  const keyRateAssumed = !exemptYear && (MAX_KEY_RATE[year] === undefined || `${year}-12-01` > today)
+  const keyRate = exemptYear ? 0 : MAX_KEY_RATE[year] ?? MAX_KEY_RATE[LAST_KNOWN_YEAR]
+  const depositExempt = exemptYear ? depositInterest : Math.min(depositInterest, 1_000_000 * (keyRate / 100))
+  // Купоны и результат операций с бумагами — одна налоговая база (п. 7 ст. 214.1 НК РФ):
+  // убыток от продаж уменьшает купоны того же года, но не ниже нуля (критик К32).
+  // Дивиденды — отдельная база, убыток их не уменьшает.
+  const salesBase = Math.max(salesResult, -coupons)
   const draft: TaxLine[] = [
     {
       key: 'deposit_interest', label: 'Проценты по вкладам', income: depositInterest, exempt: depositExempt,
       taxBase: depositInterest - depositExempt,
-      how: 'Банк сообщает в ФНС сам, налог приходит уведомлением до 1 декабря следующего года — декларация не нужна',
+      how: exemptYear
+        ? 'Проценты за 2021–2022 годы налогом не облагаются'
+        : 'Банк сообщает в ФНС сам, налог приходит уведомлением до 1 декабря следующего года — декларация не нужна',
     },
     {
       key: 'coupons', label: 'Купоны и проценты у брокера', income: coupons, exempt: 0, taxBase: coupons,
@@ -122,8 +147,10 @@ export function estimateTax(
       how: 'По российским акциям налог удерживает брокер; иностранные дивиденды декларируются в 3-НДФЛ',
     },
     {
-      key: 'sales', label: 'Продажи ценных бумаг', income: Math.max(0, salesResult), exempt: 0, taxBase: Math.max(0, salesResult),
-      how: 'Брокер удерживает при выводе денег или в конце года; убыток уменьшает прибыль того же года',
+      key: 'sales', label: 'Продажи и погашения бумаг', income: salesResult, exempt: 0, taxBase: salesBase,
+      how: salesResult < 0
+        ? 'Убыток уменьшает купоны того же года (одна база по бумагам); перенос на следующие годы — через 3-НДФЛ'
+        : 'Брокер удерживает при выводе денег или в конце года; убыток уменьшает прибыль того же года',
     },
   ]
   const lines = draft.map((line) => ({ ...line, income: round2(line.income), exempt: round2(line.exempt), taxBase: round2(line.taxBase) }))
@@ -140,6 +167,7 @@ export function estimateTax(
     keyRate,
     keyRateAssumed,
     unconverted: [...unconverted].sort(),
+    salesWithoutCost,
   }
 }
 
@@ -154,17 +182,21 @@ export function taxIncomeRows(
   return transactions
     .filter((item) => item.date.startsWith(`${year}-`) && KIND_LABELS[item.type])
     .map((item) => {
-      const amount = item.type === 'SELL' && item.costBasis !== undefined
-        ? item.amount - item.costBasis - (item.commission || 0)
-        : item.amount
+      // Продажа без себестоимости выгружается выручкой, а не «результатом» на всю сумму
+      // (критик К35); уплаченный налог — в колонку налога, а не дохода (К36).
+      const withCost = item.type === 'SELL' && item.costBasis !== undefined
+      const amount = item.type === 'TAX' ? 0 : withCost ? item.amount - item.costBasis! - (item.commission || 0) : item.amount
+      const kind = item.type === 'SELL'
+        ? (withCost ? 'Результат продажи' : 'Выручка от продажи (себестоимость не указана)')
+        : item.type === 'TAX' ? 'Налог уплачен/удержан' : KIND_LABELS[item.type]!
       return {
         date: item.date,
-        kind: item.type === 'SELL' ? 'Результат продажи' : KIND_LABELS[item.type]!,
+        kind,
         instrument: nameOf(item),
         amount: round2(amount),
         currency: item.currency,
         amountRub: (() => { const value = toRub(amount, item.currency); return value === null ? null : round2(value) })(),
-        withheld: round2(item.tax || 0),
+        withheld: round2((item.tax || 0) + (item.type === 'TAX' ? item.amount : 0)),
         source: item.source === 'broker' ? 'Брокер' : item.source === 'ocr' ? 'Скриншот' : 'Вручную',
       }
     })

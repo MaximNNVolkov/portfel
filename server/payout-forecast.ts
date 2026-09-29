@@ -231,6 +231,14 @@ function forecastBond(position: PositionRecord, instrument: Instrument, today: s
   // прогноз обрывается на ней, а не продолжается до формального погашения.
   const horizon = [instrument.ofertaDate, instrument.maturityDate].filter(Boolean).sort()[0]
 
+  // Погашение приходит и задним числом (тестировщик Т8): бумага с прошедшей датой
+  // погашения иначе висела в портфеле вечно — ни строки «Просрочено», ни способа её
+  // закрыть. Как у вклада (Р-1), прошедшая выплата ждёт отметки «Деньги пришли», которая
+  // и закрывает позицию. Брокерские бумаги не трогаем: их погашение приносит синхронизация,
+  // а бумагу, купленную уже после даты погашения, считаем ошибкой ввода, а не долгом.
+  const maturityPassedButOwed = instrument.maturityDate
+    && position.source !== 'broker'
+    && (!position.openedOn || daysBetween(position.openedOn, instrument.maturityDate) > 0)
   const schedule = instrument.couponRate && instrument.couponRate > 0
     ? couponSchedule(position, instrument, horizon, today)
     : null
@@ -247,16 +255,20 @@ function forecastBond(position: PositionRecord, instrument: Instrument, today: s
         })
       }
     }
+    // Последний купон приходит в день погашения вместе с номиналом (критик К40): у бумаги
+    // с прошедшим погашением он тоже ждёт отметки, а не теряется.
+    const maturity = instrument.maturityDate
+    if (maturityPassedButOwed && maturity && daysBetween(today, maturity) <= 0 && !payouts.some((payout) => payout.date === maturity)) {
+      payouts.push({
+        date: maturity,
+        type: 'COUPON',
+        amount,
+        currency,
+        description: `Последний купон «${instrument.name}» (прогноз, в дату погашения)`,
+      })
+    }
   }
 
-  // Погашение приходит и задним числом (тестировщик Т8): бумага с прошедшей датой
-  // погашения иначе висела в портфеле вечно — ни строки «Просрочено», ни способа её
-  // закрыть. Как у вклада (Р-1), прошедшая выплата ждёт отметки «Деньги пришли», которая
-  // и закрывает позицию. Брокерские бумаги не трогаем: их погашение приносит синхронизация,
-  // а бумагу, купленную уже после даты погашения, считаем ошибкой ввода, а не долгом.
-  const maturityPassedButOwed = instrument.maturityDate
-    && position.source !== 'broker'
-    && (!position.openedOn || daysBetween(position.openedOn, instrument.maturityDate) > 0)
   if (instrument.maturityDate && (daysBetween(today, instrument.maturityDate) > 0 || maturityPassedButOwed)) {
     payouts.push({
       date: instrument.maturityDate,

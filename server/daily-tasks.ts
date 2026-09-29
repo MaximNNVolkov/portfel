@@ -6,13 +6,13 @@
 import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexQuote } from './market-data.ts'
-import { aggregateByGroup, convertCurrency, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
+import { aggregateByGroup, calculateReturns, convertCurrency, sumInBase, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
-  recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot,
+  recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
 } from './repository.ts'
 
@@ -108,13 +108,41 @@ export function closedPositionResult(position: Position, context: EngineContext)
 // Снимок дня (§21) считается по фактическому составу портфеля, поэтому вызывается
 // уже после точечной записи и внутри той же транзакции, что и само изменение —
 // либо, для планировщика, как самостоятельный ежедневный шаг.
+// Финансовый результат портфеля (§10.6) — одна формула для сводки и для ежедневного снимка:
+// изменение стоимости + полученные выплаты + реализованный результат − комиссии − налоги.
+export async function portfolioResult(
+  client: Db, userId: string, positions: Position[], aggregate: ReturnType<typeof aggregateByGroup>, context: EngineContext,
+) {
+  const [payouts, costs, sales] = await Promise.all([sumPayouts(client, userId, localDate()), sumTransactionCosts(client, userId), sumRealizedSales(client, userId)])
+  // Реализованный результат (§10.2): закрытые вклады и погашенные бумаги плюс продажи.
+  const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
+    + sumInBase(sales, context).total
+  // Выплаты, комиссии и налоги бывают в разных валютах — складываются после пересчёта (§13).
+  const received = sumInBase(payouts.received, context)
+  const commissions = sumInBase(costs.commissions, context)
+  const taxes = sumInBase(costs.taxes, context)
+  // База доходности — позиции с известным P&L: приблизительная оценка без котировки
+  // не должна выдавать себя за «0% изменения» (§7.3, BUG-09).
+  const returns = calculateReturns({
+    currentValue: aggregate.pnlValue,
+    invested: aggregate.pnlInvested,
+    payoutsReceived: received.total + realized,
+    commissions: commissions.total,
+    taxes: taxes.total,
+  })
+  return { payouts, received, commissions, taxes, returns }
+}
+
 export async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {
   const portfolio = await findPortfolio(client, userId)
   if (!portfolio) return
-  const inputs = await portfolioEngineInputs(client, userId, await listPositions(client, userId))
+  const positions = await listPositions(client, userId)
+  const inputs = await portfolioEngineInputs(client, userId, positions)
   if (!inputs.length) return
-  const aggregate = aggregateByGroup(inputs, await engineContext(portfolio.baseCurrency))
-  await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested)
+  const context = await engineContext(portfolio.baseCurrency)
+  const aggregate = aggregateByGroup(inputs, context)
+  const { returns } = await portfolioResult(client, userId, positions, aggregate, context)
+  await upsertSnapshot(client, portfolio.id, randomUUID(), date, aggregate.value, aggregate.invested, returns.financialResult)
 }
 
 // §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе

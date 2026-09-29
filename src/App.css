@@ -111,3 +111,8 @@
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .file-picker { position: relative; }
 .file-picker:focus-within { outline: 2px solid var(--mint); outline-offset: 2px; }
+.import-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.import-options label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.import-row { grid-template-columns: auto 1fr; column-gap: 10px; }
+.import-row > input[type="checkbox"] { grid-row: span 2; align-self: center; }
+.import-row > :not(input) { grid-column: 2; }

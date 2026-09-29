@@ -1853,6 +1853,10 @@ function AppMvp() {
             element={<StatementImportPage token={token} onImported={() => setReloadKey((key) => key + 1)} />}
           />
           <Route
+            path="/import/undo/:batch"
+            element={<ImportUndoPage token={token} onUndone={() => setReloadKey((key) => key + 1)} />}
+          />
+          <Route
             path="/settings"
             element={
               <Settings
@@ -3814,7 +3818,7 @@ const PERIOD_LABELS: Record<PeriodReturn["period"], string> = {
   day: "За день",
   month: "За месяц",
   year: "За год",
-  all: "За всё время",
+  all: "С начала истории",
 };
 // §23: доходность за периоды считает бэкенд по ежедневным снимкам. Пока истории меньше
 // двух дней — честно говорим, что считать не из чего, а не рисуем нули.
@@ -3841,7 +3845,7 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
           })}
         </div>
       )}
-      <p className="muted small-note">Изменение стоимости без учёта покупок и пополнений; выплаты не входят.</p>
+      <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Пополнения и покупки ростом не считаются.</p>
     </section>
   );
 }
@@ -3852,6 +3856,7 @@ type StatementMapping = {
   expense: number | null;
   description: number | null;
   currency: number | null;
+  status: number | null;
 };
 type StatementPreviewRow = {
   line: number;
@@ -3862,12 +3867,22 @@ type StatementPreviewRow = {
   description: string;
   error?: string;
   duplicate: boolean;
+  skipped: boolean;
+};
+type StatementCounts = {
+  found: number;
+  errors: number;
+  duplicates: number;
+  skipped: number;
+  toImport: number;
+  incomeRub: number;
+  expenseRub: number;
 };
 type StatementPreview = {
   headers: string[];
   mapping: StatementMapping;
   rows: StatementPreviewRow[];
-  counts: { found: number; errors: number; duplicates: number; toImport: number };
+  counts: StatementCounts;
 };
 const MAPPING_FIELDS: [keyof StatementMapping, string][] = [
   ["date", "Дата"],
@@ -3876,12 +3891,62 @@ const MAPPING_FIELDS: [keyof StatementMapping, string][] = [
   ["expense", "Расход"],
   ["description", "Описание"],
   ["currency", "Валюта"],
+  ["status", "Статус"],
 ];
 const STATEMENT_TYPE_LABELS: Record<NonNullable<StatementPreviewRow["type"]>, string> = {
   DEPOSIT: "Пополнение",
   WITHDRAW: "Снятие",
   INTEREST: "Проценты",
 };
+// Отмена загрузки выписки — отдельная страница подтверждения, как любое удаление (§40.7).
+function ImportUndoPage({ token, onUndone }: { token: string; onUndone: () => void }) {
+  const { batch } = useParams();
+  const navigate = useNavigate();
+  const [state, setState] = useState<"confirm" | "busy" | "done">("confirm");
+  const [deleted, setDeleted] = useState(0);
+  const [error, setError] = useState("");
+  async function undo() {
+    setState("busy");
+    setError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/imports/statement/${batch}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Не удалось отменить загрузку");
+      setDeleted(result.deleted);
+      setState("done");
+      onUndone();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось отменить загрузку");
+      setState("confirm");
+    }
+  }
+  return (
+    <Page title="Отменить загрузку выписки" subtitle="Операции этой загрузки будут удалены вместе с их выплатами" back>
+      {state === "done" ? (
+        <div className="empty-state">
+          <p>Удалено операций: <strong>{deleted}</strong></p>
+          <Link className="primary-button" to="/import">К импорту</Link>
+        </div>
+      ) : (
+        <div className="confirm-card">
+          <p>Удалятся все операции, добавленные этой загрузкой выписки. Операции, введённые вручную или загруженные другим файлом, останутся.</p>
+          <div className="confirm-actions">
+            <button type="button" className="delete-button primary" disabled={state === "busy"} onClick={undo}>
+              Удалить операции загрузки
+            </button>
+            <button type="button" className="outline-button" onClick={() => navigate(-1)}>
+              Не удалять
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <p className="form-error">{error}</p>}
+    </Page>
+  );
+}
 function operationsWord(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -3909,17 +3974,23 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   const [preview, setPreview] = useState<StatementPreview | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number } | null>(null);
+  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number; skipped: number; batch?: string } | null>(null);
   const [visible, setVisible] = useState(20);
+  const [pageSize, setPageSize] = useState(20);
+  const [institution, setInstitution] = useState("");
+  // Выписка по карте — это ещё и бытовые траты (критик К22): строки можно снять галочками
+  // или взять только поступления и проценты.
+  const [only, setOnly] = useState<"all" | "income">("all");
+  const [excluded, setExcluded] = useState<number[]>([]);
 
-  async function requestPreview(content: string, mapping?: StatementMapping) {
+  async function requestPreview(content: string, mapping?: StatementMapping, options?: { only?: "all" | "income"; exclude?: number[] }) {
     setBusy(true);
     setError("");
     try {
       const response = await apiFetch(`${apiUrl}/imports/statement/preview`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text: content, mapping }),
+        body: JSON.stringify({ text: content, mapping, only: options?.only ?? only, exclude: options?.exclude ?? excluded }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Не удалось прочитать выписку");
@@ -3935,8 +4006,16 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   async function chooseFile(file: File | undefined) {
     if (!file) return;
     setDone(null);
-    setVisible(20);
+    setVisible(pageSize);
+    setExcluded([]);
     setFileName(file.name);
+    // Сбер и ВТБ отдают выписки и в PDF/XLS (критик К31): такие файлы не читаем, но говорим
+    // об этом прямо, а не показываем «нет строк с операциями».
+    if (/\.(pdf|xlsx?|docx?)$/i.test(file.name)) {
+      setPreview(null);
+      setError("Нужен CSV-файл. В интернет-банке выберите выгрузку выписки в формате CSV; PDF и Excel пока не читаются.");
+      return;
+    }
     const content = await readStatementFile(file);
     setText(content);
     await requestPreview(content);
@@ -3950,7 +4029,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
       const response = await apiFetch(`${apiUrl}/imports/statement`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mapping: preview.mapping }),
+        body: JSON.stringify({ text, mapping: preview.mapping, only, exclude: excluded, institution }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Не удалось загрузить выписку");
@@ -3972,9 +4051,13 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
             Загружено операций: <strong>{done.imported}</strong>
             {done.duplicates > 0 ? ` · уже были раньше: ${done.duplicates}` : ""}
             {done.errors > 0 ? ` · пропущено с ошибкой: ${done.errors}` : ""}
+            {done.skipped > 0 ? ` · не выбрано: ${done.skipped}` : ""}
           </p>
           <div className="tax-controls">
             <Link className="primary-button" to="/transactions">К операциям</Link>
+            {done.batch && done.imported > 0 && (
+              <Link className="outline-button" to={`/import/undo/${done.batch}`}>Отменить эту загрузку</Link>
+            )}
             <button type="button" className="outline-button" onClick={() => { setDone(null); setFileName(""); setText(""); }}>
               Загрузить ещё файл
             </button>
@@ -4018,21 +4101,63 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
               ))}
             </div>
           </section>
+          <div className="import-options">
+            <label>
+              Что загрузить
+              <select
+                value={only}
+                onChange={(event) => {
+                  const next = event.target.value === "income" ? "income" : "all";
+                  setOnly(next);
+                  requestPreview(text, preview.mapping, { only: next });
+                }}
+              >
+                <option value="all">Все операции</option>
+                <option value="income">Только поступления и проценты</option>
+              </select>
+            </label>
+            <label>
+              Банк (необязательно)
+              <input value={institution} onChange={(event) => setInstitution(event.target.value)} placeholder="Например, Сбербанк" />
+            </label>
+          </div>
+          {preview.counts.expenseRub > 0 && (
+            <div className="demo-note warn">
+              ⚠ Снятий на {preview.counts.expenseRub.toLocaleString("ru-RU")} ₽ при поступлениях на{" "}
+              {preview.counts.incomeRub.toLocaleString("ru-RU")} ₽ — они уменьшат свободные деньги. Если это выписка по
+              карте с обычными тратами, выберите «Только поступления и проценты» или снимите лишние строки.
+            </div>
+          )}
           <div className="stat-strip">
             <article className="stat-card"><span>Найдено строк</span><strong>{preview.counts.found}</strong></article>
             <article className="stat-card"><span>Будет загружено</span><strong className="teal-text">{preview.counts.toImport}</strong></article>
             <article className="stat-card">
               <span>Пропустим</span>
-              <strong className={preview.counts.errors + preview.counts.duplicates > 0 ? "warning-text" : "muted"}>
-                {preview.counts.errors + preview.counts.duplicates}
+              <strong className={preview.counts.errors + preview.counts.duplicates + preview.counts.skipped > 0 ? "warning-text" : "muted"}>
+                {preview.counts.errors + preview.counts.duplicates + preview.counts.skipped}
               </strong>
-              <small>ошибки: {preview.counts.errors} · уже загружены: {preview.counts.duplicates}</small>
+              <small>
+                ошибки: {preview.counts.errors} · уже загружены: {preview.counts.duplicates} · не выбраны: {preview.counts.skipped}
+              </small>
             </article>
           </div>
           <div className="product-list">
             {preview.rows.slice(0, visible).map((row) => (
               <article className="list-row" key={row.line}>
-                <div className="product-row-summary product-row-static tax-row">
+                <div className="product-row-summary product-row-static tax-row import-row">
+                  {!row.error && !row.duplicate && (
+                    <input
+                      type="checkbox"
+                      aria-label="Загрузить строку"
+                      checked={!row.skipped}
+                      disabled={only === "income" && row.type === "WITHDRAW"}
+                      onChange={() => {
+                        const next = excluded.includes(row.line) ? excluded.filter((line) => line !== row.line) : [...excluded, row.line];
+                        setExcluded(next);
+                        requestPreview(text, preview.mapping, { exclude: next });
+                      }}
+                    />
+                  )}
                   <span className="product-row-line1">
                     <strong>{row.description || (row.type ? STATEMENT_TYPE_LABELS[row.type] : `Строка ${row.line}`)}</strong>
                     <span className={row.type === "WITHDRAW" ? "danger-text" : row.type ? "teal-text" : "muted"}>
@@ -4050,11 +4175,28 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
               </article>
             ))}
           </div>
-          {preview.rows.length > visible && (
-            <button type="button" className="outline-button" onClick={() => setVisible((count) => count + 20)}>
-              Загрузить ещё
-            </button>
-          )}
+          <div className="tax-controls">
+            {preview.rows.length > visible && (
+              <button type="button" className="outline-button" onClick={() => setVisible((count) => count + pageSize)}>
+                Загрузить ещё
+              </button>
+            )}
+            <label className="muted">
+              Строк на странице{" "}
+              <select
+                value={pageSize}
+                onChange={(event) => {
+                  const size = Number(event.target.value);
+                  setPageSize(size);
+                  setVisible(size);
+                }}
+              >
+                {[20, 50, 100].map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
+            </label>
+          </div>
           <div className="tax-controls">
             <button type="button" className="primary-button" disabled={preview.counts.toImport === 0} onClick={commit}>
               Загрузить {preview.counts.toImport} {operationsWord(preview.counts.toImport)}
@@ -4076,6 +4218,7 @@ type TaxEstimate = {
   keyRate: number;
   keyRateAssumed: boolean;
   unconverted: string[];
+  salesWithoutCost: number;
 };
 // Оценка НДФЛ считается на бэкенде; страница только показывает строки и скачивает CSV.
 // Налог всегда в рублях, поэтому суммы — рублёвые, а не в базовой валюте портфеля.
@@ -4158,10 +4301,12 @@ function TaxPage({ token }: { token: string }) {
                 <div className="product-row-summary product-row-static tax-row">
                   <span className="product-row-line1">
                     <strong>{line.label}</strong>
-                    <span>{rub(line.taxBase)}</span>
+                    <span className={line.taxBase < 0 ? "teal-text" : undefined}>
+                      {line.taxBase < 0 ? `−${rub(-line.taxBase)}` : rub(line.taxBase)}
+                    </span>
                   </span>
                   <small className="muted">
-                    Доход {rub(line.income)}
+                    {line.income < 0 ? `Убыток ${rub(-line.income)}` : `Доход ${rub(line.income)}`}
                     {line.exempt > 0 ? ` · не облагается ${rub(line.exempt)}` : ""}
                   </small>
                   <small className="muted">{line.how}</small>
@@ -4169,14 +4314,23 @@ function TaxPage({ token }: { token: string }) {
               </article>
             ))}
           </div>
+          {estimate.salesWithoutCost > 0 && (
+            <div className="demo-note warn">
+              ⚠ Продаж без себестоимости: {estimate.salesWithoutCost} — их результат в оценку не вошёл. Сверьтесь со
+              справкой брокера.
+            </div>
+          )}
           {estimate.unconverted.length > 0 && (
             <div className="demo-note warn">
               ⚠ Суммы в {estimate.unconverted.join(", ")} не вошли: курса ЦБ для них нет.
             </div>
           )}
           <p className="muted small-note">
-            Это оценка, а не расчёт налогового агента. Необлагаемый процент по вкладам — 1 млн ₽ ×{" "}
-            {estimate.keyRate}%{estimate.keyRateAssumed ? " (ставка года ещё не известна, взята последняя)" : ""}. Шкала
+            Это оценка, а не расчёт налогового агента.{" "}
+            {estimate.keyRate > 0
+              ? `Необлагаемый процент по вкладам — 1 млн ₽ × ${estimate.keyRate}%${estimate.keyRateAssumed ? " (год не закончился — лимит может вырасти вместе с ключевой ставкой)" : ""}.`
+              : ""}{" "}
+            Шкала
             13%, сверх {estimate.year >= 2025 ? "2,4" : "5"} млн ₽ — 15%. Валюта — по текущему курсу ЦБ; убытки прошлых
             лет, ИИС и льгота долгосрочного владения не учитываются.
           </p>
@@ -5292,11 +5446,10 @@ function ProductFormPage({
   onOcrComplete: (result: OcrUploadResult) => void;
 }) {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [mode, setMode] = useState<"manual" | "screenshot">(
     searchParams.get("mode") === "screenshot" ? "screenshot" : "manual",
   );
-  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [type, setType] = useState<AssetType | null>(null);
   const [name, setName] = useState("");
   // Реинвестирование (CLIENT_FLOW_PLAN §4.4): форма открывается с суммой пришедших денег
@@ -5314,6 +5467,19 @@ function ProductFormPage({
     return fromQuery && ["RUB", "USD", "CNY"].includes(fromQuery) ? fromQuery : "RUB";
   });
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
+  // Шаг мастера живёт в адресе (?step=2), а не только в памяти (тестировщик Т13, §40.7):
+  // «Назад» в браузере возвращает на предыдущий шаг с уже введёнными данными, а не
+  // уводит со страницы. Шаг, для которого ещё нет данных (перезагрузка на ?step=3),
+  // откатывается к первому незаполненному.
+  const requestedStep = Number(searchParams.get("step"));
+  const step: 1 | 2 | 3 =
+    requestedStep >= 2 && !type ? 1 : requestedStep === 3 && !(name.trim() && amount) ? 2 : requestedStep === 3 ? 3 : requestedStep === 2 ? 2 : 1;
+  const setStep = (next: 1 | 2 | 3) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === 1) params.delete("step");
+    else params.set("step", String(next));
+    setSearchParams(params);
+  };
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
   // §34: статус асинхронной операции виден пользователю — очередь и распознавание
