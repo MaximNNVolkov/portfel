@@ -121,6 +121,8 @@ function transactionToWire(transaction: Transaction) {
     currency: transaction.currency,
     commission: transaction.commission,
     tax: transaction.tax,
+    quantity: transaction.quantity ?? null,
+    price: transaction.price ?? null,
     positionId: transaction.positionId,
     instrumentId: transaction.instrumentId,
     accountId: transaction.accountId,
@@ -920,16 +922,54 @@ type PositionCache = ReturnType<typeof createPositionCache>
 
 // Стоимость меняется только у позиции, у которой она вообще известна: позиция без цены
 // остаётся неоценённой, а не получает выдуманную сумму (§7.3).
-function shiftPosition(position: Position, delta: number) {
+function shiftPosition(position: Position, delta: number, quantityDelta: number | undefined) {
   if (position.value !== undefined) position.value = position.value + delta
   position.invested = Math.max(0, position.invested + delta)
+  // Количество меняется только у позиции, которая вообще учитывается в штуках.
+  if (position.quantity !== undefined && quantityDelta !== undefined) {
+    position.quantity = Math.max(0, position.quantity + quantityDelta)
+    if (position.quantity > 0) position.averagePrice = Math.round(position.invested / position.quantity * 1e6) / 1e6
+  }
 }
 
-async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'type' | 'amount' | 'positionId'>, direction: 1 | -1) {
+async function applyTransactionEffect(positions: PositionCache, transaction: Pick<Transaction, 'type' | 'amount' | 'positionId' | 'quantity'>, direction: 1 | -1) {
   const amount = transaction.amount * direction
+  const quantity = transaction.quantity !== undefined ? transaction.quantity * direction : undefined
   const position = transaction.positionId ? await positions.byId(transaction.positionId) : undefined
-  if (transaction.type === 'BUY' && position) { shiftPosition(position, amount); positions.mark(position) }
-  if (transaction.type === 'SELL' && position) { shiftPosition(position, -amount); positions.mark(position) }
+  if (transaction.type === 'BUY' && position) { shiftPosition(position, amount, quantity); positions.mark(position) }
+  if (transaction.type === 'SELL' && position) { shiftPosition(position, -amount, quantity === undefined ? undefined : -quantity); positions.mark(position) }
+}
+
+// Продать можно не больше, чем есть: по сумме у позиции без количества, по штукам — у бумаг.
+function assertSaleFits(transaction: Transaction, position: Position | undefined) {
+  if (transaction.type !== 'SELL' || !position) return
+  if (position.quantity !== undefined && transaction.quantity !== undefined) {
+    if (transaction.quantity > position.quantity) throw new Error('Sale exceeds current position')
+    return
+  }
+  if ((position.value ?? 0) < transaction.amount) throw new Error('Sale exceeds current position')
+}
+
+// Количество бумаг в операции. Если пользователь его не указал, а позиция учитывается
+// в штуках, выводим из цены операции, иначе — из текущей или средней цены позиции:
+// сохраняется в самой операции, чтобы удаление и правка отменяли ровно то же количество.
+function transactionQuantity(body: PositionBody, amount: number, position: Position | undefined, existing?: Transaction): number | undefined {
+  const explicit = optionalNumber(body.quantity)
+  if (explicit !== undefined) {
+    if (explicit <= 0) throw new Error('quantity must be positive')
+    return explicit
+  }
+  // Правка без количества и цены: сумма та же — количество то же; сумма другая —
+  // пересчитываем по цене исходной операции, а не по сегодняшней котировке.
+  if (existing?.quantity !== undefined && optionalNumber(body.price) === undefined) {
+    if (amount === existing.amount) return existing.quantity
+    if (existing.price) return amount / existing.price
+  }
+  // Старая операция, проведённая без количества, количества и не меняла — правка это сохраняет.
+  if (existing && existing.quantity === undefined && optionalNumber(body.price) === undefined) return undefined
+  if (position?.quantity === undefined) return undefined
+  const price = optionalNumber(body.price) ?? position.currentPrice ?? position.averagePrice
+  return price && price > 0 ? amount / price : undefined
 }
 
 // syncPayoutForTransaction — импортирован из daily-tasks.ts (используется и планировщиком).
@@ -945,6 +985,10 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
     : undefined
   const position = positionId ? await findPosition(client, userId, positionId) : undefined
   if (POSITION_TYPES.includes(type) && !position) throw new Error('positionId is required for BUY or SELL')
+  const quantity = POSITION_TYPES.includes(type) ? transactionQuantity(body, amount, position, existing) : undefined
+  const price = POSITION_TYPES.includes(type)
+    ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
+    : undefined
 
   return {
     id,
@@ -955,6 +999,8 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
     date,
     amount,
     currency: position?.instrument.currency ?? existing?.currency ?? 'RUB',
+    quantity,
+    price,
     commission: optionalNumber(body.commission) ?? existing?.commission ?? 0,
     tax: optionalNumber(body.tax) ?? existing?.tax ?? 0,
     description: description ?? type,
@@ -974,7 +1020,7 @@ app.post('/api/transactions', async (request, response) => {
       const created = await buildTransaction(client, userId, randomUUID(), (request.body ?? {}) as PositionBody)
       const positions = createPositionCache(client, userId)
       const position = created.positionId ? await positions.byId(created.positionId) : undefined
-      if (created.type === 'SELL' && position && (position.value ?? 0) < created.amount) throw new Error('Sale exceeds current position')
+      assertSaleFits(created, position)
       await applyTransactionEffect(positions, created, 1)
       await positions.flush()
       await insertTransaction(client, created)
@@ -998,7 +1044,7 @@ app.patch('/api/transactions/:id', async (request, response) => {
       // при ошибке транзакция откатывается, поэтому возвращать эффект вручную не нужно.
       await applyTransactionEffect(positions, existing, -1)
       const position = next.positionId ? await positions.byId(next.positionId) : undefined
-      if (next.type === 'SELL' && position && (position.value ?? 0) < next.amount) throw new Error('Sale exceeds current position')
+      assertSaleFits(next, position)
       await applyTransactionEffect(positions, next, 1)
       await positions.flush()
       await updateTransaction(client, userId, next)
