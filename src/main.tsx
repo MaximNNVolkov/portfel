@@ -11,3 +11,13 @@ createRoot(document.getElementById('root')!).render(
     </BrowserRouter>
   </StrictMode>,
 )
+
+// Установка на телефон (PWA): service worker регистрируется только в собранной версии —
+// в dev-режиме он кэшировал бы модули Vite и мешал горячей перезагрузке.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // Без service worker приложение работает как обычный сайт.
+    })
+  })
+}
