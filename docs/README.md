@@ -43,7 +43,8 @@
 решено продолжать на TypeScript, см. `docs/SPEC.md` §32 и `docs/CLAUDE.md`:
 
 - **Frontend:** Vite + React 19 + React Router (`src/`)
-- **Backend:** Express 5 + TypeScript, запускается через `tsx` (`server/index.ts`)
+- **Backend:** Express 5 + TypeScript (`server/index.ts`): в разработке и на стенде — через `tsx`,
+  в production-образе — скомпилированный JS (`npm run build:server`)
 - **Database:** PostgreSQL 16, миграции — SQL-файлы в `db/migrations/`
 - **Фоновые задачи:** отдельный процесс-планировщик `server/scheduler.ts` (без Celery/Redis):
   синхронизация брокера, цены MOEX, прогноз выплат, ежедневные снимки, очередь OCR

@@ -36,6 +36,14 @@ services:
         condition: service_healthy
     volumes:
       - backend_uploads:/app/server/uploads
+    # Зависший (а не упавший) процесс restart: unless-stopped не ловит — healthcheck
+    # помечает контейнер unhealthy, а nginx стартует только после первого успешного ответа.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   nginx:
     build:
@@ -46,7 +54,8 @@ services:
     environment:
       DOMAIN: ${DOMAIN}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -95,7 +104,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: portfel-scheduler
     restart: unless-stopped
-    command: ["npx", "tsx", "server/scheduler.ts"]
+    command: ["node", "dist-server/scheduler.js"]
     env_file:
       - .env
     environment:

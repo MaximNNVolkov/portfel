@@ -246,11 +246,13 @@ sandbox-токеном, правила рекомендаций кроме `conc
 
 - **OpenAPI/Swagger (§33, пункт 6.8)** — внутреннему тестированию не нужен,
   фронт и бэкенд разрабатываются вместе.
-- **Production-образ без `tsx` и devDependencies** — сейчас backend запускается
-  через `tsx` с полным `node_modules`. Работает, но образ тяжелее и содержит лишнее;
-  чинится компиляцией в JS. Не блокер, вернуться после теста.
-- **Healthcheck для backend в compose** — `restart: unless-stopped` уже есть,
-  зависший (а не упавший) процесс на стенде переживём.
+- ✅ **Production-образ без `tsx` и devDependencies** — сделано 29.09.2026:
+  `Dockerfile.backend` двухстадийный, backend и планировщик компилируются в JS
+  (`npm run build:server`, `tsconfig.server.build.json`) и запускаются `node` от
+  пользователя `node`; в рантайме только production-зависимости. Проверяется в CI
+  (job `backend-image`). Стенда (systemd, `tsx`) это не касается.
+- ✅ **Healthcheck для backend в compose** — сделано 29.09.2026: `/api/health`
+  раз в 30 с, nginx стартует после первого успешного ответа.
 - **Мониторинг сверх `docker compose logs`** — на одном стенде с несколькими
   пользователями достаточно логов.
 - **Хранение токена сессии в `localStorage`** — переезд на httpOnly-cookie тянет
