@@ -722,6 +722,44 @@ export async function insertTransaction(db: Db, transaction: Transaction): Promi
   )
 }
 
+// Импорт выписки кладёт десятки тысяч строк (тестировщик Т15): по одному INSERT это
+// минута и 504 от прокси, пачками по 500 — секунды.
+export async function insertTransactions(db: Db, transactions: Transaction[]): Promise<void> {
+  const COLUMNS = 15
+  for (let start = 0; start < transactions.length; start += 500) {
+    const chunk = transactions.slice(start, start + 500)
+    const values: unknown[] = []
+    const rows = chunk.map((transaction, index) => {
+      values.push(transaction.id, ...transactionValues(transaction), transaction.source, transaction.externalId ?? null)
+      return `(${Array.from({ length: COLUMNS }, (_, column) => `$${index * COLUMNS + column + 1}`).join(', ')})`
+    })
+    await db.query(
+      `INSERT INTO portfolio.transactions (
+         id, account_id, instrument_id, type, tx_date, quantity, price, amount, currency,
+         commission, tax, description, cost_basis, source, external_id
+       ) VALUES ${rows.join(', ')}`,
+      values,
+    )
+  }
+}
+
+// Отмена загрузки выписки: операции с общим префиксом внешнего id и их выплаты — двумя
+// запросами, а не по строке.
+export async function deleteTransactionsByExternalPrefix(db: Db, userId: string, prefix: string): Promise<number> {
+  const pattern = `${prefix.replace(/[\\%_]/g, '\\$&')}%`
+  await db.query(
+    `DELETE FROM portfolio.payouts WHERE transaction_id IN (
+       SELECT t.id FROM portfolio.transactions t WHERE t.external_id LIKE $1 AND ${OWNED_TRANSACTION}
+     )`,
+    [pattern, userId],
+  )
+  const result = await db.query(
+    `DELETE FROM portfolio.transactions t WHERE t.external_id LIKE $1 AND ${OWNED_TRANSACTION}`,
+    [pattern, userId],
+  )
+  return result.rowCount ?? 0
+}
+
 const OWNED_TRANSACTION = `t.account_id IN (
   SELECT a.id FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $2
 )`
@@ -784,7 +822,7 @@ export async function sumRealizedSales(db: Db, userId: string): Promise<MoneyRow
 // Пополнения, продажи и выплаты зачисляются, выводы, покупки, комиссии и налоги
 // списываются. Брокерские операции не учитываются: состояние брокерского счёта целиком
 // приходит из его позиций при синхронизации, и сальдо по ним посчитало бы деньги дважды.
-export async function sumCashBalances(db: Db, userId: string): Promise<{ currency: string; balance: number }[]> {
+export async function sumCashBalances(db: Db, userId: string): Promise<{ currency: string; balance: number; shortfall: number }[]> {
   // Покупка без записанного пополнения оплачена деньгами извне (тестер, P1): остаток не
   // уходит в минус, который потом молча «съедал» бы следующие купоны и продажи. Остаток
   // с отсечкой на нуле по ходу времени = итоговое сальдо − самый глубокий минус нарастающего
@@ -795,16 +833,17 @@ export async function sumCashBalances(db: Db, userId: string): Promise<{ currenc
          CASE WHEN t.type IN ('DEPOSIT', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION') THEN t.amount
               WHEN t.type IN ('WITHDRAW', 'BUY', 'FEE', 'TAX') THEN -t.amount
               ELSE 0 END - COALESCE(t.commission, 0) - COALESCE(t.tax, 0) AS delta,
-         t.tx_date, t.created_at, t.id
+         t.type = 'BUY' AS is_buy, t.tx_date, t.created_at, t.id
        FROM portfolio.transactions t
        JOIN portfolio.accounts a ON a.id = t.account_id
        JOIN portfolio.portfolios f ON f.id = a.portfolio_id
        WHERE f.user_id = $1 AND t.source <> 'broker'
      ), running AS (
-       SELECT currency, delta, SUM(delta) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total
+       SELECT currency, delta, SUM(delta) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total,
+         SUM(CASE WHEN is_buy THEN 0 ELSE delta END) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total_without_buys
        FROM moves
      )
-     SELECT currency, SUM(delta) AS balance, MIN(total) AS lowest
+     SELECT currency, SUM(delta) AS balance, MIN(total) AS lowest, MIN(total_without_buys) AS lowest_without_buys
      FROM running
      GROUP BY currency
      ORDER BY currency`,
@@ -813,6 +852,9 @@ export async function sumCashBalances(db: Db, userId: string): Promise<{ currenc
   return result.rows.map((row) => ({
     currency: row.currency as string,
     balance: Number(row.balance) - Math.min(0, Number(row.lowest)),
+    // Снятий и расходов больше, чем пришло денег (выписка по карте без начального остатка,
+    // тестировщик Т19). Покупки не считаются: купить на деньги «извне» — обычный ручной ввод.
+    shortfall: Math.max(0, -Number(row.lowest_without_buys)),
   }))
 }
 

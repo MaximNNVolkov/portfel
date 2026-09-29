@@ -200,6 +200,9 @@ test('причина, по которой купоны не рассчитаны
   assert.match(couponForecastGap(position({ quantity: 10 }), bond({ couponRate: undefined }))!, /ставка купона/)
   assert.match(couponForecastGap(position({}), bond({ maturityDate: '2030-01-01' }))!, /количество/)
   assert.equal(couponForecastGap(position({}), instrument({ groupType: 'share' })), null)
+  // Т20: прошедшее погашение без номинала — подсказка про погашение, а не про купоны.
+  assert.match(couponForecastGap(position({ quantity: 5 }), bond({ nominal: undefined, maturityDate: '2026-08-15' }), '2026-09-29')!, /Срок погашения прошёл/)
+  assert.match(couponForecastGap(position({}), bond({ maturityDate: '2026-07-15' }), '2026-09-29')!, /Срок погашения прошёл/)
 })
 
 test('акции и фонды не прогнозируются', () => {

@@ -585,6 +585,12 @@ async function run() {
       assert.equal(Math.round((restored.json.cash - before.json.cash) * 100) / 100, 0)
       assert.equal(Math.round((restored.json.paid - before.json.paid) * 100) / 100, 0)
       assert.equal((await api(`/api/imports/statement/${batch}`, { method: 'DELETE', token: tokenA })).status, 404)
+      // Расходов больше, чем денег (Т19): сводка говорит о минусе, а не молчит.
+      const overspend = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text: 'Дата;Сумма;Описание\r\n12.03.2026;-999 999 999,00;Смоук-тест большой расход' } })
+      assert.equal(overspend.status, 201)
+      const short = await api('/api/portfolio/summary', { token: tokenA })
+      assert.ok(short.json.cashShortfall.some((item: { currency: string; amount: number }) => item.currency === 'RUB' && item.amount > 0))
+      assert.equal((await api(`/api/imports/statement/${overspend.json.batch}`, { method: 'DELETE', token: tokenA })).status, 200)
     })
 
     await test('доходность за периоды отдаётся списком (§23)', async () => {

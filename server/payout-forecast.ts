@@ -207,8 +207,18 @@ const COUPON_BASIS_NOTE: Record<CouponSchedule['basis'], string> = {
 // Почему по облигации не посчитаны купоны — для честной пометки на карточке и в
 // календаре (§7.3: ноль без объяснения запрещён). null — прогноз купонов строится
 // или купонов у инструмента нет по определению (не облигация).
-export function couponForecastGap(position: PositionRecord, instrument: Instrument): string | null {
+export function couponForecastGap(
+  position: PositionRecord,
+  instrument: Instrument,
+  today = new Date().toISOString().slice(0, 10),
+): string | null {
   if (instrument.groupType !== 'bond') return null
+  // Срок погашения прошёл, а суммы погашения не посчитать (тестировщик Т20): без этой
+  // подсказки бумага висела в портфеле вечно с пометкой только про купоны.
+  const missingFace = !position.quantity || position.quantity <= 0 || !instrument.nominal || instrument.nominal <= 0
+  if (missingFace && instrument.maturityDate && instrument.maturityDate <= today && position.source !== 'broker') {
+    return 'Срок погашения прошёл: укажите номинал и количество — появится погашение, которое можно отметить полученным'
+  }
   if (!instrument.couponRate || instrument.couponRate <= 0) return 'Купоны не рассчитаны: не указана ставка купона'
   if (!position.quantity || position.quantity <= 0) return 'Купоны не рассчитаны: не указано количество облигаций'
   if (!instrument.nominal || instrument.nominal <= 0) return 'Купоны не рассчитаны: не указан номинал'
