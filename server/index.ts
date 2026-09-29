@@ -26,7 +26,7 @@ import { buildAttention } from './attention.ts'
 import { couponForecastGap } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
-  positionToWire, positiveNumber, reconcileInvested, requiredText, MANUAL_PROVIDER, type PositionBody,
+  positionToWire, positiveNumber, reconcileInvested, requiredText, validateHolding, MANUAL_PROVIDER, type PositionBody,
 } from './positions.ts'
 import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
@@ -101,6 +101,13 @@ app.use('/api', (request, response, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(request.method) || bearerToken(request)) return next()
   if (request.get('x-requested-with') !== 'portfel') return response.status(403).json({ error: 'Запрос отклонён: нет заголовка X-Requested-With' })
   next()
+})
+// Идентификаторы записей — UUID: «/api/positions/abc» — это «не найдено», а не падение
+// запроса к базе с ответом 500 (тестер, Т11).
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+app.param('id', (_request, response, next, id) => {
+  if (typeof id === 'string' && UUID_PATTERN.test(id)) return next()
+  response.status(404).json({ error: 'Запись не найдена' })
 })
 // Скриншоты банковских приложений раньше раздавались статикой по /uploads без авторизации.
 // Клиенту они не нужны (распознанный результат приходит через /api/ocr/documents/:id),
@@ -229,7 +236,7 @@ async function currentUserId(request: Request, response: Response): Promise<stri
   const token = authToken(request)
   const result = token ? await db.query('SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > NOW()', [hashToken(token)]) : undefined
   const userId = result?.rows[0]?.user_id as string | undefined
-  if (!userId) { response.status(401).json({ error: 'Authentication required' }); return undefined }
+  if (!userId) { response.status(401).json({ error: 'Нужно войти в аккаунт' }); return undefined }
   return userId
 }
 
@@ -489,7 +496,7 @@ app.get('/api/positions', async (request, response) => {
 app.get('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const position = await findPosition(db, userId, request.params.id)
-  if (!position) return response.status(404).json({ error: 'Position not found' })
+  if (!position) return response.status(404).json({ error: 'Инструмент не найден' })
   response.json((await valuedPositions(userId, [position]))[0])
 })
 app.post('/api/positions', async (request, response) => {
@@ -539,7 +546,7 @@ app.patch('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const existing = await findPosition(db, userId, request.params.id)
-    if (!existing) return response.status(404).json({ error: 'Position not found' })
+    if (!existing) return response.status(404).json({ error: 'Инструмент не найден' })
     const body = (request.body ?? {}) as PositionBody
     const instrument = mergeInstrument(existing.instrument, body)
     const provider = body.institution !== undefined
@@ -577,6 +584,7 @@ app.patch('/api/positions/:id', async (request, response) => {
         accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
         openedOn: body.date !== undefined ? requiredText(body.date, 'date') : existing.openedOn,
       }
+      validateHolding(instrument, record)
       await updateInstrument(client, userId, instrument)
       await updatePosition(client, userId, record)
       // Ставка, срок, купон или количество могли измениться — плановые выплаты по этому
@@ -595,7 +603,7 @@ app.patch('/api/positions/:id', async (request, response) => {
 app.delete('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const existing = await findPosition(db, userId, request.params.id)
-  if (!existing) return response.status(404).json({ error: 'Position not found' })
+  if (!existing) return response.status(404).json({ error: 'Инструмент не найден' })
   await withTransaction(db, async (client) => {
     await deletePosition(client, userId, existing.id)
     // Порядок важен: сначала пересчёт (он убирает прогнозные выплаты удалённой позиции),
@@ -893,13 +901,13 @@ const PAYOUT_STATUSES: PayoutStatus[] = ['expected', 'received']
 function payoutType(value: unknown, fallback: PayoutType): PayoutType {
   const raw = optionalText(value)?.toUpperCase()
   if (!raw) return fallback
-  if (!PAYOUT_TYPES.includes(raw as PayoutType)) throw new Error('Unsupported payout type')
+  if (!PAYOUT_TYPES.includes(raw as PayoutType)) throw new Error('Неизвестный тип выплаты')
   return raw as PayoutType
 }
 function payoutStatus(value: unknown, fallback: PayoutStatus): PayoutStatus {
   const raw = optionalText(value)?.toLowerCase()
   if (!raw) return fallback
-  if (!PAYOUT_STATUSES.includes(raw as PayoutStatus)) throw new Error('Unsupported payout status')
+  if (!PAYOUT_STATUSES.includes(raw as PayoutStatus)) throw new Error('Неизвестный статус выплаты')
   return raw as PayoutStatus
 }
 // Счёт для записей, не привязанных к конкретной позиции (выплата заведена вручную).
@@ -965,7 +973,7 @@ app.patch('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const existing = await findPayout(db, userId, request.params.id)
-    if (!existing) return response.status(404).json({ error: 'Payout not found' })
+    if (!existing) return response.status(404).json({ error: 'Выплата не найдена' })
     const body = (request.body ?? {}) as PositionBody
     const position = await payoutPosition(db, userId, body.positionId)
     const link = position === undefined ? {}
@@ -1037,7 +1045,7 @@ async function syncTransactionForPayout(client: Db, userId: string, payout: Payo
 app.delete('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const existing = await findPayout(db, userId, request.params.id)
-  if (!existing) return response.status(404).json({ error: 'Payout not found' })
+  if (!existing) return response.status(404).json({ error: 'Выплата не найдена' })
   // Выплата и её операция — одни и те же деньги (как в syncPayoutForTransaction):
   // удалённая выплата не оставляет в свободных деньгах сумму, которой больше нет.
   await withTransaction(db, async (client) => {
@@ -1061,7 +1069,7 @@ const INCOME_TYPES: TransactionType[] = ['COUPON', 'DIVIDEND', 'INTEREST']
 
 function transactionType(value: unknown): TransactionType {
   const raw = requiredText(value, 'type').toUpperCase()
-  if (!TRANSACTION_TYPES.includes(raw as TransactionType)) throw new Error('Unsupported transaction type')
+  if (!TRANSACTION_TYPES.includes(raw as TransactionType)) throw new Error('Неизвестный тип операции')
   return raw as TransactionType
 }
 
@@ -1135,10 +1143,10 @@ async function applyTransactionEffect(positions: PositionCache, transaction: Pic
 function assertSaleFits(transaction: Transaction, position: Position | undefined) {
   if (transaction.type !== 'SELL' || !position) return
   if (position.quantity !== undefined && transaction.quantity !== undefined) {
-    if (transaction.quantity > position.quantity) throw new Error('Sale exceeds current position')
+    if (transaction.quantity > position.quantity) throw new Error(`Нельзя продать больше, чем есть: в позиции ${position.quantity} шт.`)
     return
   }
-  if ((position.value ?? 0) < transaction.amount) throw new Error('Sale exceeds current position')
+  if ((position.value ?? 0) < transaction.amount) throw new Error('Нельзя продать больше, чем есть: сумма продажи больше стоимости позиции')
 }
 
 // Количество бумаг в операции. Если пользователь его не указал, а позиция учитывается
@@ -1147,7 +1155,7 @@ function assertSaleFits(transaction: Transaction, position: Position | undefined
 function transactionQuantity(body: PositionBody, amount: number, position: Position | undefined, existing?: Transaction): number | undefined {
   const explicit = optionalNumber(body.quantity)
   if (explicit !== undefined) {
-    if (explicit <= 0) throw new Error('quantity must be positive')
+    if (explicit <= 0) throw new Error('Количество должно быть больше нуля')
     return explicit
   }
   // Правка без количества и цены: сумма та же — количество то же; сумма другая —
@@ -1175,8 +1183,8 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
     ? (body.positionId !== undefined ? optionalText(body.positionId) : existing?.positionId)
     : undefined
   const position = positionId ? await findPosition(client, userId, positionId) : undefined
-  if (POSITION_TYPES.includes(type) && !position) throw new Error('positionId is required for BUY or SELL')
-  if (positionId && !position) throw new Error('Position not found')
+  if (POSITION_TYPES.includes(type) && !position) throw new Error('Для покупки и продажи выберите инструмент')
+  if (positionId && !position) throw new Error('Инструмент не найден')
   const quantity = POSITION_TYPES.includes(type) ? transactionQuantity(body, amount, position, existing) : undefined
   const price = POSITION_TYPES.includes(type)
     ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
@@ -1228,7 +1236,7 @@ app.patch('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const existing = await findTransaction(db, userId, request.params.id)
-    if (!existing) return response.status(404).json({ error: 'Transaction not found' })
+    if (!existing) return response.status(404).json({ error: 'Операция не найдена' })
     const updated = await withTransaction(db, async (client) => {
       const next = await buildTransaction(client, userId, existing.id, (request.body ?? {}) as PositionBody, existing)
       const positions = createPositionCache(client, userId)
@@ -1251,7 +1259,7 @@ app.patch('/api/transactions/:id', async (request, response) => {
 app.delete('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const existing = await findTransaction(db, userId, request.params.id)
-  if (!existing) return response.status(404).json({ error: 'Transaction not found' })
+  if (!existing) return response.status(404).json({ error: 'Операция не найдена' })
   await withTransaction(db, async (client) => {
     const positions = createPositionCache(client, userId)
     await applyTransactionEffect(positions, existing, -1)

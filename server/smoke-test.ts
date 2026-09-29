@@ -257,6 +257,29 @@ async function run() {
       assert.equal((await api(`/api/positions/${sharePositionId}`, { token: tokenA })).json.quantity, 10)
     })
 
+    // Тестер Т11/Т12: понятные ошибки по-русски, нечисловой id — 404, бессмысленные
+    // параметры не сохраняются.
+    await test('проверка параметров и понятные ошибки', async () => {
+      assert.equal((await api('/api/positions/abc', { token: tokenA })).status, 404)
+      const negative = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест кривой', type: 'Вклады', amount: 1000, date: '2026-05-01', rate: -5 },
+      })
+      assert.equal(negative.status, 400)
+      assert.match(negative.json.error, /Ставка/)
+      const backwards = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест кривой', type: 'Вклады', amount: 1000, date: '2026-05-01', termEndDate: '2026-01-01' },
+      })
+      assert.equal(backwards.status, 400)
+      assert.match(backwards.json.error, /позже даты открытия/)
+      const oversell = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'SELL', amount: 1, quantity: 1000, date: '2026-02-03', positionId: sharePositionId },
+      })
+      assert.match(oversell.json.error, /Нельзя продать больше/)
+    })
+
     // Покупка без записанного пополнения оплачена деньгами извне: остаток не уходит в
     // скрытый минус, и пришедший потом дивиденд виден в свободных деньгах.
     await test('покупка без пополнения не съедает следующий доход', async () => {
