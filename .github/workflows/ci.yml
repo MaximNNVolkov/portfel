@@ -62,3 +62,49 @@ jobs:
           out=$(docker run --rm -e NODE_ENV=production portfel-backend:ci node dist-server/index.js 2>&1 || true)
           echo "$out"
           echo "$out" | grep -q TOKEN_ENCRYPTION_KEY
+
+  # Автодеплой на стенд (docs/STAND.md, раздел «Автоматическая выкладка»): только push в main
+  # и только после зелёных checks + backend-image. Пока секреты STAND_SSH_* не заведены,
+  # job завершается успешно с пометкой «пропущено», а не роняет CI.
+  deploy:
+    needs: [checks, backend-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-stand
+      cancel-in-progress: false
+    env:
+      STAND_SSH_HOST: ${{ secrets.STAND_SSH_HOST }}
+      STAND_SSH_USER: ${{ secrets.STAND_SSH_USER }}
+      STAND_SSH_KEY: ${{ secrets.STAND_SSH_KEY }}
+      STAND_SSH_KNOWN_HOSTS: ${{ secrets.STAND_SSH_KNOWN_HOSTS }}
+      STAND_URL: https://portfel.176.109.108.58.nip.io
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        run: |
+          if [ -n "$STAND_SSH_HOST" ] && [ -n "$STAND_SSH_USER" ] && [ -n "$STAND_SSH_KEY" ] && [ -n "$STAND_SSH_KNOWN_HOSTS" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Автодеплой пропущен: не заданы секреты STAND_SSH_HOST/USER/KEY/KNOWN_HOSTS (см. docs/STAND.md)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy over SSH
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$STAND_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$STAND_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          # На сервере ключ привязан к scripts/deploy-stand.sh (command=... в authorized_keys);
+          # передаём только SHA коммита, прошедшего CI.
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ConnectTimeout=20 \
+            "$STAND_SSH_USER@$STAND_SSH_HOST" "$GITHUB_SHA"
+
+      - name: Public health check
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "$STAND_URL/api/health"
+          curl -fsS --retry 3 --retry-delay 3 "$STAND_URL/" | grep -q '<div id="root">'
