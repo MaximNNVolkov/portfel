@@ -104,6 +104,8 @@ export type Transaction = {
   description?: string
   /** Идентификатор операции у брокера — ключ идемпотентности повторной синхронизации. */
   externalId?: string
+  /** Продажа: сколько «вложено» она списала с позиции (себестоимость проданного по средней цене). */
+  costBasis?: number
   /** Банк или брокер счёта (accounts.provider). Только для чтения — выводится джойном. */
   institution?: string
 }
@@ -643,7 +645,7 @@ export async function deletePosition(db: Db, userId: string, id: string): Promis
 
 const TRANSACTION_FIELDS = `
   t.id, t.account_id, t.instrument_id, t.type, t.tx_date, t.quantity, t.price, t.amount,
-  t.currency, t.commission, t.tax, t.description, t.source, t.external_id, p.id AS position_id,
+  t.currency, t.commission, t.tax, t.description, t.source, t.external_id, t.cost_basis, p.id AS position_id,
   a.provider AS account_provider`
 
 const TRANSACTION_FROM = `
@@ -669,6 +671,7 @@ function mapTransaction(row: any): Transaction {
     price: num(row.price),
     description: text(row.description),
     externalId: text(row.external_id),
+    costBasis: num(row.cost_basis),
     institution: text(row.account_provider),
   }
 }
@@ -705,7 +708,7 @@ function transactionValues(transaction: Transaction): unknown[] {
   return [
     transaction.accountId, transaction.instrumentId ?? null, transaction.type, transaction.date,
     transaction.quantity ?? null, transaction.price ?? null, transaction.amount, transaction.currency,
-    transaction.commission, transaction.tax, transaction.description ?? null,
+    transaction.commission, transaction.tax, transaction.description ?? null, transaction.costBasis ?? null,
   ]
 }
 
@@ -713,8 +716,8 @@ export async function insertTransaction(db: Db, transaction: Transaction): Promi
   await db.query(
     `INSERT INTO portfolio.transactions (
        id, account_id, instrument_id, type, tx_date, quantity, price, amount, currency,
-       commission, tax, description, source, external_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+       commission, tax, description, cost_basis, source, external_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [transaction.id, ...transactionValues(transaction), transaction.source, transaction.externalId ?? null],
   )
 }
@@ -727,7 +730,7 @@ export async function updateTransaction(db: Db, userId: string, transaction: Tra
   const result = await db.query(
     `UPDATE portfolio.transactions t SET
        account_id = $3, instrument_id = $4, type = $5, tx_date = $6, quantity = $7, price = $8,
-       amount = $9, currency = $10, commission = $11, tax = $12, description = $13
+       amount = $9, currency = $10, commission = $11, tax = $12, description = $13, cost_basis = $14
      WHERE t.id = $1 AND ${OWNED_TRANSACTION}`,
     [transaction.id, userId, ...transactionValues(transaction)],
   )
@@ -762,25 +765,55 @@ export async function sumTransactionCosts(db: Db, userId: string): Promise<{ com
   }
 }
 
+// Реализованный результат продаж (§10.2): выручка минус себестоимость проданного, по валютам.
+// Продажи без себестоимости (до миграции 012, брокерские) не учитываются — оценить их нечем.
+export async function sumRealizedSales(db: Db, userId: string): Promise<MoneyRow[]> {
+  const result = await db.query(
+    `SELECT t.currency, SUM(t.amount - t.cost_basis) AS amount
+     FROM portfolio.transactions t
+     JOIN portfolio.accounts a ON a.id = t.account_id
+     JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+     WHERE f.user_id = $1 AND t.type = 'SELL' AND t.cost_basis IS NOT NULL
+     GROUP BY t.currency`,
+    [userId],
+  )
+  return result.rows.map((row) => ({ currency: row.currency as string, amount: Number(row.amount) }))
+}
+
 // Денежный остаток (§12, BUG-05): сальдо денежных движений по операциям, по валютам.
 // Пополнения, продажи и выплаты зачисляются, выводы, покупки, комиссии и налоги
 // списываются. Брокерские операции не учитываются: состояние брокерского счёта целиком
 // приходит из его позиций при синхронизации, и сальдо по ним посчитало бы деньги дважды.
 export async function sumCashBalances(db: Db, userId: string): Promise<{ currency: string; balance: number }[]> {
+  // Покупка без записанного пополнения оплачена деньгами извне (тестер, P1): остаток не
+  // уходит в минус, который потом молча «съедал» бы следующие купоны и продажи. Остаток
+  // с отсечкой на нуле по ходу времени = итоговое сальдо − самый глубокий минус нарастающего
+  // итога (если он был) — одним проходом оконной функцией, без переноса строк в Node.
   const result = await db.query(
-    `SELECT t.currency,
-       COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('DEPOSIT', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION')), 0)
-       - COALESCE(SUM(t.amount) FILTER (WHERE t.type IN ('WITHDRAW', 'BUY', 'FEE', 'TAX')), 0)
-       - COALESCE(SUM(t.commission), 0) - COALESCE(SUM(t.tax), 0) AS balance
-     FROM portfolio.transactions t
-     JOIN portfolio.accounts a ON a.id = t.account_id
-     JOIN portfolio.portfolios f ON f.id = a.portfolio_id
-     WHERE f.user_id = $1 AND t.source <> 'broker'
-     GROUP BY t.currency
-     ORDER BY t.currency`,
+    `WITH moves AS (
+       SELECT t.currency,
+         CASE WHEN t.type IN ('DEPOSIT', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION') THEN t.amount
+              WHEN t.type IN ('WITHDRAW', 'BUY', 'FEE', 'TAX') THEN -t.amount
+              ELSE 0 END - COALESCE(t.commission, 0) - COALESCE(t.tax, 0) AS delta,
+         t.tx_date, t.created_at, t.id
+       FROM portfolio.transactions t
+       JOIN portfolio.accounts a ON a.id = t.account_id
+       JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+       WHERE f.user_id = $1 AND t.source <> 'broker'
+     ), running AS (
+       SELECT currency, delta, SUM(delta) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total
+       FROM moves
+     )
+     SELECT currency, SUM(delta) AS balance, MIN(total) AS lowest
+     FROM running
+     GROUP BY currency
+     ORDER BY currency`,
     [userId],
   )
-  return result.rows.map((row) => ({ currency: row.currency as string, balance: Number(row.balance) }))
+  return result.rows.map((row) => ({
+    currency: row.currency as string,
+    balance: Number(row.balance) - Math.min(0, Number(row.lowest)),
+  }))
 }
 
 // ---------------------------------------------------------------------------
