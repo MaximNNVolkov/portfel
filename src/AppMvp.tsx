@@ -1010,6 +1010,10 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
     </div>
   );
 }
+// «для 1 инструмента», «для 3 инструментов» — родительный падеж после предлога.
+function instrumentsGenitive(count: number) {
+  return count % 10 === 1 && count % 100 !== 11 ? "инструмента" : "инструментов";
+}
 function pluralInstruments(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -2067,12 +2071,13 @@ function Dashboard({
         {valuation.incomplete && (
           <div className="demo-note">
             ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
-            инструмент(ов) — их стоимость не включена в общую сумму.
+            {instrumentsGenitive(valuation.unavailable.length)} — их стоимость не включена в общую сумму.
           </div>
         )}
         {(valuation.estimated?.length ?? 0) > 0 && (
           <div className="demo-note">
-            ⓘ Нет котировки для {valuation.estimated!.length} инструмент(ов): стоимость по введённой
+            ⓘ Нет котировки для {valuation.estimated!.length} {instrumentsGenitive(valuation.estimated!.length)}:
+            стоимость по введённой
             сумме, оценка приблизительна.
           </div>
         )}
@@ -2172,7 +2177,7 @@ function Dashboard({
       </section>
       <article className="total-card chart-card">
         <div className="chart">
-          {history.length ? (
+          {history.length > 1 ? (
             <>
               <div className="chart-grid">
                 <span />
@@ -2197,13 +2202,20 @@ function Dashboard({
               </svg>
             </>
           ) : (
-            <div className="chart-empty">История появится после первого изменения портфеля</div>
+            // Одна точка — не динамика: линия из неё рисовала ложное «падение» к правому краю.
+            <div className="chart-empty">
+              {lastSnapshot
+                ? `Стоимость записывается раз в сутки — график появится со второго дня. Сейчас: ${money(lastSnapshot.value)}.`
+                : "История появится после первого изменения портфеля"}
+            </div>
           )}
         </div>
-        <div className="chart-footer">
-          <span>{history[0] ? dateLabel(history[0].date) : "—"}</span>
-          <span>{lastSnapshot ? dateLabel(lastSnapshot.date) : "—"}</span>
-        </div>
+        {history.length > 1 && (
+          <div className="chart-footer">
+            <span>{dateLabel(history[0].date)}</span>
+            <span>{lastSnapshot ? dateLabel(lastSnapshot.date) : "—"}</span>
+          </div>
+        )}
       </article>
       {!apiOnline && (
         <div className="demo-note">
