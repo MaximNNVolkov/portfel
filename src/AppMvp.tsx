@@ -3104,48 +3104,52 @@ function BreakdownList({
 }) {
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
   return (
-    <article className="allocation-card">
-      <div className="section-heading compact">
-        <div>
-          <h2>{title}</h2>
-          <p>{items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}</p>
-        </div>
+    <section className="breakdown-section">
+      <div className="breakdown-heading">
+        <h2>{title}</h2>
+        <span className="muted">
+          {items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}
+        </span>
       </div>
       {items.length > 0 && (
-        <div className="list-card">
-          {visible.map((item) => {
-            const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-            return (
-              <div className="list-row" key={item.key}>
-                <div className="list-row-summary list-row-static">
-                  <div className="list-row-main">
-                    <strong>{item.key}</strong>
-                    {item.priceUnavailable > 0 && (
-                      <small className="danger-text">
-                        {" "}
-                        · цена недоступна ({item.priceUnavailable})
-                      </small>
-                    )}
-                  </div>
-                  <div className="list-row-value">
-                    <strong>{money(item.value)}</strong>
-                    <small className={pnl.className}>
-                      {Math.round(item.share ?? 0)}% · {pnl.percentText}
-                    </small>
+        <>
+          <div className="product-list">
+            {visible.map((item) => {
+              const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+              return (
+                <div className="list-row" key={item.key}>
+                  <div className="product-row-summary product-row-static">
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <strong>{item.key}</strong>
+                      </span>
+                      <span className="product-row-sum">{money(item.value)}</span>
+                    </span>
+                    <span className="product-row-line2 product-row-line2-flush">
+                      <span className="muted product-row-meta">
+                        {Math.round(item.share ?? 0)}% портфеля
+                        {item.priceUnavailable > 0 && (
+                          <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
+                        )}
+                      </span>
+                      <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
+                        {pnl.percentText}
+                      </span>
+                    </span>
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
           <ListPagination
             hasMore={hasMore}
             onLoadMore={loadMore}
             pageSize={pageSize}
             onPageSizeChange={setPageSize}
           />
-        </div>
+        </>
       )}
-    </article>
+    </section>
   );
 }
 
@@ -3183,10 +3187,13 @@ function AnalyticsPage({
 
   return (
     <Page title="Аналитика" subtitle="Базовые показатели портфеля">
-      <div className="analytics-grid">
+      <div className="stat-strip">
         <article className="stat-card">
           <span>Доходность</span>
-          <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
+          <strong className={(profitPercent ?? 0) < 0 ? "danger-text" : "teal-text"}>
+            {(profitPercent ?? 0) < 0 ? "" : "+"}
+            {(profitPercent ?? 0).toFixed(2).replace(".", ",")}%
+          </strong>
           <small>простая доходность</small>
         </article>
         <article className="stat-card">
@@ -3200,14 +3207,18 @@ function AnalyticsPage({
           <small>от общей стоимости</small>
         </article>
       </div>
-      <div className="insight-box">
-        <span>✦</span>
-        <div>
-          <strong>Распределение выглядит сбалансированным</strong>
-          <p>
-            Более половины капитала находится в инструментах с регулярными
-            выплатами.
-          </p>
+      <div className="product-list insight-list">
+        <div className="list-row">
+          <div className="product-row-summary product-row-static recommendation-row">
+            <i className="legend type-dot amber" />
+            <span>
+              <strong>Распределение выглядит сбалансированным</strong>
+              <small className="muted">
+                Более половины капитала находится в инструментах с регулярными
+                выплатами.
+              </small>
+            </span>
+          </div>
         </div>
       </div>
       {structureError && <p className="form-error">{structureError}</p>}
@@ -3249,12 +3260,12 @@ type RecommendationItem = {
 // требуют внимания в ближайшее время, разрыв в выплатах — нейтральная информация о прогнозе.
 const RECOMMENDATION_STYLE: Record<
   RecommendationRuleType,
-  { icon: string; warning: boolean }
+  { label: string; color: string; warning: boolean }
 > = {
-  concentration: { icon: "!", warning: true },
-  maturity: { icon: "⏳", warning: true },
-  drawdown: { icon: "↓", warning: true },
-  payout_gap: { icon: "ℹ", warning: false },
+  concentration: { label: "Концентрация", color: "coral", warning: true },
+  maturity: { label: "Погашение", color: "amber", warning: true },
+  drawdown: { label: "Просадка", color: "pink", warning: true },
+  payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
 };
 
 function Recommendations({ token }: { token: string }) {
@@ -3292,17 +3303,20 @@ function Recommendations({ token }: { token: string }) {
         <p>Пока нет замечаний по портфелю.</p>
       )}
       {!error && items !== null && items.length > 0 && (
-        <div className="recommendation-list">
+        <div className="product-list">
           {items.map((item, index) => {
             const style = RECOMMENDATION_STYLE[item.ruleType];
             return (
-              <article
-                key={`${item.ruleType}-${index}`}
-                className={`recommendation${style.warning ? " warning" : ""}`}
-              >
-                <span className="rec-icon">{style.icon}</span>
-                <div>
-                  <p>{item.text}</p>
+              <article className="list-row" key={`${item.ruleType}-${index}`}>
+                <div className="product-row-summary product-row-static recommendation-row">
+                  <i className={`legend type-dot ${style.color}`} title={style.label} />
+                  <span>
+                    <strong>{item.text}</strong>
+                    <small className={style.warning ? "warning-text" : "muted"}>
+                      {style.label}
+                      {style.warning ? " · требует внимания" : ""}
+                    </small>
+                  </span>
                 </div>
               </article>
             );
