@@ -202,6 +202,24 @@ test('совсем без выплат — не с чем сравнивать, 
   assert.deepEqual(detectPayoutGaps([], undefined, today), [])
 })
 
+test('возврат тела вклада и погашение номинала не считаются доходом', () => {
+  const today = new Date('2026-09-12T00:00:00Z')
+  const payouts: PayoutSnapshot[] = [
+    payout('2026-09-15', 10000),
+    { ...payout('2026-10-15', 500000), type: 'REDEMPTION' },
+    payout('2026-10-20', 10000),
+    { ...payout('2026-11-10', 300000), type: 'DEPOSIT_PRINCIPAL' },
+    payout('2026-11-15', 10000),
+  ]
+  // Без фильтра средняя ~277 тыс., и 10 тыс. в сентябре выглядели бы разрывом.
+  assert.deepEqual(detectPayoutGaps(payouts, { ...defaultRulesFor(3) }, today), [])
+})
+
+test('процент просадки пишется с запятой', () => {
+  const result = detectDrawdown([position({ id: 'gazp', name: 'Газпром', pnlPercent: -14.67 })])
+  assert.match(result[0].text, /снизилась на 14,7%/)
+})
+
 test('равномерный календарь без просевших месяцев — рекомендаций нет', () => {
   const today = new Date('2026-09-12T00:00:00Z')
   const payouts: PayoutSnapshot[] = [

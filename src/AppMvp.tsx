@@ -804,6 +804,10 @@ function valuationOf(product: Product): ProductValuation {
 // Стоимость без оценки не выводится нулём (§7.3).
 const valueText = (value: number | null) =>
   value === null ? "Оценка недоступна" : money(value);
+// Разрез, в котором ни одна позиция не оценена (например, только валюта без курса ЦБ),
+// стоит «Оценка недоступна», а не «₽ 0 · 0% портфеля» (§7.3).
+const unvalued = (item: { positions: number; priceUnavailable: number }) =>
+  item.positions > 0 && item.priceUnavailable >= item.positions;
 // Пометка к стоимости без котировки (§7.3, BUG-09): сумма совпадает с вложенным — значит,
 // это цена покупки, а не рынок; иначе — введённая оценка (например, со скриншота).
 const estimateNote = (valuation: ProductValuation) =>
@@ -1007,11 +1011,12 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
                 <span className="product-row-name">
                   <strong>{item.key}</strong>
                 </span>
-                <span className="product-row-sum">{display(item.value)}</span>
+                <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : display(item.value)}</span>
               </span>
               <span className="product-row-line2 product-row-line2-flush">
                 <span className="muted product-row-meta">
-                  {item.positions} {pluralInstruments(item.positions)} · {Math.round(item.share ?? 0)}% портфеля
+                  {item.positions} {pluralInstruments(item.positions)}
+                  {!unvalued(item) && ` · ${Math.round(item.share ?? 0)}% портфеля`}
                   {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
                 </span>
                 <span className={pnl.className}>{pnl.percentText}</span>
@@ -3610,13 +3615,19 @@ function BreakdownList({
                         <span className="product-row-name">
                           <strong>{item.key}</strong>
                         </span>
-                        <span className="product-row-sum">{money(item.value)}</span>
+                        <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : money(item.value)}</span>
                       </span>
                       <span className="product-row-line2 product-row-line2-flush">
                         <span className="muted product-row-meta">
-                          {Math.round(item.share ?? 0)}% портфеля
-                          {item.priceUnavailable > 0 && (
-                            <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
+                          {unvalued(item) ? (
+                            <span className="danger-text">цена недоступна</span>
+                          ) : (
+                            <>
+                              {Math.round(item.share ?? 0)}% портфеля
+                              {item.priceUnavailable > 0 && (
+                                <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
+                              )}
+                            </>
                           )}
                         </span>
                         <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
