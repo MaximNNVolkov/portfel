@@ -85,6 +85,60 @@ docker compose up -d
 
 Сертификат перевыпускать не нужно — том `./certbot/conf` сохраняется между перезапусками.
 
+То же самое, с бэкапом до миграций, проверкой здоровья и откатом, делает
+`scripts/deploy-prod.sh` — его можно запускать руками из каталога проекта.
+
+## Автоматическая выкладка
+
+Каждый push в `main`, прошедший CI (`checks` и `backend-image`), выкладывается на прод
+job'ом `deploy-prod` из `.github/workflows/ci.yml`: он заходит по SSH и запускает
+`scripts/deploy-prod.sh <sha>`. Скрипт:
+
+1. снимает бэкап базы через сервис `backup` (миграции необратимы);
+2. делает fast-forward рабочей копии до этого коммита;
+3. `docker compose build` и `docker compose up -d` — миграции backend применяет сам при старте;
+4. ждёт, пока healthcheck backend из `docker-compose.yml` станет `healthy`;
+5. если не дождался — возвращает рабочую копию на предыдущий коммит, пересобирает
+   и поднимает его, а job становится красным. Схему БД откат не трогает: если новая
+   миграция несовместима со старым кодом, восстановить базу из бэкапа шага 1
+   (раздел «Резервное копирование и восстановление»).
+
+После выкладки job проверяет `$PROD_URL/api/health` и главную страницу снаружи.
+Пока секреты `PROD_SSH_*` не заведены, job завершается зелёным с пометкой «пропущено».
+
+### Разовая настройка
+
+1. На сервере завести пользователя деплоя и отдать ему рабочую копию, из которой
+   поднят стек (все шаги «Первого запуска» выполнять в ней):
+   ```
+   sudo adduser --disabled-password --gecos '' deploy
+   sudo usermod -aG docker deploy
+   sudo -iu deploy git clone https://github.com/MaximNNVolkov/portfel.git
+   ```
+   Группа `docker` по сути даёт права root, поэтому ключ деплоя ниже ограничен одной командой.
+2. На своём компьютере создать ключ деплоя (без пароля):
+   ```
+   ssh-keygen -t ed25519 -N '' -C portfel-deploy-prod -f portfel-deploy-prod
+   ```
+3. На сервере дописать в `/home/deploy/.ssh/authorized_keys` (каталог `700`, файл `600`,
+   владелец `deploy`) одну строку — содержимое `portfel-deploy-prod.pub` с префиксом:
+   ```
+   command="/home/deploy/portfel/scripts/deploy-prod.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA... portfel-deploy-prod
+   ```
+   По этому ключу можно только запустить выкладку — ни shell, ни проброса портов.
+4. Один ручной прогон на сервере: `sudo -iu deploy portfel/scripts/deploy-prod.sh`.
+   `git fetch` должен проходить без пароля, а рабочая копия — без незакоммиченных правок.
+5. В GitHub: Settings → Environments → `production` (появится после первого запуска
+   job'а, можно создать заранее):
+   - секреты `PROD_SSH_HOST` (IP сервера), `PROD_SSH_USER` (`deploy`),
+     `PROD_SSH_KEY` (содержимое приватного `portfel-deploy-prod` целиком),
+     `PROD_SSH_KNOWN_HOSTS` (вывод `ssh-keyscan -t ed25519 <IP сервера>`);
+   - переменную `PROD_URL` — `https://your.domain.com`;
+   - по желанию **Required reviewers** — тогда каждая выкладка ждёт нажатия «Approve»
+     в Actions, без этого прод обновляется сразу после зелёного CI.
+
+   После этого приватный ключ с компьютера можно удалить.
+
 ## Восстановление пароля по почте
 
 `POST /api/auth/forgot-password` (см. `server/mailer.ts`) отправляет письмо со ссылкой

@@ -93,6 +93,63 @@ tail -f /var/log/portfel/api.log /var/log/portfel/scheduler.log
 npm run build && sudo cp -r dist/. /var/www/portfel/ && sudo chown -R www-data:www-data /var/www/portfel
 ```
 
+Всё это целиком (обновить код, собрать, выложить статику, перезапустить, проверить
+`/api/health`) делает `scripts/deploy-stand.sh` — его можно запускать и руками
+на сервере из `/home/user1/portfel`.
+
+## Автоматическая выкладка
+
+Каждый push в `main`, прошедший CI (`checks` и `backend-image`), выкладывается на стенд
+job'ом `deploy` из `.github/workflows/ci.yml`: он заходит по SSH и запускает
+`scripts/deploy-stand.sh <sha>`. Скрипт делает fast-forward рабочей копии до этого коммита,
+`npm ci` (только если поменялся `package-lock.json`), `npm run build`, копирует статику
+в `/var/www/portfel`, перезапускает `portfel-api` и `portfel-scheduler` (миграции backend
+применяет сам при старте) и ждёт ответа `/api/health`. Если что-то не так — job красный,
+лог выкладки виден в Actions. После этого job ещё раз проверяет стенд по публичному адресу.
+
+Отдельного пользователя под деплой нет: ключ деплоя кладётся к `user1` (владельцу рабочей
+копии и сервисов) с `command="..."` в `authorized_keys`, поэтому по этому ключу можно
+выполнить только `deploy-stand.sh` и ничего больше. Права `sudo` у скрипта — две точные
+команды из sudoers ниже.
+
+Пока секреты `STAND_SSH_*` не заведены, job завершается зелёным с пометкой «пропущено».
+
+### Разовая настройка
+
+1. На своём компьютере создать ключ деплоя (без пароля):
+   ```
+   ssh-keygen -t ed25519 -N '' -C portfel-deploy -f portfel-deploy
+   ```
+2. На сервере под `user1` дописать в `~/.ssh/authorized_keys` одну строку — содержимое
+   `portfel-deploy.pub` с префиксом:
+   ```
+   command="/home/user1/portfel/scripts/deploy-stand.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA... portfel-deploy
+   ```
+3. На сервере разрешить скрипту две команды без пароля
+   (`sudo visudo -f /etc/sudoers.d/portfel-deploy`):
+   ```
+   user1 ALL=(root) NOPASSWD: /usr/bin/systemctl restart portfel-api.service portfel-scheduler.service
+   user1 ALL=(root) NOPASSWD: /usr/bin/rsync -a --chown=www-data\:www-data /home/user1/portfel/dist/ /var/www/portfel/
+   ```
+   Если `rsync` не установлен — `sudo apt install rsync`.
+4. Проверить на сервере, что всё сходится, один ручной прогон:
+   ```
+   cd /home/user1/portfel && git checkout main && scripts/deploy-stand.sh
+   ```
+   (`git fetch` должен проходить без ввода пароля; рабочая копия — без незакоммиченных
+   правок, иначе скрипт остановится и перечислит их.)
+5. В GitHub: Settings → Secrets and variables → Actions → New repository secret:
+   - `STAND_SSH_HOST` — `176.109.108.58`
+   - `STAND_SSH_USER` — `user1`
+   - `STAND_SSH_KEY` — содержимое приватного файла `portfel-deploy` целиком
+   - `STAND_SSH_KNOWN_HOSTS` — вывод `ssh-keyscan -t ed25519 176.109.108.58`
+
+   После этого приватный ключ с компьютера можно удалить.
+
+Ручной путь (`scripts/deploy-stand.sh` на сервере или команды выше) продолжает работать —
+скрипт берёт блокировку, так что ручной запуск и автоматический не соберут стенд
+одновременно.
+
 ## Ограничения этого стенда
 
 1. ~~Не переживает перезагрузку сервера~~ — **закрыто**. Backend и планировщик установлены
