@@ -5292,11 +5292,10 @@ function ProductFormPage({
   onOcrComplete: (result: OcrUploadResult) => void;
 }) {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [mode, setMode] = useState<"manual" | "screenshot">(
     searchParams.get("mode") === "screenshot" ? "screenshot" : "manual",
   );
-  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [type, setType] = useState<AssetType | null>(null);
   const [name, setName] = useState("");
   // Реинвестирование (CLIENT_FLOW_PLAN §4.4): форма открывается с суммой пришедших денег
@@ -5314,6 +5313,19 @@ function ProductFormPage({
     return fromQuery && ["RUB", "USD", "CNY"].includes(fromQuery) ? fromQuery : "RUB";
   });
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
+  // Шаг мастера живёт в адресе (?step=2), а не только в памяти (тестировщик Т13, §40.7):
+  // «Назад» в браузере возвращает на предыдущий шаг с уже введёнными данными, а не
+  // уводит со страницы. Шаг, для которого ещё нет данных (перезагрузка на ?step=3),
+  // откатывается к первому незаполненному.
+  const requestedStep = Number(searchParams.get("step"));
+  const step: 1 | 2 | 3 =
+    requestedStep >= 2 && !type ? 1 : requestedStep === 3 && !(name.trim() && amount) ? 2 : requestedStep === 3 ? 3 : requestedStep === 2 ? 2 : 1;
+  const setStep = (next: 1 | 2 | 3) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === 1) params.delete("step");
+    else params.set("step", String(next));
+    setSearchParams(params);
+  };
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
   // §34: статус асинхронной операции виден пользователю — очередь и распознавание
