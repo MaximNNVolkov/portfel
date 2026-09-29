@@ -294,7 +294,7 @@ export function buildOcrCandidates(text: string): OcrCandidate[] {
   if (!unique.length) {
     // Итоговые строки не должны вернуться через запасной путь разбора всего текста.
     text = text.split(/\n|\r/).filter((line) => !isTotalLine(line.trim())).join('\n')
-    const amountMatch = text.match(/(?:₽|руб(?:лей|\.)?|RUB|USD|EUR)\s*([\d\s,\.]+)/i) || text.match(/([\d\s]{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|USD|EUR)/i)
+    const amountMatch = text.match(/(?:₽|руб(?:лей|\.)?|RUB|USD|EUR)\s*([\d\s,.]+)/i) || text.match(/([\d\s]{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|USD|EUR)/i)
     const amount = amountMatch ? parseNumber(amountMatch[1]) : 0
     return [{
       name: toCandidateName(text),
