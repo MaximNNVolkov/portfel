@@ -741,6 +741,7 @@ app.get('/api/attention', async (request, response) => {
     positions: positions.map((position) => ({
       id: position.id,
       instrumentId: position.instrumentId,
+      accountId: position.accountId,
       name: position.instrument.name,
       institution: position.account.provider,
       isCash: position.instrument.groupType === 'cash',
@@ -754,6 +755,7 @@ app.get('/api/attention', async (request, response) => {
     payouts: payouts.map((payout) => ({
       id: payout.id,
       instrumentId: payout.instrumentId,
+      accountId: payout.accountId,
       title: payout.description ?? '',
       date: payout.date,
       type: payout.type,

@@ -48,6 +48,8 @@ export type AttentionItem = {
 export type AttentionPosition = {
   id: string
   instrumentId?: string
+  /** Счёт (банк/брокер): один инструмент может лежать в двух местах — это разные деньги. */
+  accountId?: string
   name: string
   institution: string
   isCash: boolean
@@ -62,6 +64,7 @@ export type AttentionPosition = {
 export type AttentionPayout = {
   id: string
   instrumentId?: string
+  accountId?: string
   title: string
   date: string
   type: 'COUPON' | 'DIVIDEND' | 'INTEREST' | 'DEPOSIT_PRINCIPAL' | 'REDEMPTION' | 'OTHER'
@@ -114,13 +117,19 @@ function inDays(days: number): string {
   return `через ${days} ${word}`
 }
 
+// Инструмент на конкретном счёте: выплаты одного ОФЗ в двух банках не сливаются, иначе
+// «Реинвестировать» подставит общую сумму в чужой банк.
+function holdingKey(instrumentId: string | undefined, accountId: string | undefined): string {
+  return `${instrumentId ?? ''}@${accountId ?? ''}`
+}
+
 // Несколько строк выплаты на одну дату по одному инструменту (купон + погашение, проценты +
 // тело вклада) — одно событие для клиента: показываем суммой, как строка инструмента.
 type PayoutGroup = { key: string; payouts: AttentionPayout[]; date: string; amount: number; principal: boolean }
 function groupPayouts(payouts: AttentionPayout[]): PayoutGroup[] {
   const groups = new Map<string, PayoutGroup>()
   for (const payout of payouts) {
-    const key = `${payout.instrumentId ?? payout.id}:${payout.date}:${payout.currency}`
+    const key = `${payout.instrumentId ? holdingKey(payout.instrumentId, payout.accountId) : payout.id}:${payout.date}:${payout.currency}`
     const group = groups.get(key)
     if (group) {
       group.payouts.push(payout)
@@ -133,9 +142,10 @@ function groupPayouts(payouts: AttentionPayout[]): PayoutGroup[] {
   return [...groups.values()]
 }
 
-function payoutSubject(group: PayoutGroup, positionsByInstrument: Map<string, AttentionPosition>): { name: string; position?: AttentionPosition } {
+type PositionLookup = (payout: AttentionPayout) => AttentionPosition | undefined
+function payoutSubject(group: PayoutGroup, positionOf: PositionLookup): { name: string; position?: AttentionPosition } {
   const first = group.payouts[0]
-  const position = first.instrumentId ? positionsByInstrument.get(first.instrumentId) : undefined
+  const position = positionOf(first)
   return { name: position?.name ?? first.title ?? 'Выплата', position }
 }
 
@@ -151,12 +161,16 @@ export function buildAttention(
 ): AttentionItem[] {
   const { today } = input
   const items: AttentionItem[] = []
+  const positionsByHolding = new Map<string, AttentionPosition>()
   const positionsByInstrument = new Map<string, AttentionPosition>()
   for (const position of input.positions) {
-    if (position.instrumentId && !positionsByInstrument.has(position.instrumentId)) {
-      positionsByInstrument.set(position.instrumentId, position)
-    }
+    if (!position.instrumentId) continue
+    positionsByHolding.set(holdingKey(position.instrumentId, position.accountId), position)
+    if (!positionsByInstrument.has(position.instrumentId)) positionsByInstrument.set(position.instrumentId, position)
   }
+  const positionOf: PositionLookup = (payout) => payout.instrumentId
+    ? positionsByHolding.get(holdingKey(payout.instrumentId, payout.accountId)) ?? positionsByInstrument.get(payout.instrumentId)
+    : undefined
   const soonEnd = addDays(today, rules.payoutSoonDays)
   const reinvestStart = addDays(today, -rules.reinvestReminderDays)
 
@@ -166,14 +180,14 @@ export function buildAttention(
   const overdueByInstrument = new Map<string, AttentionPayout[]>()
   for (const payout of input.payouts) {
     if (payout.status !== 'expected' || payout.date >= today) continue
-    const key = `${payout.instrumentId ?? payout.id}:${payout.currency}`
+    const key = `${payout.instrumentId ? holdingKey(payout.instrumentId, payout.accountId) : payout.id}:${payout.currency}`
     overdueByInstrument.set(key, [...(overdueByInstrument.get(key) ?? []), payout])
   }
   for (const [key, payouts] of overdueByInstrument) {
     payouts.sort((left, right) => left.date.localeCompare(right.date))
     const amount = payouts.reduce((sum, payout) => sum + payout.amount, 0)
     const first = payouts[0]
-    const position = first.instrumentId ? positionsByInstrument.get(first.instrumentId) : undefined
+    const position = positionOf(first)
     const dates = new Set(payouts.map((payout) => payout.date))
     items.push({
       id: `overdue:${key}`,
@@ -195,7 +209,7 @@ export function buildAttention(
 
   // Пришедшие недавно: деньги лежат свободными — пора решить, куда их вложить.
   for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'received' && payout.date >= reinvestStart && payout.date <= today))) {
-    const { name, position } = payoutSubject(group, positionsByInstrument)
+    const { name, position } = payoutSubject(group, positionOf)
     items.push({
       id: `received:${group.key}`,
       kind: 'payout_received',
@@ -218,8 +232,8 @@ export function buildAttention(
   // для которой нужно заранее выбрать, куда её вложить.
   const principalSoon = new Set<string>()
   for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'expected' && payout.date >= today && payout.date <= soonEnd))) {
-    const { name, position } = payoutSubject(group, positionsByInstrument)
-    if (group.principal && group.payouts[0].instrumentId) principalSoon.add(group.payouts[0].instrumentId)
+    const { name, position } = payoutSubject(group, positionOf)
+    if (group.principal && group.payouts[0].instrumentId) principalSoon.add(holdingKey(group.payouts[0].instrumentId, group.payouts[0].accountId))
     const days = daysBetween(today, group.date)
     items.push({
       id: `soon:${group.key}`,
@@ -245,7 +259,7 @@ export function buildAttention(
     // Закрытая позиция уже вернула деньги — о её окончании напоминать нечего.
     if (!position.closedOn) {
       const end = position.termEndDate ?? position.maturityDate
-      const alreadyAsPayout = position.instrumentId && principalSoon.has(position.instrumentId)
+      const alreadyAsPayout = position.instrumentId && principalSoon.has(holdingKey(position.instrumentId, position.accountId))
       if (end && end >= today && end <= maturityEnd && !alreadyAsPayout) {
         const isDeposit = Boolean(position.termEndDate)
         items.push({

@@ -73,6 +73,21 @@ test('купон и погашение в один день — одно соб�
   assert.match(items[0].text, /вернётся/)
 })
 
+test('один инструмент в двух банках — выплаты не сливаются', () => {
+  const items = build(
+    [
+      position({ id: 'vtb', instrumentId: 'i1', accountId: 'a1', name: 'ОФЗ 26238', institution: 'ВТБ' }),
+      position({ id: 'tb', instrumentId: 'i1', accountId: 'a2', name: 'ОФЗ 26238', institution: 'Т-Инвестиции' }),
+    ],
+    [
+      payout({ id: 'x', instrumentId: 'i1', accountId: 'a1', date: '2026-09-25', status: 'received', amount: 100 }),
+      payout({ id: 'y', instrumentId: 'i1', accountId: 'a2', date: '2026-09-25', status: 'received', amount: 300 }),
+    ],
+  )
+  assert.equal(items.length, 2)
+  assert.deepEqual(items.map((item) => [item.institution, item.amount]).sort(), [['ВТБ', 100], ['Т-Инвестиции', 300]])
+})
+
 test('недавно полученная выплата — напоминание реинвестировать', () => {
   const items = build([], [
     payout({ id: 'new', date: '2026-09-25', status: 'received' }),

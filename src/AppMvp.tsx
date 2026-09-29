@@ -889,9 +889,11 @@ const attentionSeverityColors: Record<AttentionItem["severity"], string> = {
 };
 // Реинвестирование на MVP — переход к добавлению продукта с подставленной суммой и
 // банком, без отдельной сущности «деньги к вложению» (CLIENT_FLOW_PLAN §6, вопрос 1).
-function reinvestLink(amount: number | undefined, institution: string | undefined, from: string) {
+function reinvestLink(amount: number | undefined, institution: string | undefined, from: string, currency?: string) {
   const params = new URLSearchParams();
   if (amount) params.set("amount", String(Math.round(amount * 100) / 100));
+  // Сумма передаётся в валюте выплаты: купон в USD не должен лечь в форму как рубли.
+  if (currency && currency !== "RUB") params.set("currency", currency);
   if (institution && institution !== "Ручной ввод") params.set("institution", institution);
   params.set("reinvest", from);
   return `/products/new?${params.toString()}`;
@@ -899,7 +901,7 @@ function reinvestLink(amount: number | undefined, institution: string | undefine
 function attentionLink(item: AttentionItem): { to: string; label: string } | null {
   switch (item.action) {
     case "reinvest":
-      return { to: reinvestLink(item.amount, item.institution, item.title), label: "Реинвестировать" };
+      return { to: reinvestLink(item.amount, item.institution, item.title, item.currency), label: "Реинвестировать" };
     case "open_position":
       return item.positionId ? { to: `/products/${item.positionId}`, label: "Открыть" } : null;
     case "edit_position":
@@ -2778,7 +2780,7 @@ function PaymentRow({
               </button>
             )}
             {payment.status === "received" && (
-              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title)}>
+              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title, payment.currency)}>
                 Реинвестировать
               </Link>
             )}
@@ -4726,7 +4728,10 @@ function ProductFormPage({
   const [date, setDate] = useState(todayIsoDate);
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState(() => searchParams.get("institution") ?? "");
-  const [currency, setCurrency] = useState("RUB");
+  const [currency, setCurrency] = useState(() => {
+    const fromQuery = searchParams.get("currency");
+    return fromQuery && ["RUB", "USD", "CNY"].includes(fromQuery) ? fromQuery : "RUB";
+  });
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);
