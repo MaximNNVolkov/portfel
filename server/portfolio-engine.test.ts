@@ -5,11 +5,13 @@
 import assert from 'node:assert/strict'
 import {
   aggregateByGroup,
+  aggregateByKey,
   calculateReturns,
   cbrRateTable,
   convertCurrency,
   evaluatePosition,
   resolveAssetGroup,
+  sumInBase,
   type PositionInput,
 } from './portfolio-engine.ts'
 
@@ -247,6 +249,46 @@ test('агрегация и доходность стыкуются между �
   const aggregate = aggregateByGroup(portfolio, rub)
   const result = calculateReturns({ currentValue: aggregate.pnlValue, invested: aggregate.pnlInvested, payoutsReceived: 0 })
   assert.equal(result.valueChange, aggregate.pnl)
+})
+
+console.log('\nСуммы в разных валютах (§13)')
+
+test('выплаты в USD и CNY пересчитываются по курсу, а не складываются как рубли', () => {
+  const result = sumInBase([
+    { amount: 1000, currency: 'RUB' }, { amount: 10, currency: 'USD' }, { amount: 100, currency: 'cny' },
+  ], rub)
+  assert.equal(result.total, 1000 + 800 + 1100)
+  assert.deepEqual(result.unconverted, [])
+})
+
+test('валюта без курса не превращается в 0 молча — она в unconverted', () => {
+  const result = sumInBase([{ amount: 500, currency: 'RUB' }, { amount: 7, currency: 'EUR' }, { amount: 0, currency: 'GBP' }], rub)
+  assert.equal(result.total, 500)
+  assert.deepEqual(result.unconverted, ['EUR'])
+})
+
+console.log('\nПроизвольные разрезы (§23)')
+
+test('позиция без цены не даёт разрезу P&L «−вложено»', () => {
+  const [bucket] = aggregateByKey([
+    { key: 'Т-Инвестиции', investedBase: 1000, valueBase: 1200, priceUnavailable: false },
+    { key: 'Т-Инвестиции', investedBase: 5000, valueBase: null, priceUnavailable: true },
+  ])
+  assert.equal(bucket.invested, 6000)
+  assert.equal(bucket.value, 1200)
+  assert.equal(bucket.pnl, 200)
+  assert.equal(bucket.pnlPercent, 20)
+  assert.equal(bucket.priceUnavailable, 1)
+})
+
+test('приблизительная оценка входит в стоимость разреза, но не в P&L', () => {
+  const [bucket] = aggregateByKey([
+    { key: 'RUB', investedBase: 1000, valueBase: 1100, priceUnavailable: false },
+    { key: 'RUB', investedBase: 3000, valueBase: 2500, priceUnavailable: false, estimated: true },
+  ])
+  assert.equal(bucket.value, 3600)
+  assert.equal(bucket.pnl, 100)
+  assert.equal(bucket.pnlPercent, 10)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
