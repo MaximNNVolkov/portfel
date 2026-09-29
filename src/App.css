@@ -85,3 +85,8 @@
 .target-hint { margin: 10px 0 0; font-size: 12px; }
 @media (max-width: 680px) { .target-grid { grid-template-columns: 1fr 1fr; } }
 .result-breakdown { margin: 8px 0 0; font-size: 11px; }
+
+/* Предупреждения («цена недоступна», «данные неполные») — янтарные, не мятные: мятный
+   фон читается как «всё хорошо» (критик К18). */
+.demo-note.warn { border-color: var(--border-warning); color: var(--text-secondary); background: #fffaf0; }
+:root[data-theme="dark"] .demo-note.warn { background: rgba(226,181,90,.1); }

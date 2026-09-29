@@ -27,15 +27,47 @@ export function optionalBool(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
 }
 
+// Сообщения об ошибках доходят до пользователя (тестер, Т11) — по-русски и с названием поля.
+const FIELD_LABELS: Record<string, string> = {
+  name: 'Название', title: 'Название', amount: 'Сумма', date: 'Дата', invested: 'Вложено', type: 'Тип',
+  token: 'Токен', quantity: 'Количество', averagePrice: 'Средняя цена', currentPrice: 'Текущая цена',
+  accruedInterest: 'НКД', nominal: 'Номинал', couponRate: 'Купон', rate: 'Ставка', effectiveRate: 'Эффективная ставка',
+  maturityDate: 'Дата погашения', termEndDate: 'Дата окончания', couponDate: 'Дата купона', ofertaDate: 'Дата оферты',
+}
+const label = (field: string) => FIELD_LABELS[field] ?? field
+
 export function requiredText(value: unknown, field: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is required`)
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`Не заполнено поле «${label(field)}»`)
   return value.trim()
 }
 
 export function positiveNumber(value: unknown, field: string): number {
   const result = Number(value)
-  if (!Number.isFinite(result) || result <= 0) throw new Error(`${field} must be positive`)
+  if (!Number.isFinite(result) || result <= 0) throw new Error(`«${label(field)}» должно быть больше нуля`)
   return result
+}
+
+// Проверка параметров инструмента и позиции (тестер, Т12): отрицательные количество и
+// ставка, дата окончания раньше открытия и даты не в формате ГГГГ-ММ-ДД сохранялись и
+// потом ломали прогноз выплат и доходность.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+function checkDate(value: string | undefined, field: string) {
+  if (value === undefined) return
+  if (!ISO_DATE.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw new Error(`«${label(field)}»: дата должна быть в формате ГГГГ-ММ-ДД`)
+}
+function checkNonNegative(value: number | undefined, field: string) {
+  if (value !== undefined && value < 0) throw new Error(`«${label(field)}» не может быть отрицательным`)
+}
+export function validateHolding(instrument: Instrument, position: { openedOn?: string; quantity?: number; averagePrice?: number; currentPrice?: number; accruedInterest?: number }) {
+  for (const field of ['maturityDate', 'termEndDate', 'couponDate', 'ofertaDate'] as const) checkDate(instrument[field], field)
+  checkDate(position.openedOn, 'date')
+  for (const field of ['nominal', 'couponRate', 'rate', 'effectiveRate'] as const) checkNonNegative(instrument[field], field)
+  for (const field of ['averagePrice', 'currentPrice', 'accruedInterest'] as const) checkNonNegative(position[field], field)
+  if (position.quantity !== undefined && position.quantity <= 0) throw new Error('«Количество» должно быть больше нуля')
+  const end = instrument.termEndDate ?? instrument.maturityDate
+  if (end && position.openedOn && end <= position.openedOn) {
+    throw new Error(`«${label(instrument.termEndDate ? 'termEndDate' : 'maturityDate')}» должна быть позже даты открытия`)
+  }
 }
 
 // BUG-08 (§17, §28 серверная валидация): «вложено» обязано сходиться с количеством ×
@@ -141,6 +173,9 @@ export async function createPosition(client: Db, userId: string, body: PositionB
   ) ?? value
   const openedOn = requiredText(body.date, 'date')
   const provider = optionalText(body.institution) || MANUAL_PROVIDER
+  // Распознанное со скриншота сохраняется как есть (§40.4) и правится постфактум — там
+  // проверка сработает при сохранении правки.
+  if (source !== 'ocr') validateHolding(instrument, { openedOn, quantity, averagePrice, currentPrice: optionalNumber(body.currentPrice), accruedInterest: optionalNumber(body.accruedInterest) })
 
   const portfolio = await ensurePortfolio(client, userId, randomUUID())
   const account = await ensureAccount(client, portfolio.id, randomUUID(), {

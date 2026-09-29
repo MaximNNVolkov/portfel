@@ -2054,20 +2054,20 @@ function Dashboard({
           </Link>
         </div>
         {brokerHasCache && (
-          <div className="demo-note">
+          <div className="demo-note warn">
             ⚠ Данные неполные: брокер «Т-Инвестиции» показан по состоянию на{" "}
             {formatDateTime(brokerStatus!.lastSyncAt)}.{" "}
             <Link to="/integrations">Повторить попытку</Link>
           </div>
         )}
         {brokerDegraded && !brokerHasCache && (
-          <div className="demo-note">
+          <div className="demo-note warn">
             ⚠ Не удалось загрузить данные от брокера «Т-Инвестиции». Показана только доступная
             часть портфеля. <Link to="/integrations">Повторить подключение</Link>
           </div>
         )}
         {valuation.incomplete && (
-          <div className="demo-note">
+          <div className="demo-note warn">
             ⚠ Актуальная цена недоступна для {valuation.unavailable.length}{" "}
             {instrumentsGenitive(valuation.unavailable.length)} — их стоимость не включена в общую сумму.
           </div>
@@ -2086,7 +2086,7 @@ function Dashboard({
           </div>
         )}
         {!attention && overdue > 0 && (
-          <div className="demo-note">
+          <div className="demo-note warn">
             ⚠ Не отмечено полученными {display(overdue)}. <Link to="/payments">Отметить</Link>
           </div>
         )}
@@ -2257,7 +2257,7 @@ function Dashboard({
 const PRODUCT_SORT_OPTIONS = {
   value: "По стоимости",
   return: "По доходности",
-  pnl: "По P&L",
+  pnl: "По прибыли в рублях",
   maturity: "По дате погашения",
   nearestPayout: "По ближайшей выплате",
 } as const;
@@ -2504,21 +2504,24 @@ function ProductsPage({
           ) : (
             <>
               <span className="label-full">↻ Обновить цены (MOEX)</span>
-              <span className="label-short">↻ Цены</span>
+              <span className="label-short">↻ Обновить цены</span>
             </>
           )}
         </button>
       </div>
       <div className="filters-bar">
-        <label className="inline-select">
-          <span>Категория</span>
-          <select value={group ?? "all"} onChange={(event) => setFilter("group", event.target.value)}>
-            <option value="all">Все категории</option>
-            {productTypes.map((type) => (
-              <option key={type} value={type}>{type}</option>
-            ))}
-          </select>
-        </label>
+        {/* На странице категории выбор категории лишний — она в заголовке (критик К13). */}
+        {!group && (
+          <label className="inline-select">
+            <span>Категория</span>
+            <select value="all" onChange={(event) => setFilter("group", event.target.value)}>
+              <option value="all">Все категории</option>
+              {productTypes.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="inline-select">
           <span>Банк / брокер</span>
           <select value={bank ?? "all"} onChange={(event) => setFilter("bank", event.target.value)}>
@@ -2664,6 +2667,11 @@ function TransactionsPage({
             const institution = institutionOf(transaction);
             const showTitle = transaction.title && transaction.title !== typeLabel && transaction.title !== name;
             const extras: [string, string][] = [];
+            // Раскрытая покупка или продажа показывает «10 шт × 300 ₽» (критик К11).
+            if (transaction.quantity) {
+              const qty = transaction.quantity.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+              extras.push(["Количество", transaction.price ? `${qty} шт × ${preciseMoney(transaction.price)}` : `${qty} шт`]);
+            }
             if (showTitle) extras.push(["Описание", transaction.title]);
             if (transaction.commission) extras.push(["Комиссия", money(transaction.commission)]);
             if (transaction.tax) extras.push(["Налог", money(transaction.tax)]);
@@ -3105,7 +3113,7 @@ function PaymentsPage({
                       disabled={markingId !== null}
                       onClick={() => void markReceived(payment)}
                     >
-                      {markingId === payment.id ? "Сохраняем..." : "Получена"}
+                      {markingId === payment.id ? "Сохраняем..." : "Деньги пришли"}
                     </button>
                   </div>
                 </div>
@@ -3348,8 +3356,11 @@ function ProductDetailPage({
       amount: signedTransactionAmount(transaction),
       to: `/transactions/${transaction.id}/edit`,
     })),
+    // Выплата, заведённая операцией (или операция, заведённая отметкой «получена»), —
+    // одни и те же деньги: в ленте они показываются один раз, операцией (критик К10).
     ...relatedPayments
       .filter((payment) => payment.status === "received")
+      .filter((payment) => !payment.transactionId || !relatedTransactions.some((transaction) => transaction.id === payment.transactionId))
       .map((payment) => ({
         id: `p-${payment.id}`,
         date: payment.date,
@@ -4185,7 +4196,7 @@ function Integrations({
           </div>
         )}
         {status === "error" && (
-          <div className="demo-note">
+          <div className="demo-note warn">
             ⚠ {lastError || "Не удалось загрузить данные от брокера «Т-Инвестиции»."}{" "}
             Показана только доступная часть портфеля.
           </div>
@@ -5492,7 +5503,7 @@ function OcrSummaryPage({
       subtitle="Данные сохранены как распознаны. Проверьте каждую запись и поправьте при необходимости."
     >
       {summary.alreadyUploadedAt && (
-        <div className="demo-note">
+        <div className="demo-note warn">
           ⚠ Этот скриншот уже загружался{" "}
           {formatDateTime(summary.alreadyUploadedAt)} — повторно
           он не обрабатывался, новые записи не созданы. Ниже — результат прошлой обработки.
