@@ -76,7 +76,10 @@ const users = new Map<string, User>()
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000
 const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
 
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false })
+// Одна загрузка приложения — около 9 запросов; прежние 300 за 15 минут кончались после
+// ~30 обновлений страницы (меньше — для семьи за одним NAT), и все экраны получали 429.
+// Настраивается через API_RATE_LIMIT.
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: Number(process.env.API_RATE_LIMIT) || 1500, standardHeaders: true, legacyHeaders: false })
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, skipSuccessfulRequests: true, message: { error: 'Слишком много попыток, повторите позже' } })
 // Отдельные корзины для восстановления пароля: общий authLimiter с /login съедал попытки, и
 // после пары запросов письма пользователь не мог ни сбросить пароль, ни войти.
@@ -720,7 +723,7 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
   // Разрывы в выплатах ищутся по суммам в базовой валюте: 100 USD и 100 ₽ — не одно и то же.
   const payoutSnapshots: PayoutSnapshot[] = payouts.flatMap((payout) => {
     const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
-    return amount === null ? [] : [{ date: payout.date, amount, status: payout.status }]
+    return amount === null ? [] : [{ date: payout.date, amount, status: payout.status, type: payout.type }]
   })
   return { recommendations: buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots), valuationById }
 }

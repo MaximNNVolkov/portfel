@@ -43,7 +43,13 @@ export type PayoutSnapshot = {
   date: string
   amount: number
   status: 'expected' | 'received'
+  /** Тип выплаты (§22). Возврат тела вклада и погашение номинала — не доход. */
+  type?: string
 }
+
+// Возврат своих денег (тело вклада, номинал облигации) доходом не считается: иначе один
+// крупный возврат задирает «средний доход в месяц», и все обычные месяцы выглядят разрывом.
+const PRINCIPAL_PAYOUT_TYPES = new Set(['DEPOSIT_PRINCIPAL', 'REDEMPTION'])
 
 export type RecommendationRules = {
   /** §24: порог доли портфеля для инструмента/группы/эмитента. SPEC задаёт диапазон 20-25%. */
@@ -227,7 +233,7 @@ export function detectDrawdown(
     const dropPercent = round1(Math.abs(position.pnlPercent))
     results.push({
       ruleType: 'drawdown',
-      text: `Стоимость «${position.name}» снизилась на ${dropPercent}% относительно цены покупки`,
+      text: `Стоимость «${position.name}» снизилась на ${percentLabel(dropPercent)}% относительно цены покупки`,
       payload: { id: position.id, name: position.name, dropPercent },
     })
   }
@@ -256,6 +262,7 @@ export function detectPayoutGaps(
 
   for (const payout of payouts) {
     if (payout.status !== 'expected') continue
+    if (payout.type && PRINCIPAL_PAYOUT_TYPES.has(payout.type)) continue
     const date = new Date(`${payout.date}T00:00:00Z`)
     if (Number.isNaN(date.getTime())) continue
     const bucket = byKey.get(monthKey(date.getUTCFullYear(), date.getUTCMonth()))
