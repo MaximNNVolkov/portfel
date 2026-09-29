@@ -434,6 +434,7 @@ paths:
                   byCurrency: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
                   byBroker: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
                   byBank: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+                  byProvider: { type: array, items: { $ref: '#/components/schemas/Breakdown' }, description: 'Где лежат деньги — банк или брокер без разделения' }
                   byInstrument: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
                   byIssuer: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
         '401': { $ref: '#/components/responses/Error' }
@@ -456,6 +457,18 @@ paths:
                     ruleType: { type: string, enum: [concentration, maturity, drawdown, payout_gap] }
                     text: { type: string }
                   additionalProperties: true
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/attention:
+    get:
+      tags: [portfolio]
+      summary: 'Лента «Что требует внимания»: выплаты, погашения, ошибки брокера, аналитика'
+      responses:
+        '200':
+          description: Пункты ленты, срочные первыми
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AttentionItem' } }
         '401': { $ref: '#/components/responses/Error' }
 
   /api/payouts:
@@ -625,6 +638,7 @@ components:
         source: { type: string }
         instrumentId: { type: [string, 'null'] }
         accountId: { type: string }
+        institution: { type: [string, 'null'], description: 'Банк или брокер счёта' }
         transactionId: { type: [string, 'null'] }
 
     Transaction:
@@ -641,11 +655,29 @@ components:
         positionId: { type: [string, 'null'] }
         instrumentId: { type: [string, 'null'] }
         accountId: { type: string }
+        institution: { type: [string, 'null'], description: 'Банк или брокер счёта' }
         source: { type: string }
 
     TransactionType:
       type: string
       enum: [BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION]
+
+    AttentionItem:
+      type: object
+      required: [id, kind, severity, title, text, action]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [payout_overdue, payout_received, payout_soon, maturity_soon, broker_error, price_unavailable, forecast_missing, insight] }
+        severity: { type: integer, enum: [1, 2, 3], description: '1 — срочно, 2 — важно, 3 — к сведению' }
+        title: { type: string }
+        text: { type: string }
+        action: { type: string, enum: [mark_received, reinvest, open_position, edit_position, refresh_prices, open_integrations, open_payments, open_analytics] }
+        date: { type: string, format: date }
+        amount: { type: number }
+        currency: { type: string }
+        institution: { type: string }
+        positionId: { type: string }
+        payoutIds: { type: array, items: { type: string } }
 
     Breakdown:
       type: object
