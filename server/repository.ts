@@ -572,11 +572,14 @@ export async function updatePosition(db: Db, userId: string, position: PositionR
 }
 
 // Точечная разноска операции по позиции: трогаем только стоимость и вложенную сумму.
-export async function updatePositionValue(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'value' | 'invested'>): Promise<void> {
+// Покупка/продажа (§11 Transaction) меняет не только сумму, но и количество бумаг со
+// средней ценой: у позиции, которую движок оценивает как quantity × currentPrice, иначе
+// докупка выглядела бы убытком на всю сумму покупки.
+export async function updatePositionValue(db: Db, userId: string, position: Pick<PositionRecord, 'id' | 'value' | 'invested' | 'quantity' | 'averagePrice'>): Promise<void> {
   await db.query(
-    `UPDATE portfolio.positions p SET current_value = $3, invested = $4, updated_at = NOW()
+    `UPDATE portfolio.positions p SET current_value = $3, invested = $4, quantity = $5, average_price = $6, updated_at = NOW()
       WHERE p.id = $1 AND ${OWNED_POSITION}`,
-    [position.id, userId, position.value ?? null, position.invested],
+    [position.id, userId, position.value ?? null, position.invested, position.quantity ?? null, position.averagePrice ?? null],
   )
 }
 

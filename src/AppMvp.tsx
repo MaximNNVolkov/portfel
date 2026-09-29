@@ -260,6 +260,9 @@ type Transaction = {
   commission?: number;
   tax?: number;
   source?: string;
+  /** Количество бумаг в покупке/продаже; без него сервер выводит его из цены. */
+  quantity?: number | null;
+  price?: number | null;
   /** Банк или брокер счёта — приходит с бэкенда, только для показа. */
   institution?: string;
 };
@@ -5844,6 +5847,9 @@ function TransactionFormPage({
   const [type, setType] = useState<TransactionType>("BUY");
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [quantity, setQuantity] = useState("");
+  const [price, setPrice] = useState("");
   // Из карточки инструмента операция открывается уже привязанной к нему.
   const [positionId, setPositionId] = useState(
     () => products.find((product) => product.id === searchParams.get("position"))?.id || products[0]?.id || "",
@@ -5854,12 +5860,18 @@ function TransactionFormPage({
       id: crypto.randomUUID(),
       title: title || transactionTypeLabels[type],
       amount: Number(amount),
-      date: new Date().toISOString().slice(0, 10),
+      date,
       type,
-      positionId: POSITION_TRANSACTION_TYPES.includes(type)
-        ? positionId
-        : undefined,
+      positionId: tradesPosition ? positionId : undefined,
+      quantity: tradesPosition && quantity ? Number(quantity) : undefined,
+      price: tradesPosition && price ? Number(price) : undefined,
     });
+  };
+  const tradesPosition = POSITION_TRANSACTION_TYPES.includes(type);
+  // Сумма покупки по умолчанию — количество × цена, пока пользователь не ввёл её сам.
+  const suggestAmount = (nextQuantity: string, nextPrice: string) => {
+    const total = Number(nextQuantity) * Number(nextPrice);
+    if (total > 0) setAmount(String(Math.round(total * 100) / 100));
   };
   return (
     <Page title="Новая операция" subtitle="Покупка, продажа, пополнение или выплата" back>
@@ -5896,6 +5908,40 @@ function TransactionFormPage({
             </select>
           </label>
         )}
+        {tradesPosition && (
+          <div className="form-row">
+            <label>
+              Количество, шт.
+              <input
+                value={quantity}
+                onChange={(event) => {
+                  setQuantity(event.target.value);
+                  suggestAmount(event.target.value, price);
+                }}
+                type="number"
+                min="0"
+                step="any"
+                inputMode="decimal"
+                placeholder="Необязательно"
+              />
+            </label>
+            <label>
+              Цена за штуку
+              <input
+                value={price}
+                onChange={(event) => {
+                  setPrice(event.target.value);
+                  suggestAmount(quantity, event.target.value);
+                }}
+                type="number"
+                min="0"
+                step="any"
+                inputMode="decimal"
+                placeholder="Необязательно"
+              />
+            </label>
+          </div>
+        )}
         <label>
           Название
           <input
@@ -5911,6 +5957,16 @@ function TransactionFormPage({
             onChange={(event) => setAmount(event.target.value)}
             type="number"
             min="1"
+            step="any"
+            required
+          />
+        </label>
+        <label>
+          Дата
+          <input
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            type="date"
             required
           />
         </label>
