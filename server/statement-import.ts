@@ -103,7 +103,7 @@ export function guessMapping(headers: string[]): StatementMapping {
     ? null
     // Сумма в валюте счёта важнее суммы в валюте покупки (критик К24): покупка за 50 USD
     // по рублёвой карте списала рубли, а не доллары.
-    : take(findColumn(headers, [/сумма\s*платеж/i, /сумма\s*в\s*валюте\s*сч/i, /сумма\s*операц/i, /^сумма$/i, /сумма/i, /amount/i], used))
+    : take(findColumn(headers, [/сумма\s*платеж/i, /сумма\s*в\s*валюте\s*сч/i, /в\s*валюту\s*сч/i, /сумма\s*операц/i, /^сумма$/i, /сумма/i, /amount/i], used))
   const currency = take(findColumn(headers, [/валюта\s*платеж/i, /валюта\s*сч/i, /валюта\s*операц/i, /валюта/i, /currency/i], used))
   const status = take(findColumn(headers, [/статус/i, /status/i], used))
   const description = take(findColumn(headers, [/описани/i, /назначени/i, /комментар/i, /категори/i, /контрагент/i, /description/i], used))

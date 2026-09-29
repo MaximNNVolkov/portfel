@@ -12,6 +12,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import "./App.css";
+import { xlsxToText } from "./xlsx-reader";
 import "./client-flow.css";
 
 type AssetType =
@@ -3988,6 +3989,9 @@ function operationsWord(count: number) {
 // Excel «Текст в Юникоде» — UTF-16 с BOM (тестировщик Т17): узнаём по первым байтам.
 async function readStatementFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
+  // Excel-выписка (ВТБ, Альфа, Т-Банк): первый лист переводится в текст и идёт тем же разбором.
+  const signature = new Uint8Array(buffer.slice(0, 2));
+  if (/\.xlsx$/i.test(file.name) || (signature[0] === 0x50 && signature[1] === 0x4b)) return xlsxToText(buffer);
   const head = new Uint8Array(buffer.slice(0, 2));
   if (head[0] === 0xff && head[1] === 0xfe) return new TextDecoder("utf-16le").decode(buffer);
   if (head[0] === 0xfe && head[1] === 0xff) return new TextDecoder("utf-16be").decode(buffer);
@@ -4044,9 +4048,11 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
     setFileName(file.name);
     // Сбер и ВТБ отдают выписки и в PDF/XLS (критик К31): такие файлы не читаем, но говорим
     // об этом прямо, а не показываем «нет строк с операциями».
-    if (/\.(pdf|xlsx?|docx?)$/i.test(file.name)) {
+    if (/\.(pdf|xls|docx?)$/i.test(file.name)) {
       setPreview(null);
-      setError("Нужен CSV-файл. В интернет-банке выберите выгрузку выписки в формате CSV; PDF и Excel пока не читаются.");
+      setError(/\.xls$/i.test(file.name)
+        ? "Старый формат Excel (.xls) не читается. Откройте файл в Excel и сохраните как .xlsx или CSV."
+        : "Нужен CSV или Excel (.xlsx). В интернет-банке выберите выгрузку выписки в одном из этих форматов; PDF пока не читается.");
       return;
     }
     if (file.size > STATEMENT_MAX_BYTES) {
@@ -4054,7 +4060,20 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
       setError("Файл выписки слишком большой. Выгрузите выписку за более короткий период — например, по полугодиям.");
       return;
     }
-    const content = await readStatementFile(file);
+    let content: string;
+    try {
+      content = await readStatementFile(file);
+    } catch (reason) {
+      setPreview(null);
+      setError(reason instanceof Error ? reason.message : "Не удалось прочитать файл");
+      return;
+    }
+    // Excel сжат: после распаковки текст может не пройти лимит сервера.
+    if (new Blob([content]).size > 9 * 1024 * 1024) {
+      setPreview(null);
+      setError("Файл выписки слишком большой. Выгрузите выписку за более короткий период — например, по полугодиям.");
+      return;
+    }
     setText(content);
     await requestPreview(content);
   }
@@ -4082,7 +4101,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
   }
 
   return (
-    <Page title="Импорт выписки" subtitle="Пополнения, снятия и проценты из CSV-выписки банка">
+    <Page title="Импорт выписки" subtitle="Пополнения, снятия и проценты из выписки банка (CSV или Excel)">
       {done ? (
         <div className="empty-state">
           <p>
@@ -4105,11 +4124,11 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
         <>
           <label className="file-picker">
             <span className="outline-button">Выбрать файл</span>
-            <span className="muted">{fileName || "CSV-файл выписки из интернет-банка"}</span>
-            <input className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => chooseFile(event.target.files?.[0])} />
+            <span className="muted">{fileName || "CSV или Excel (.xlsx) — выписка из интернет-банка"}</span>
+            <input className="visually-hidden" type="file" accept=".csv,.xlsx,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => chooseFile(event.target.files?.[0])} />
           </label>
           <p className="muted small-note">
-            В интернет-банке выгрузите выписку по счёту или карте в CSV. Каждая строка станет операцией
+            В интернет-банке выгрузите выписку по счёту или карте в CSV или Excel (.xlsx). Каждая строка станет операцией
             со свободными деньгами: приход — пополнением, расход — снятием, начисленные проценты — доходом.
           </p>
         </>

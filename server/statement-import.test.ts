@@ -118,5 +118,11 @@ test('смена колонки описания не меняет ключ по
   assert.equal(statementRows(parsed, { ...mapping, description: 2 })[0].externalId, first)
 })
 
+test('ВТБ: сумма в валюте счёта важнее суммы операции', () => {
+  const mapping = guessMapping(['Номер счета/карты', 'Дата операции', 'Дата обработки', 'Сумма операции', 'Валюта операции', 'Сумма пересчитанная в валюту счета', 'Валюта счета', 'Основание'])
+  assert.equal(mapping.amount, 5)
+  assert.equal(mapping.date, 1)
+})
+
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
 process.exit(failed ? 1 : 0)
