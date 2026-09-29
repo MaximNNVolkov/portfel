@@ -654,8 +654,6 @@ function applyLocalTransactionEffect(
 }
 const money = (value: number) =>
   `₽ ${Math.round(value).toLocaleString("ru-RU")}`;
-const pct = (numerator: number, denominator: number) =>
-  denominator ? (numerator / denominator) * 100 : 0;
 // Единая точка разбора даты (баг со скриншота владельца, iPhone/Safari, 390px): пустая
 // или невалидная строка — законный случай (необязательное поле, повреждённые данные
 // со скриншота), а не повод показывать "Invalid Date"/ронять страницу на
@@ -3560,46 +3558,60 @@ function BreakdownList({
   title,
   items,
   emptyHint,
+  linkOf,
 }: {
   title: string;
   items: StructureBreakdown[];
   emptyHint: string;
+  // Разрез, у которого есть свой список (категория, банк), — строка ведёт в него.
+  linkOf?: (item: StructureBreakdown) => string;
 }) {
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
   return (
     <section className="breakdown-section">
       <div className="breakdown-heading">
         <h2>{title}</h2>
-        <span className="muted">
-          {items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}
-        </span>
+        {items.length === 0 && <span className="muted">{emptyHint}</span>}
       </div>
       {items.length > 0 && (
         <>
           <div className="product-list">
             {visible.map((item) => {
               const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+              const content = (
+                <>
+                      <span className="product-row-line1">
+                        <span className="product-row-name">
+                          <strong>{item.key}</strong>
+                        </span>
+                        <span className="product-row-sum">{money(item.value)}</span>
+                      </span>
+                      <span className="product-row-line2 product-row-line2-flush">
+                        <span className="muted product-row-meta">
+                          {Math.round(item.share ?? 0)}% портфеля
+                          {item.priceUnavailable > 0 && (
+                            <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
+                          )}
+                        </span>
+                        <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
+                          {pnl.percentText}
+                        </span>
+                      </span>
+                      <span className="share-bar" aria-hidden="true">
+                        <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
+                      </span>
+                </>
+              );
+              const href = linkOf?.(item);
               return (
                 <div className="list-row" key={item.key}>
-                  <div className="product-row-summary product-row-static">
-                    <span className="product-row-line1">
-                      <span className="product-row-name">
-                        <strong>{item.key}</strong>
-                      </span>
-                      <span className="product-row-sum">{money(item.value)}</span>
-                    </span>
-                    <span className="product-row-line2 product-row-line2-flush">
-                      <span className="muted product-row-meta">
-                        {Math.round(item.share ?? 0)}% портфеля
-                        {item.priceUnavailable > 0 && (
-                          <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
-                        )}
-                      </span>
-                      <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
-                        {pnl.percentText}
-                      </span>
-                    </span>
-                  </div>
+                  {href ? (
+                    <Link className="product-row-summary" to={href}>
+                      {content}
+                    </Link>
+                  ) : (
+                    <div className="product-row-summary product-row-static">{content}</div>
+                  )}
                 </div>
               );
             })}
@@ -3623,10 +3635,12 @@ function AnalyticsPage({
   summary: PortfolioSummary | null;
   token: string;
 }) {
-  const { total, profitPercent, groups } = summary ?? localSummary([], []);
-  const bonds = groups.find((groupSummary) => groupSummary.group === "Облигации");
+  const { profit, profitPercent, groups } = summary ?? localSummary([], []);
+  // Категории (классы активов) уже посчитаны в summary.groups — тем же движком (§10).
+  const byGroup: StructureBreakdown[] = groups.map((group) => ({ ...group, key: group.group }));
   const [structure, setStructure] = useState<PortfolioStructure | null>(null);
   const [structureError, setStructureError] = useState("");
+  const topInstrument = structure?.byInstrument.find((item) => !item.key.startsWith("Денежные средства"));
 
   useEffect(() => {
     let cancelled = false;
@@ -3657,33 +3671,38 @@ function AnalyticsPage({
             {(profitPercent ?? 0) < 0 ? "" : "+"}
             {(profitPercent ?? 0).toFixed(2).replace(".", ",")}%
           </strong>
-          <small>простая доходность</small>
+          <small>простая, за всё время</small>
         </article>
         <article className="stat-card">
-          <span>Классов активов</span>
-          <strong>{groups.length}</strong>
-          <small>в текущем портфеле</small>
+          <span>Результат</span>
+          <strong className={profit < 0 ? "danger-text" : "teal-text"}>
+            {Math.round(profit) === 0 ? "" : profit < 0 ? "−" : "+"}
+            {money(Math.abs(profit))}
+          </strong>
+          <small>стоимость минус вложено</small>
         </article>
         <article className="stat-card">
-          <span>Доля облигаций</span>
-          <strong>{Math.round(bonds?.share ?? pct(bonds?.value ?? 0, total))}%</strong>
-          <small>от общей стоимости</small>
+          <span>Крупнейшая позиция</span>
+          <strong>{topInstrument ? `${Math.round(topInstrument.share ?? 0)}%` : "—"}</strong>
+          <small className="ellipsis-text">{topInstrument?.key ?? "нет данных"}</small>
         </article>
       </div>
+      <BreakdownList
+        title="По категориям"
+        items={byGroup}
+        emptyHint="Портфель пуст"
+        linkOf={(item) => (item.key === "Деньги" ? "/transactions" : `/products?group=${encodeURIComponent(item.key)}`)}
+      />
       {structureError && <p className="form-error">{structureError}</p>}
       {structure && (
         <>
+          <BreakdownList
+            title="По банкам и брокерам"
+            items={structure.byProvider ?? [...structure.byBroker, ...structure.byBank]}
+            emptyHint="Нет счетов"
+            linkOf={(item) => `/products?bank=${encodeURIComponent(item.key)}`}
+          />
           <BreakdownList title="По валютам" items={structure.byCurrency} emptyHint="Нет данных" />
-          <BreakdownList
-            title="По брокерам"
-            items={structure.byBroker}
-            emptyHint="Нет счетов с типом «брокер»"
-          />
-          <BreakdownList
-            title="По банкам"
-            items={structure.byBank}
-            emptyHint="Нет счетов с типом «банк»"
-          />
           <BreakdownList title="По инструментам" items={structure.byInstrument} emptyHint="Нет данных" />
           <BreakdownList
             title="По эмитентам"
@@ -4045,8 +4064,12 @@ function Integrations({
             />
           </label>
           <small className="field-hint">
-            Токен передаётся только на backend, хранится в зашифрованном виде
-            и никогда не показывается в интерфейсе.
+            Где взять: в настройках Т-Инвестиций, раздел «Токены T-Invest API»,
+            выпустите токен с доступом «только чтение» — менять портфель приложению не нужно.
+          </small>
+          <small className="field-hint">
+            Токен хранится на сервере в зашифрованном виде и никогда не показывается
+            в интерфейсе.
           </small>
           <button className="primary-button" type="submit">
             {status === "disconnected" ? "Подключить Т-Инвестиции" : "Обновить токен"}

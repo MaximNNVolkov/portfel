@@ -75,3 +75,13 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .attention-row-compact .attention-actions { flex: 0 0 auto; padding: 0 14px 0 0; }
 }
 .connection-state { white-space: nowrap; }
+
+/* Аналитика: доля разреза полоской под строкой — сравнивать глазом, а не читать проценты. */
+.share-bar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.share-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--mint); }
+.stat-card .ellipsis-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.breakdown-section .product-row-summary { display: block; }
+@media (max-width: 720px) {
+  .stat-strip { grid-template-columns: 1fr; }
+  .stat-strip .stat-card + .stat-card { border-left: 0; border-top: 1px solid var(--line); }
+}

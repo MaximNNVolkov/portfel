@@ -680,7 +680,7 @@ app.get('/api/portfolio/structure', async (request, response) => {
         priceUnavailable: valuation?.priceUnavailable ?? true,
         estimated: valuation?.estimated ?? false,
       }))
-  const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf))
+  const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf), aggregate.value)
   response.json({
     byCurrency: aggregateByKey([...keyed((position) => position.instrument.currency || 'RUB'), ...cashKeyed((currency) => currency)]),
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),

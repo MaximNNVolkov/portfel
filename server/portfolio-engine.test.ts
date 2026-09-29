@@ -291,5 +291,12 @@ test('приблизительная оценка входит в стоимос
   assert.equal(bucket.pnlPercent, 10)
 })
 
+test('доля частичного разреза считается от всего портфеля', () => {
+  const [broker] = aggregateByKey([{ key: 'Т-Инвестиции', investedBase: 1000, valueBase: 1000, priceUnavailable: false }], 4000)
+  assert.equal(broker.share, 25)
+  const [only] = aggregateByKey([{ key: 'RUB', investedBase: 1000, valueBase: 1000, priceUnavailable: false }])
+  assert.equal(only.share, 100)
+})
+
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
 process.exit(failed ? 1 : 0)
