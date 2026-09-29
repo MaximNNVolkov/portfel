@@ -680,6 +680,12 @@ app.get('/api/portfolio/summary', async (request, response) => {
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
     financialResult: returns.financialResult,
     returnPercent: returns.returnPercent,
+    // Изменение цены позиций (стоимость − вложено) — одна из составляющих результата.
+    valueChange: returns.valueChange,
+    // «Внесено своих денег»: итог минус результат. Пришедшие купоны и дивиденды лежат в
+    // свободных деньгах, но своими вложениями не являются — иначе «вложено» росло бы от
+    // каждой выплаты, а результат их не показывал.
+    contributed: returns.financialResult !== null ? Math.round((aggregate.value - returns.financialResult) * 100) / 100 : null,
     returnMethod: returns.method,
     commissions: returns.commissions,
     taxes: returns.taxes,

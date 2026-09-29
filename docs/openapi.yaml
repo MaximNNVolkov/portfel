@@ -787,6 +787,8 @@ components:
         commissions: { type: number }
         taxes: { type: number }
         groups: { type: array, items: { type: object, additionalProperties: true } }
+        valueChange: { type: [number, 'null'], description: 'Изменение цены позиций (стоимость − вложено)' }
+        contributed: { type: [number, 'null'], description: 'Внесено своих денег: итог − финансовый результат' }
         rebalance:
           type: array
           description: 'Целевая структура по категориям; пусто, если цель не задана'

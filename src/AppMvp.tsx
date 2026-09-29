@@ -297,6 +297,14 @@ type PortfolioSummary = {
   invested: number;
   profit: number;
   profitPercent: number | null;
+  /** §10.6: изменение цены + полученные выплаты − комиссии − налоги. Главный результат. */
+  financialResult?: number | null;
+  returnPercent?: number | null;
+  valueChange?: number | null;
+  commissions?: number;
+  taxes?: number;
+  /** Внесено своих денег: итог минус результат. */
+  contributed?: number | null;
   expected: number;
   // Ожидались, но дата прошла — в «Ожидается» не входят (BUG-22).
   overdue: number;
@@ -790,10 +798,12 @@ function pnlDisplay(pnl: number | null, pnlPercent: number | null) {
   if (pnl === null) {
     return { className: "muted", amountText: "—", percentText: "—" };
   }
+  // Ноль — нейтральный: зелёный «+0,0%» читается как прибыль (§40.6).
+  const zero = Math.round(pnl) === 0;
   const positive = pnl >= 0;
-  const sign = positive ? "+" : "";
+  const sign = positive && !zero ? "+" : "";
   return {
-    className: positive ? "teal-text" : "danger-text",
+    className: zero ? "muted" : positive ? "teal-text" : "danger-text",
     amountText: `${sign}${money(pnl)}`,
     percentText:
       pnlPercent === null
@@ -819,6 +829,20 @@ function valuationOf(product: Product): ProductValuation {
 // Стоимость без оценки не выводится нулём (§7.3).
 const valueText = (value: number | null) =>
   value === null ? "Оценка недоступна" : money(value);
+const signedMoney = (value: number, display: (value: number) => string) =>
+  `${value > 0 ? "+" : value < 0 ? "−" : ""}${display(Math.abs(value))}`;
+const signedPercent = (value: number | null | undefined) =>
+  value === null || value === undefined
+    ? "—"
+    : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(2).replace(".", ",")}%`;
+// Главный результат портфеля (§10.6) вместо «стоимость минус вложено»: для портфеля на
+// купонах и вкладах разница — всё равно что показать убыток вместо дохода.
+function portfolioResult(summary: PortfolioSummary) {
+  const result = summary.financialResult ?? summary.profit;
+  const percent = summary.financialResult !== undefined ? summary.returnPercent ?? null : summary.profitPercent;
+  const tone = Math.round(result) > 0 ? "positive" : Math.round(result) < 0 ? "negative" : "neutral";
+  return { result, percent, tone, contributed: summary.contributed ?? summary.invested };
+}
 // Разрез, в котором ни одна позиция не оценена (например, только валюта без курса ЦБ),
 // стоит «Оценка недоступна», а не «₽ 0 · 0% портфеля» (§7.3).
 const unvalued = (item: { positions: number; priceUnavailable: number }) =>
@@ -1989,9 +2013,19 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, invested, profit, profitPercent, paid, overdue, cash, groups, valuation, rebalance = [] } =
+  const { total, profit, paid, overdue, cash, groups, valuation, rebalance = [] } =
     summary ?? localSummary(products, payments);
   const rebalanceByGroup = new Map(rebalance.map((row) => [row.group, row]));
+  const result = portfolioResult(summary ?? localSummary(products, payments));
+  // Из чего сложился результат: цена, выплаты, комиссии и налоги — одной строкой.
+  const summaryBreakdown = summary?.financialResult !== undefined && summary.financialResult !== null
+    ? [
+        `цена ${signedMoney(summary.valueChange ?? profit, display)}`,
+        paid ? `выплаты ${signedMoney(paid, display)}` : null,
+        summary.commissions ? `комиссии ${signedMoney(-summary.commissions, display)}` : null,
+        summary.taxes ? `налоги ${signedMoney(-summary.taxes, display)}` : null,
+      ].filter(Boolean).join(" · ")
+    : "";
   // Категория с целью, которой в портфеле ещё нет, — отдельной строкой «докупить».
   const missingTargets = rebalance.filter((row) => !groups.some((group) => group.group === row.group));
   const brokerDegraded = brokerStatus?.status === "error";
@@ -2065,24 +2099,22 @@ function Dashboard({
         </div>
         <div className="total-value">
           {display(total)}
-          <span className="total-currency">RUB</span>
         </div>
         <div className="profit-line">
-          <span className={profit > 0 ? "positive-pill" : profit < 0 ? "negative-pill" : "neutral-pill"}>
-            {profit > 0 ? "↗ +" : profit < 0 ? "↘ " : ""}
-            {display(profit)}
+          <span className={`${result.tone}-pill`}>
+            {result.tone === "positive" ? "↗ " : result.tone === "negative" ? "↘ " : ""}
+            {signedMoney(result.result, display)}
           </span>
-          <strong className={profitPercent === null ? "muted" : profit < 0 ? "danger-text" : ""}>
-            {profitPercent === null
-              ? "—"
-              : `${profitPercent > 0 ? "+" : ""}${profitPercent.toFixed(2).replace(".", ",")}%`}
+          <strong className={result.percent === null ? "muted" : result.tone === "negative" ? "danger-text" : result.tone === "neutral" ? "muted" : ""}>
+            {signedPercent(result.percent)}
           </strong>
           <span className="muted">за всё время</span>
         </div>
+        {summaryBreakdown && <p className="muted result-breakdown">{summaryBreakdown}</p>}
         <div className="total-stats">
           <div>
-            <span>Вложено</span>
-            <strong>{display(invested)}</strong>
+            <span>Внесено своих</span>
+            <strong>{display(result.contributed)}</strong>
           </div>
           <div>
             <span>Получено выплат</span>
@@ -3721,7 +3753,9 @@ function AnalyticsPage({
   summary: PortfolioSummary | null;
   token: string;
 }) {
-  const { profit, profitPercent, groups } = summary ?? localSummary([], []);
+  const current = summary ?? localSummary([], []);
+  const { groups } = current;
+  const result = portfolioResult(current);
   // Категории (классы активов) уже посчитаны в summary.groups — тем же движком (§10).
   const byGroup: StructureBreakdown[] = groups.map((group) => ({ ...group, key: group.group }));
   const [structure, setStructure] = useState<PortfolioStructure | null>(null);
@@ -3753,19 +3787,17 @@ function AnalyticsPage({
       <div className="stat-strip">
         <article className="stat-card">
           <span>Доходность</span>
-          <strong className={(profitPercent ?? 0) < 0 ? "danger-text" : "teal-text"}>
-            {(profitPercent ?? 0) < 0 ? "" : "+"}
-            {(profitPercent ?? 0).toFixed(2).replace(".", ",")}%
+          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
+            {signedPercent(result.percent)}
           </strong>
           <small>простая, за всё время</small>
         </article>
         <article className="stat-card">
           <span>Результат</span>
-          <strong className={profit < 0 ? "danger-text" : "teal-text"}>
-            {Math.round(profit) === 0 ? "" : profit < 0 ? "−" : "+"}
-            {money(Math.abs(profit))}
+          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
+            {signedMoney(result.result, money)}
           </strong>
-          <small>стоимость минус вложено</small>
+          <small>цена + выплаты − комиссии</small>
         </article>
         <article className="stat-card">
           <span>Крупнейшая позиция</span>
