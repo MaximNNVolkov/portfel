@@ -26,6 +26,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Build server (JS for the production image)
+        run: npm run build:server
+
       # Юнит-тесты без БД. server/smoke-test.ts (npm test) требует живой Postgres и сюда не входит.
       - name: Unit tests
         run: |
@@ -36,3 +39,26 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
+
+  # Production-образ backend собирается (tsc → JS, рантайм без devDependencies) и стартует
+  # хотя бы до проверки секретов. Языковые данные OCR (tessdata/*.traineddata) в git не лежат —
+  # для сборки хватает пустого каталога.
+  backend-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: |
+          mkdir -p tessdata
+          docker build -f Dockerfile.backend -t portfel-backend:ci .
+
+      - name: No tsx/typescript in the runtime image
+        run: |
+          ! docker run --rm portfel-backend:ci sh -c 'ls node_modules/.bin' | grep -E '^(tsx|tsc)$'
+
+      - name: Compiled backend loads and refuses to start without secrets
+        run: |
+          out=$(docker run --rm -e NODE_ENV=production portfel-backend:ci node dist-server/index.js 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q TOKEN_ENCRYPTION_KEY

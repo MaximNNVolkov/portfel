@@ -1,0 +1,14 @@
+{
+  // Сборка backend в JS для production-образа (Dockerfile.backend): без tsx и devDependencies
+  // в рантайме. Импорты `./x.ts` переписываются в `./x.js`, поэтому исходники не меняются.
+  "extends": "./tsconfig.server.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist-server",
+    "rootDir": "server",
+    "sourceMap": true
+  },
+  "include": ["server"],
+  "exclude": ["server/**/*.test.ts", "server/smoke-test.ts"]
+}
