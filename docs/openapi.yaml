@@ -1,0 +1,864 @@
+openapi: 3.1.0
+info:
+  title: Портфель — REST API
+  version: 1.0.0
+  description: |
+    API веб-приложения для учёта инвестиционного портфеля (SPEC §33).
+
+    Все суммы — числа в валюте, указанной рядом (`currency`), либо в базовой валюте
+    портфеля (`baseCurrency`, поля с суффиксом `Base`). Отсутствие оценки передаётся
+    как `null`, никогда не как 0 (§7.3).
+
+    Авторизация — заголовок `Authorization: Bearer <token>`; токен выдают
+    `/api/auth/register` и `/api/auth/login`. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
+
+    Пагинация списков — `limit` (1–500) и `offset`. Без них возвращается весь список.
+
+    Файл сверяется с маршрутами `server/index.ts` тестом `server/openapi.test.ts`.
+servers:
+  - url: /
+security:
+  - bearer: []
+
+tags:
+  - name: auth
+  - name: settings
+  - name: brokers
+  - name: market-data
+  - name: positions
+  - name: ocr
+  - name: portfolio
+  - name: payouts
+  - name: transactions
+  - name: system
+
+paths:
+  /api/health:
+    get:
+      tags: [system]
+      summary: Проверка живости API
+      security: []
+      responses:
+        '200':
+          description: API работает
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, service: { type: string } } }
+
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: Регистрация по email и паролю (§5)
+      description: Если на сервере задан `REGISTRATION_INVITE_CODE`, требуется `inviteCode`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                inviteCode: { type: string }
+      responses:
+        '201': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Вход
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Выход — удаляет текущую сессию
+      responses:
+        '204': { description: 'Сессия удалена' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: Текущий пользователь
+      responses:
+        '200':
+          description: Пользователь авторизован
+          content:
+            application/json:
+              schema: { type: object, properties: { authenticated: { type: boolean }, email: { type: [string, 'null'] } } }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [auth]
+      summary: Удалить аккаунт и все связанные данные (§28)
+      responses:
+        '204': { description: 'Аккаунт и данные удалены' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/auth/forgot-password:
+    post:
+      tags: [auth]
+      summary: Письмо со ссылкой для восстановления пароля
+      description: Ответ одинаков независимо от того, существует ли аккаунт.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [email], properties: { email: { type: string, format: email } } }
+      responses:
+        '200':
+          description: Запрос принят
+          content:
+            application/json:
+              schema: { type: object, properties: { message: { type: string } } }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/auth/reset-password:
+    post:
+      tags: [auth]
+      summary: Новый пароль по токену из письма; завершает все сессии пользователя
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        '204': { description: 'Пароль изменён' }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/settings:
+    get:
+      tags: [settings]
+      summary: Настройки портфеля
+      responses:
+        '200': { $ref: '#/components/responses/Settings' }
+        '401': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [settings]
+      summary: Изменить название портфеля и базовую валюту (§13)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                portfolioName: { type: string }
+                baseCurrency: { type: string, enum: [RUB, USD, CNY] }
+      responses:
+        '200': { $ref: '#/components/responses/Settings' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/brokers/tinkoff:
+    get:
+      tags: [brokers]
+      summary: Состояние подключения Т-Инвестиций (§19, §30)
+      responses:
+        '200':
+          description: Статус подключения; токен только в маскированном виде
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { type: string, const: tinkoff }
+                  status: { type: string, enum: [disconnected, connected, error] }
+                  maskedToken: { type: string }
+                  connectedAt: { type: string, format: date-time }
+                  lastSyncAt: { type: [string, 'null'], format: date-time }
+                  lastError: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/brokers/tinkoff/connect:
+    post:
+      tags: [brokers]
+      summary: Проверить и сохранить токен Т-Инвестиций (хранится зашифрованным)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [token], properties: { token: { type: string } } }
+      responses:
+        '200': { description: 'Токен подтверждён и сохранён' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/brokers/tinkoff/sync:
+    post:
+      tags: [brokers]
+      summary: Синхронизировать счета, позиции и операции
+      description: При ошибке ранее загруженные данные сохраняются, статус подключения становится `error` (§40.2).
+      responses:
+        '200': { description: 'Синхронизация завершена' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/market-data/refresh:
+    post:
+      tags: [market-data]
+      summary: Обновить цены акций, фондов и облигаций по MOEX ISS (§20)
+      responses:
+        '200':
+          description: Итог обновления по каждой бумаге
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked: { type: integer }
+                  updated: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        positionId: { type: string, format: uuid }
+                        name: { type: string }
+                        code: { type: string }
+                        status: { type: string, enum: [updated, no_quantity, not_found, no_price, unavailable] }
+                        priceUpdatedAt: { type: [string, 'null'], format: date-time }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/positions:
+    get:
+      tags: [positions]
+      summary: Позиции портфеля с оценкой Portfolio Engine
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Список позиций
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Position' } }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [positions]
+      summary: Добавить инструмент вручную (§17)
+      requestBody: { $ref: '#/components/requestBodies/PositionCreate' }
+      responses:
+        '201': { $ref: '#/components/responses/Position' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/positions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [positions]
+      summary: Карточка позиции (§9)
+      responses:
+        '200': { $ref: '#/components/responses/Position' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [positions]
+      summary: Изменить позицию; передаются только изменённые поля
+      requestBody: { $ref: '#/components/requestBodies/PositionUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/Position' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [positions]
+      summary: Удалить позицию
+      responses:
+        '204': { description: 'Удалена' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/accounts:
+    get:
+      tags: [positions]
+      summary: Счета пользователя (§11 Account)
+      responses:
+        '200':
+          description: Список счетов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    type: { type: string, enum: [broker, bank, cash, other] }
+                    provider: { type: string }
+                    currency: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/instruments:
+    get:
+      tags: [positions]
+      summary: Инструменты пользователя (§11 Instrument)
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Список инструментов
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/ocr/upload:
+    post:
+      tags: [ocr]
+      summary: Загрузить скриншот в очередь распознавания (§18, §34)
+      description: |
+        Распознавание асинхронное: ответ 202 с `documentId`, статус опрашивается через
+        `GET /api/ocr/documents/{id}`. Повторная загрузка того же файла возвращает 200 и
+        прошлый документ с `alreadyUploadedAt`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary, description: 'PNG или JPEG до 10 МБ' }
+      responses:
+        '200': { $ref: '#/components/responses/OcrQueued' }
+        '202': { $ref: '#/components/responses/OcrQueued' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/ocr/documents/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [ocr]
+      summary: Статус и результат распознавания
+      responses:
+        '200':
+          description: Документ
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documentId: { type: string, format: uuid }
+                  status: { type: string, enum: [pending, processing, done, failed] }
+                  fileName: { type: string }
+                  createdAt: { type: string, format: date-time }
+                  processedAt: { type: [string, 'null'], format: date-time }
+                  result:
+                    description: Только при status = done — данные экрана-сводки (§40.4)
+                    type: object
+                    properties:
+                      date: { type: string }
+                      items: { type: array, items: { type: object, additionalProperties: true } }
+                      failures: { type: array, items: { type: object, additionalProperties: true } }
+                  error: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/portfolio/summary:
+    get:
+      tags: [portfolio]
+      summary: Главный экран — итоги портфеля (§7.1, §10.6)
+      responses:
+        '200':
+          description: Итоги в базовой валюте
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Summary' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/portfolio/history:
+    get:
+      tags: [portfolio]
+      summary: Ежедневные снимки стоимости портфеля (§21)
+      responses:
+        '200':
+          description: Снимки по датам
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    date: { type: string, format: date }
+                    value: { type: number }
+                    invested: { type: [number, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/portfolio/structure:
+    get:
+      tags: [portfolio]
+      summary: Структура портфеля по разрезам (§23)
+      responses:
+        '200':
+          description: Разрезы по валютам, брокерам, банкам, инструментам и эмитентам
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  byCurrency: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+                  byBroker: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+                  byBank: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+                  byProvider: { type: array, items: { $ref: '#/components/schemas/Breakdown' }, description: 'Где лежат деньги — банк или брокер без разделения' }
+                  byInstrument: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+                  byIssuer: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/recommendations:
+    get:
+      tags: [portfolio]
+      summary: Аналитические уведомления — 4 базовых правила (§24)
+      description: Не являются индивидуальными инвестиционными рекомендациями.
+      responses:
+        '200':
+          description: Список уведомлений
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    ruleType: { type: string, enum: [concentration, maturity, drawdown, payout_gap] }
+                    text: { type: string }
+                  additionalProperties: true
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/attention:
+    get:
+      tags: [portfolio]
+      summary: 'Лента «Что требует внимания»: выплаты, погашения, ошибки брокера, аналитика'
+      responses:
+        '200':
+          description: Пункты ленты, срочные первыми
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AttentionItem' } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/payouts:
+    get:
+      tags: [payouts]
+      summary: Календарь выплат (§22)
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Выплаты по возрастанию даты
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Payout' } }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [payouts]
+      summary: Добавить выплату вручную
+      requestBody: { $ref: '#/components/requestBodies/PayoutCreate' }
+      responses:
+        '201': { $ref: '#/components/responses/Payout' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/payouts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    patch:
+      tags: [payouts]
+      summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
+      requestBody: { $ref: '#/components/requestBodies/PayoutUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/Payout' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [payouts]
+      summary: Удалить выплату
+      responses:
+        '204': { description: 'Удалена' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/transactions:
+    get:
+      tags: [transactions]
+      summary: Операции (§11 Transaction)
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Список операций
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [transactions]
+      summary: Добавить операцию; меняет позицию или денежный остаток
+      requestBody: { $ref: '#/components/requestBodies/TransactionCreate' }
+      responses:
+        '201': { $ref: '#/components/responses/Transaction' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/transactions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    patch:
+      tags: [transactions]
+      summary: Изменить операцию
+      requestBody: { $ref: '#/components/requestBodies/TransactionUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/Transaction' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [transactions]
+      summary: Удалить операцию и откатить её эффект
+      responses:
+        '204': { description: 'Удалена' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 500 }
+    offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        field: { type: string, description: 'Поле формы, к которому относится ошибка' }
+
+    Valuation:
+      type: object
+      description: Оценка Portfolio Engine в базовой валюте (§10)
+      properties:
+        value: { type: [number, 'null'] }
+        invested: { type: [number, 'null'] }
+        pnl: { type: [number, 'null'] }
+        pnlPercent: { type: [number, 'null'] }
+        priceUnavailable: { type: boolean }
+        priceUnavailableReason: { type: [string, 'null'], enum: [no-price, no-rate, null] }
+        estimated: { type: boolean, description: 'Котируемая бумага без котировки — в стоимости есть, в P&L нет' }
+      additionalProperties: true
+
+    Position:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        instrumentId: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string, enum: [Вклады, Облигации, Акции, Фонды, Деньги, Прочее] }
+        amount: { type: [number, 'null'], description: 'Текущая стоимость в валюте инструмента; null — цены нет' }
+        invested: { type: [number, 'null'] }
+        currency: { type: string }
+        institution: { type: string, description: 'Банк или брокер' }
+        source: { type: string, enum: [manual, ocr, broker] }
+        ticker: { type: string }
+        isin: { type: [string, 'null'] }
+        quantity: { type: [number, 'null'] }
+        averagePrice: { type: [number, 'null'] }
+        currentPrice: { type: [number, 'null'] }
+        maturityDate: { type: [string, 'null'], format: date }
+        closedOn: { type: [string, 'null'], format: date }
+        forecastNote: { type: string, description: 'Почему по бумаге нет прогноза купонов' }
+        valuation: { $ref: '#/components/schemas/Valuation' }
+      additionalProperties: true
+
+    Payout:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        amount: { type: number, description: 'В валюте выплаты' }
+        currency: { type: string }
+        amountBase: { type: [number, 'null'], description: 'В базовой валюте по курсу ЦБ; null — курса нет' }
+        baseCurrency: { type: [string, 'null'] }
+        date: { type: string, format: date }
+        type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
+        status: { type: string, enum: [expected, received] }
+        overdue: { type: boolean, description: 'Ожидалась, но дата прошла' }
+        source: { type: string }
+        instrumentId: { type: [string, 'null'] }
+        accountId: { type: string }
+        institution: { type: [string, 'null'], description: 'Банк или брокер счёта' }
+        transactionId: { type: [string, 'null'] }
+
+    Transaction:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/TransactionType' }
+        title: { type: string }
+        amount: { type: number }
+        date: { type: string, format: date }
+        currency: { type: string }
+        commission: { type: number }
+        tax: { type: number }
+        positionId: { type: [string, 'null'] }
+        instrumentId: { type: [string, 'null'] }
+        accountId: { type: string }
+        institution: { type: [string, 'null'], description: 'Банк или брокер счёта' }
+        source: { type: string }
+
+    TransactionType:
+      type: string
+      enum: [BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION, OTHER]
+
+    PositionInput:
+      type: object
+      description: При создании обязательны type, name, amount, date (§17)
+      properties:
+        type: { type: string, enum: [Вклады, Облигации, Акции, Фонды, Деньги, Прочее] }
+        name: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        invested: { type: number, description: 'Должно совпадать с quantity × averagePrice, если заданы оба' }
+        institution: { type: string }
+        currency: { type: string, enum: [RUB, USD, CNY] }
+        ticker: { type: string }
+        isin: { type: string }
+        issuer: { type: string }
+        quantity: { type: number }
+        averagePrice: { type: number }
+        currentPrice: { type: number }
+        accruedInterest: { type: number }
+        nominal: { type: number }
+        couponRate: { type: number }
+        couponDate: { type: string, format: date }
+        maturityDate: { type: string, format: date }
+        ofertaDate: { type: string, format: date }
+        rate: { type: number }
+        effectiveRate: { type: number }
+        termEndDate: { type: string, format: date }
+        capitalization: { type: boolean }
+        replenishable: { type: boolean }
+        partialWithdrawal: { type: boolean }
+        autoProlongation: { type: boolean }
+      additionalProperties: true
+    PayoutInput:
+      type: object
+      description: При создании обязательны title, amount, date
+      properties:
+        title: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
+        status: { type: string, enum: [expected, received] }
+        positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
+    TransactionInput:
+      type: object
+      description: При создании обязательны type, amount, date; для BUY и SELL — positionId
+      properties:
+        type: { $ref: '#/components/schemas/TransactionType' }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        title: { type: string }
+        positionId: { type: string }
+        commission: { type: number }
+        tax: { type: number }
+
+    AttentionItem:
+      type: object
+      required: [id, kind, severity, title, text, action]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [payout_overdue, payout_received, payout_soon, maturity_soon, broker_error, price_unavailable, forecast_missing, insight] }
+        severity: { type: integer, enum: [1, 2, 3], description: '1 — срочно, 2 — важно, 3 — к сведению' }
+        title: { type: string }
+        text: { type: string }
+        action: { type: string, enum: [mark_received, reinvest, open_position, edit_position, refresh_prices, open_integrations, open_payments, open_analytics] }
+        date: { type: string, format: date }
+        amount: { type: number }
+        currency: { type: string }
+        institution: { type: string }
+        positionId: { type: string }
+        payoutIds: { type: array, items: { type: string } }
+
+    Breakdown:
+      type: object
+      properties:
+        key: { type: string }
+        invested: { type: number }
+        value: { type: number }
+        pnl: { type: number, description: 'Только по позициям с известной ценой' }
+        pnlPercent: { type: [number, 'null'] }
+        share: { type: [number, 'null'] }
+        positions: { type: integer }
+        priceUnavailable: { type: integer }
+
+    Summary:
+      type: object
+      properties:
+        baseCurrency: { type: string }
+        total: { type: number }
+        invested: { type: number }
+        profit: { type: number }
+        profitPercent: { type: [number, 'null'] }
+        expected: { type: number, description: 'Ожидаемые выплаты с сегодняшнего дня' }
+        overdue: { type: number }
+        paid: { type: number }
+        cash: { type: [number, 'null'] }
+        positions: { type: integer }
+        financialResult: { type: [number, 'null'], description: 'изменение стоимости + выплаты − комиссии − налоги (§10.6)' }
+        returnPercent: { type: [number, 'null'] }
+        returnMethod: { type: string, const: simple }
+        commissions: { type: number }
+        taxes: { type: number }
+        groups: { type: array, items: { type: object, additionalProperties: true } }
+        valuation:
+          type: object
+          properties:
+            incomplete: { type: boolean, description: 'Итог неполный — UI помечает его (§40.2)' }
+            unavailable: { type: array, items: { type: object, additionalProperties: true } }
+            estimated: { type: array, items: { type: object, additionalProperties: true } }
+            unconvertedCurrencies: { type: array, items: { type: string }, description: 'Валюты без курса ЦБ, не вошедшие в суммы выплат и комиссий' }
+
+  requestBodies:
+    PositionCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/PositionInput'
+              - required: [name, amount, date]
+    PositionUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PositionInput' }
+    PayoutCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/PayoutInput'
+              - required: [title, amount, date]
+    PayoutUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PayoutInput' }
+    TransactionCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/TransactionInput'
+              - required: [type, amount, date]
+    TransactionUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TransactionInput' }
+
+  responses:
+    Error:
+      description: Ошибка
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Session:
+      description: Сессия создана
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              token: { type: string }
+              user: { type: object, properties: { id: { type: string }, email: { type: string } } }
+    Settings:
+      description: Настройки портфеля
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              portfolioName: { type: string }
+              baseCurrency: { type: string }
+              availableCurrencies: { type: array, items: { type: string } }
+    Position:
+      description: Позиция
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Position' }
+    Payout:
+      description: Выплата
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Payout' }
+    Transaction:
+      description: Операция
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Transaction' }
+    OcrQueued:
+      description: Документ в очереди или уже обработан
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              documentId: { type: string, format: uuid }
+              status: { type: string }
+              alreadyUploadedAt: { type: string, format: date-time }
