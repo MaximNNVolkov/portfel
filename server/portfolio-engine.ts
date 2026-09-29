@@ -343,7 +343,10 @@ export type Breakdown = {
  * провайдер и т.п.) — та же арифметика сумм/долей, что и aggregateByGroup, но без
  * привязки к группам активов, чтобы не дублировать её для каждого нового разреза §23.
  */
-export function aggregateByKey(items: KeyedValuation[]): Breakdown[] {
+// portfolioValue — стоимость всего портфеля: разрезы «по брокерам», «по банкам», «по эмитентам»
+// покрывают только часть позиций, и доля «100% портфеля» у единственного брокера врала бы.
+// Без него доля считается от суммы самого разреза (валюты и инструменты покрывают всё).
+export function aggregateByKey(items: KeyedValuation[], portfolioValue?: number): Breakdown[] {
   const buckets = new Map<string, Breakdown>()
   // P&L разреза — только по позициям, где известны и вложено, и стоимость: позиция без
   // цены иначе дала бы «−вложено» (как в aggregateByGroup, §7.3).
@@ -373,7 +376,8 @@ export function aggregateByKey(items: KeyedValuation[]): Breakdown[] {
       pnlPercent: base.invested > 0 ? round4((pnl / base.invested) * 100) : null,
     }
   })
-  for (const bucket of list) bucket.share = totalValue > 0 ? round4((bucket.value / totalValue) * 100) : null
+  const shareBase = portfolioValue ?? totalValue
+  for (const bucket of list) bucket.share = shareBase > 0 ? round4((bucket.value / shareBase) * 100) : null
   list.sort((left, right) => right.value - left.value)
   return list
 }
