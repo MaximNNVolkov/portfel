@@ -572,17 +572,19 @@ Backend должен автоматически создавать backup БД.
 
 ## 32. Технологический стек
 
-**Frontend:** React / Next.js.
+**Frontend:** React 19 + Vite (SPA, React Router).
 
-**Backend:** Python + FastAPI.
+**Backend:** Node.js + Express + TypeScript.
 
 **Database:** PostgreSQL.
 
-**Background jobs:** Celery + Redis либо аналогичный механизм.
+**Background jobs:** отдельный процесс-планировщик на том же коде backend (аналогичный механизм вместо Celery + Redis).
 
 Фоновые задачи: синхронизация брокера, обновление котировок, OCR, формирование PDF **[v2]**, уведомления **[v2]**.
 
-**Deployment:** Docker Compose — nginx, frontend, backend, postgres, redis, worker, scheduler.
+**Deployment:** Docker Compose — nginx (раздаёт frontend и проксирует API), backend, scheduler, postgres, backup, certbot.
+
+> Первоначальная редакция ТЗ предлагала Next.js, Python + FastAPI и Celery + Redis. Проект продолжен на уже работавшем TypeScript-стеке; требования к функциональности, безопасности и асинхронности (разделы 28, 34) от этого не меняются.
 
 ---
 
