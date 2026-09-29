@@ -728,10 +728,13 @@ const valueText = (value: number | null) =>
   value === null ? "Оценка недоступна" : money(value);
 const signedMoney = (value: number, display: (value: number) => string) =>
   `${value > 0 ? "+" : value < 0 ? "−" : ""}${display(Math.abs(value))}`;
-const signedPercent = (value: number | null | undefined) =>
-  value === null || value === undefined
-    ? "—"
-    : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(2).replace(".", ",")}%`;
+// Проценты везде с одним знаком после запятой (критик К19): рядом стояли «−3,98%» и «−11,4%».
+// Меньше 0,05% — ноль без знака, чтобы не было «+0,0%».
+const signedPercent = (value: number | null | undefined) => {
+  if (value === null || value === undefined) return "—";
+  const rounded = Math.round(value * 10) / 10;
+  return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(1).replace(".", ",")}%`;
+};
 // Главный результат портфеля (§10.6) вместо «стоимость минус вложено»: для портфеля на
 // купонах и вкладах разница — всё равно что показать убыток вместо дохода.
 function portfolioResult(summary: PortfolioSummary) {
@@ -1631,9 +1634,6 @@ function AppMvp() {
               <span className="nav-icon">{icon}</span>
               {label}
               {isV2 && <span className="v2-badge">v2</span>}
-              {label === "Рекомендации" && attention?.some((item) => item.kind === "insight") && (
-                <span className="notification-dot" />
-              )}
             </NavLink>
           ))}
         </nav>
@@ -2001,6 +2001,7 @@ function Dashboard({
     );
   }
   const topAttention = attention?.slice(0, 4) ?? [];
+  const urgentAttention = attention?.filter((item) => item.severity <= 2).length ?? 0;
   return (
     <div className="content-wrap">
       <section className="page-heading">
@@ -2095,7 +2096,12 @@ function Dashboard({
         <>
           <section className="section-heading">
             <div>
-              <h2>Требует внимания{attention.length > 0 ? ` · ${attention.length}` : ""}</h2>
+              {/* Число в заголовке — то же, что на колокольчике (критик К9): срочное и важное.
+                  «К сведению» считается отдельно, чтобы два счётчика не спорили. */}
+              <h2>Требует внимания{urgentAttention > 0 ? ` · ${urgentAttention}` : ""}</h2>
+              {attention.length > urgentAttention && (
+                <p className="muted">и {attention.length - urgentAttention} к сведению</p>
+              )}
             </div>
             {attention.length > topAttention.length && (
               <Link className="outline-button" to="/attention">
@@ -2383,7 +2389,8 @@ function ProductRow({
             {!institution && !event ? product.type : null}
           </span>
           {estimateNote(valuation) ? (
-            <span className="muted" title={`Нет котировки: ${estimateNote(valuation)}`}>≈</span>
+            // Голый «≈» ничего не объяснял (критик К21): пишем словами, откуда сумма.
+            <span className="muted" title="Нет биржевой котировки">≈ {estimateNote(valuation)}</span>
           ) : (
             <span className={pnl.className} title={`Доход: ${pnl.amountText}`}>{pnl.percentText}</span>
           )}
@@ -3708,6 +3715,19 @@ function AnalyticsPage({
   const [structure, setStructure] = useState<PortfolioStructure | null>(null);
   const [structureError, setStructureError] = useState("");
   const topInstrument = structure?.byInstrument.find((item) => !item.key.startsWith("Денежные средства"));
+  const [returns, setReturns] = useState<PeriodReturn[] | null>(null);
+  const isEmpty = groups.length === 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`${apiUrl}/portfolio/returns`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => (response.ok ? (response.json() as Promise<PeriodReturn[]>) : []))
+      .then((rows) => { if (!cancelled) setReturns(rows); })
+      .catch(() => { if (!cancelled) setReturns([]); });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3731,6 +3751,14 @@ function AnalyticsPage({
 
   return (
     <Page title="Аналитика" subtitle="Базовые показатели портфеля">
+      {/* Пустой портфель — не «+0,00%» и «₽ 0» (критик К15), а приглашение добавить актив. */}
+      {isEmpty ? (
+        <div className="empty-state">
+          <p>Аналитика появится, когда в портфеле будет хотя бы один актив.</p>
+          <Link className="primary-button" to="/products/new">Добавить актив</Link>
+        </div>
+      ) : (
+      <>
       <div className="stat-strip">
         <article className="stat-card">
           <span>Доходность</span>
@@ -3752,6 +3780,7 @@ function AnalyticsPage({
           <small className="ellipsis-text">{topInstrument?.key ?? "нет данных"}</small>
         </article>
       </div>
+      <PeriodReturns rows={returns} />
       <BreakdownList
         title="По категориям"
         items={byGroup}
@@ -3776,7 +3805,45 @@ function AnalyticsPage({
           />
         </>
       )}
+      </>
+      )}
     </Page>
+  );
+}
+type PeriodReturn = { period: "day" | "month" | "year" | "all"; from: string; result: number; percent: number | null };
+const PERIOD_LABELS: Record<PeriodReturn["period"], string> = {
+  day: "За день",
+  month: "За месяц",
+  year: "За год",
+  all: "За всё время",
+};
+// §23: доходность за периоды считает бэкенд по ежедневным снимкам. Пока истории меньше
+// двух дней — честно говорим, что считать не из чего, а не рисуем нули.
+function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
+  if (rows === null) return null;
+  return (
+    <section className="period-returns">
+      <h2>Доходность по периодам</h2>
+      {rows.length === 0 ? (
+        <p className="muted">Появится со второго дня: считается по ежедневным снимкам портфеля.</p>
+      ) : (
+        <div className="stat-strip">
+          {rows.map((row) => {
+            const tone = Math.round(row.result) > 0 ? "teal-text" : Math.round(row.result) < 0 ? "danger-text" : "muted";
+            return (
+              <article className="stat-card" key={row.period}>
+                <span>{PERIOD_LABELS[row.period]}</span>
+                <strong className={tone}>{row.percent === null ? "—" : signedPercent(row.percent)}</strong>
+                <small>
+                  {signedMoney(row.result, money)} с {dateLabel(row.from)}
+                </small>
+              </article>
+            );
+          })}
+        </div>
+      )}
+      <p className="muted small-note">Изменение стоимости без учёта покупок и пополнений; выплаты не входят.</p>
+    </section>
   );
 }
 type RecommendationRuleType =

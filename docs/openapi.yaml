@@ -423,6 +423,29 @@ paths:
                     invested: { type: [number, 'null'] }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/portfolio/returns:
+    get:
+      tags: [portfolio]
+      summary: Доходность за день, месяц, год и всё время по снимкам (§23)
+      description: |
+        Результат периода — изменение «стоимость − вложено» между снимками, процент — к
+        стоимости на начало периода. Период без снимка рядом с его началом не возвращается.
+      responses:
+        '200':
+          description: Периоды, для которых хватает истории
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    period: { type: string, enum: [day, month, year, all] }
+                    from: { type: string, format: date }
+                    result: { type: number }
+                    percent: { type: [number, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+
   /api/portfolio/structure:
     get:
       tags: [portfolio]

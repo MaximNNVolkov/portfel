@@ -90,15 +90,24 @@ test('группа считается суммой по инструментам
 test('позиция без оценки (§7.3) не попадает в сумму эмитента и не даёт NaN', () => {
   const positions: PositionSnapshot[] = [
     position({ id: 'unknown', name: 'Без цены', valueBase: null, issuer: 'Минфин' }),
-    position({ id: 'known', name: 'С ценой', group: 'Акции', valueBase: 300, issuer: 'Минфин' }),
+    position({ id: 'known', name: 'С ценой', group: 'Акции', valueBase: 200, issuer: 'Минфин' }),
+    position({ id: 'known2', name: 'Ещё с ценой', group: 'Облигации', valueBase: 150, issuer: 'Минфин' }),
   ]
   // Если бы null считался как 0 (или портил сумму до NaN), эмитентская доля не равнялась бы
-  // ровно доле единственной оценённой позиции — 30% (300 из 1000).
+  // ровно сумме оценённых позиций — 35% (350 из 1000).
   const result = detectConcentration(positions, 1000)
   const issuerRec = result.find((rec) => rec.payload.kind === 'issuer')
   assert.ok(issuerRec, 'сумма по эмитенту не должна превращаться в NaN из-за null-позиции')
-  assert.equal(issuerRec!.payload.sharePercent, 30)
+  assert.equal(issuerRec!.payload.sharePercent, 35)
   assert.equal(result.some((rec) => rec.payload.id === 'unknown'), false)
+})
+
+test('крупный инструмент не дублируется пунктами про свою группу и эмитента (К8)', () => {
+  const result = detectConcentration([
+    position({ id: 'big', name: 'ОФЗ 26238', group: 'Облигации', valueBase: 400, issuer: 'Минфин' }),
+    position({ id: 'small', name: 'Сбер', group: 'Акции', valueBase: 600, issuer: 'Сбербанк' }),
+  ], 1000)
+  assert.deepEqual(result.map((rec) => rec.payload.kind), ['instrument', 'instrument'])
 })
 
 test('пустой портфель (totalValue=0) не делит на ноль', () => {

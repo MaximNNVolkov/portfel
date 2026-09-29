@@ -512,6 +512,32 @@ async function run() {
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Т8: облигация с прошедшим погашением получает строку погашения, и отметка
+    // «Деньги пришли» закрывает её, а номинал возвращается в свободные деньги.
+    await test('погашенная облигация закрывается отметкой погашения', async () => {
+      const before = await api('/api/portfolio/summary', { token: tokenA })
+      const bond = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест погашенная ОФЗ', type: 'Облигация', amount: 9800, date: '2024-01-10', quantity: 10, nominal: 1000, maturityDate: '2025-06-01' },
+      })
+      assert.equal(bond.status, 201)
+      const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === bond.json.instrumentId)
+      assert.deepEqual(own.map((payout: { type: string; amount: number; overdue: boolean }) => [payout.type, payout.amount, payout.overdue]), [['REDEMPTION', 10000, true]])
+      assert.equal((await api(`/api/payouts/${own[0].id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })).status, 200)
+      const closed = await api(`/api/positions/${bond.json.id}`, { token: tokenA })
+      assert.equal(closed.json.closedOn, '2025-06-01')
+      const summary = await api('/api/portfolio/summary', { token: tokenA })
+      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 10000))
+      await api(`/api/payouts/${own[0].id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
+    await test('доходность за периоды отдаётся списком (§23)', async () => {
+      const returns = await api('/api/portfolio/returns', { token: tokenA })
+      assert.equal(returns.status, 200)
+      assert.ok(Array.isArray(returns.json))
+    })
+
     // BUG-22 (FIX_PLAN 2.6): ожидаемая выплата с прошедшей датой — «просрочено»,
     // в «Ожидается» не входит.
     await test('просроченная выплата отделена от ожидаемых', async () => {

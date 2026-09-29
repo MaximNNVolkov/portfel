@@ -249,7 +249,15 @@ function forecastBond(position: PositionRecord, instrument: Instrument, today: s
     }
   }
 
-  if (instrument.maturityDate && daysBetween(today, instrument.maturityDate) > 0) {
+  // Погашение приходит и задним числом (тестировщик Т8): бумага с прошедшей датой
+  // погашения иначе висела в портфеле вечно — ни строки «Просрочено», ни способа её
+  // закрыть. Как у вклада (Р-1), прошедшая выплата ждёт отметки «Деньги пришли», которая
+  // и закрывает позицию. Брокерские бумаги не трогаем: их погашение приносит синхронизация,
+  // а бумагу, купленную уже после даты погашения, считаем ошибкой ввода, а не долгом.
+  const maturityPassedButOwed = instrument.maturityDate
+    && position.source !== 'broker'
+    && (!position.openedOn || daysBetween(position.openedOn, instrument.maturityDate) > 0)
+  if (instrument.maturityDate && (daysBetween(today, instrument.maturityDate) > 0 || maturityPassedButOwed)) {
     payouts.push({
       date: instrument.maturityDate,
       type: 'REDEMPTION',
