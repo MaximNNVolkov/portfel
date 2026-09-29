@@ -5,8 +5,9 @@ import { decryptToken } from './token-crypto.ts'
 import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
 import { listPendingMigrations } from './migrations.ts'
 import { processNextDocument } from './ocr.ts'
+import { configureRateStore } from './market-data.ts'
 import {
-  failStaleProcessingDocuments, findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
+  deleteExpiredAuthRecords, failStaleProcessingDocuments, findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
   updateBrokerConnectionSync, withTransaction,
 } from './repository.ts'
 
@@ -32,6 +33,7 @@ types.setTypeParser(1082, (value) => value)
 
 const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel'
 const db = new Pool({ connectionString: databaseUrl, max: 5 })
+configureRateStore(db)
 
 const INTERVAL_SECONDS = Number(process.env.SCHEDULER_INTERVAL_SECONDS || 86400)
 // Очередь OCR живёт в том же процессе, но в отдельном цикле: раз в сутки — неприемлемое
@@ -92,6 +94,8 @@ async function runDailyTasks(): Promise<void> {
     await withTransaction(db, (client) => recordSnapshot(client, userId))
       .catch((error) => logError('scheduler.snapshot', error))
   }
+
+  await deleteExpiredAuthRecords(db).catch((error) => logError('scheduler.auth-cleanup', error))
 
   console.log(`[scheduler] ${new Date().toISOString()} daily run: done (${connections.length} connections, ${portfolios.length} portfolios)`)
 }

@@ -7,6 +7,7 @@
 // ЦБ РФ («Курсы валют на MVP — ЦБ РФ»), это не открытый вопрос, а уже принятое решение,
 // которое до этого момента просто не было реализовано кодом (только зарезервировано типом
 // RateTable в portfolio-engine.ts).
+import type { Pool } from 'pg'
 import { cbrRateTable, type RateTable } from './portfolio-engine.ts'
 import { logError } from './logger.ts'
 
@@ -18,7 +19,48 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000
 // MVP §13: только RUB (база, не нужен в таблице), USD, CNY.
 const TRACKED_CURRENCIES = ['USD', 'CNY']
 
+// После сбоя ЦБ не спрашиваем его заново на каждый запрос: иначе каждый вызов сводки
+// ждал бы таймаут в 5 секунд, пока источник лежит.
+const FAILURE_BACKOFF_MS = 10 * 60 * 1000
+
 let cache: { table: RateTable; fetchedAt: number } | null = null
+let lastFailureAt = 0
+// §13: курс, дата и источник хранятся в portfolio.currency_rates. Хранилище подключается
+// процессом (API, планировщик) при старте; без него модуль работает только с памятью.
+let store: Pool | null = null
+
+export function configureRateStore(pool: Pool) {
+  store = pool
+}
+
+async function saveRates(table: RateTable) {
+  if (!store) return
+  for (const [currency, entry] of Object.entries(table.rates)) {
+    await store.query(
+      `INSERT INTO portfolio.currency_rates (currency, base_currency, rate_date, rate, source)
+       VALUES ($1, $2, $3, $4, 'cbr')
+       ON CONFLICT (currency, base_currency, rate_date) DO UPDATE SET rate = EXCLUDED.rate, fetched_at = NOW()`,
+      [currency, table.base, entry.date, entry.rate],
+    )
+  }
+}
+
+/** Последний сохранённый курс по каждой валюте — запас на случай, когда ЦБ недоступен после перезапуска. */
+async function loadStoredRates(): Promise<RateTable | null> {
+  if (!store) return null
+  const result = await store.query(
+    `SELECT DISTINCT ON (currency) currency, rate, rate_date::text AS rate_date
+       FROM portfolio.currency_rates WHERE base_currency = 'RUB'
+      ORDER BY currency, rate_date DESC`,
+  )
+  if (!result.rows.length) return null
+  const table: RateTable = { base: 'RUB', rates: {} }
+  for (const row of result.rows) {
+    const rate = Number(row.rate)
+    if (Number.isFinite(rate) && rate > 0) table.rates[row.currency] = { rate, date: row.rate_date, source: 'ЦБ РФ' }
+  }
+  return table
+}
 
 function parseCbrXml(xml: string, date: string): RateTable {
   const rates: Record<string, number> = {}
@@ -57,14 +99,27 @@ async function fetchFreshRates(): Promise<RateTable> {
  */
 export async function getCbrRateTable(): Promise<RateTable> {
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) return cache.table
-  try {
-    const table = await fetchFreshRates()
-    cache = { table, fetchedAt: Date.now() }
-    return table
-  } catch (error) {
-    logError('cbr-rates', error)
-    return cache ? cache.table : { base: 'RUB', rates: {} }
+  if (Date.now() - lastFailureAt >= FAILURE_BACKOFF_MS) {
+    try {
+      const table = await fetchFreshRates()
+      cache = { table, fetchedAt: Date.now() }
+      await saveRates(table).catch((error) => logError('cbr-rates.save', error))
+      return table
+    } catch (error) {
+      lastFailureAt = Date.now()
+      logError('cbr-rates', error)
+    }
   }
+  if (cache) return cache.table
+  // Процесс только что перезапустился, а ЦБ недоступен: последний сохранённый курс лучше,
+  // чем «оценка недоступна» по всем валютным позициям. Дата курса остаётся в таблице.
+  const stored = await loadStoredRates().catch((error) => { logError('cbr-rates.load', error); return null })
+  if (stored) {
+    // Кэш из базы живёт только до конца паузы после сбоя — затем снова спрашиваем ЦБ.
+    cache = { table: stored, fetchedAt: Date.now() - CACHE_TTL_MS + FAILURE_BACKOFF_MS }
+    return stored
+  }
+  return { base: 'RUB', rates: {} }
 }
 
 // ---------------------------------------------------------------------------

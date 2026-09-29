@@ -15,6 +15,7 @@ import {
   EmailRateLimiter, createPasswordResetToken, findResetToken, invalidateUserResetTokens, validateResetToken,
 } from './password-reset.ts'
 import { sendPasswordResetEmail } from './mailer.ts'
+import { configureRateStore } from './market-data.ts'
 import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
   aggregateByGroup, aggregateByKey, calculateReturns, convertCurrency, evaluatePosition, sumInBase,
@@ -68,6 +69,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) {
 }
 const databaseUrl = process.env.DATABASE_URL || 'postgresql://portfel:portfel@localhost:5432/portfel'
 const db = new Pool({ connectionString: databaseUrl, max: 10 })
+configureRateStore(db)
 const users = new Map<string, User>()
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000
 const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
@@ -86,7 +88,9 @@ const forgotPasswordEmailLimiter = new EmailRateLimiter()
 app.use(helmet())
 app.use(express.json())
 app.use('/api', apiLimiter)
-app.use('/uploads', express.static(resolve(process.cwd(), 'server/uploads')))
+// Скриншоты банковских приложений раньше раздавались статикой по /uploads без авторизации.
+// Клиенту они не нужны (распознанный результат приходит через /api/ocr/documents/:id),
+// а после распознавания воркер файл удаляет — поэтому публичной раздачи нет вовсе (§28).
 
 // Portfolio Engine (§10) — единственное место расчётов. Сервер только раскладывает
 // позиции в вход движка и отдаёт его результат наружу, ничего не считая сам.
