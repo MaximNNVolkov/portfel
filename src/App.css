@@ -74,3 +74,5 @@
      прокручивается само, а не растягивает страницу, и остаётся на месте при прокрутке. */
   .sidebar { position: sticky; top: 0; height: calc(100vh / var(--ui-scale)); min-height: 0; overflow-y: auto; }
 }
+/* Два коротких поля в строку (количество и цена операции). */
+.modal-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

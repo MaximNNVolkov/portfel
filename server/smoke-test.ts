@@ -170,6 +170,51 @@ async function run() {
       assert.equal((await api(`/api/positions/${derived.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Покупка и продажа бумаг меняют количество, а не только вложенную сумму: иначе
+    // докупка у позиции «количество × цена» выглядела убытком на всю сумму покупки.
+    await test('покупка и продажа меняют количество бумаг', async () => {
+      const buy = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'BUY', amount: 15000, quantity: 5, price: 3000, date: '2026-02-01', positionId: sharePositionId },
+      })
+      assert.equal(buy.status, 201)
+      assert.equal(buy.json.quantity, 5)
+      let share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 15)
+      assert.equal(share.json.invested, 43000)
+      assert.equal(share.json.valuation.value, 46500)
+
+      // Без количества — выводится из текущей цены позиции и сохраняется в операции.
+      const implicit = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'BUY', amount: 6200, date: '2026-02-02', positionId: sharePositionId },
+      })
+      assert.equal(implicit.status, 201)
+      assert.equal(implicit.json.quantity, 2)
+      share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 17)
+
+      const oversell = await api('/api/transactions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'SELL', amount: 3100, quantity: 18, date: '2026-02-03', positionId: sharePositionId },
+      })
+      assert.equal(oversell.status, 400)
+
+      // Правка названия не меняет количество; удаление возвращает позицию как было.
+      const renamed = await api(`/api/transactions/${buy.json.id}`, { method: 'PATCH', token: tokenA, body: { title: 'Докупка', amount: 15000 } })
+      assert.equal(renamed.status, 200)
+      assert.equal(renamed.json.quantity, 5)
+      share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 17)
+      for (const id of [buy.json.id, implicit.json.id]) {
+        assert.equal((await api(`/api/transactions/${id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      }
+      share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
+      assert.equal(share.json.quantity, 10)
+      assert.equal(share.json.invested, 28000)
+      assert.equal(share.json.valuation.value, 31000)
+    })
+
     // BUG-23 (FIX_PLAN 3.7): ручную выплату можно привязать к инструменту и отвязать.
     await test('ручная выплата привязывается к инструменту', async () => {
       const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
