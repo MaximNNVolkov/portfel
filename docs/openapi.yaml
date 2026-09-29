@@ -267,7 +267,7 @@ paths:
     post:
       tags: [positions]
       summary: Добавить инструмент вручную (§17)
-      requestBody: { $ref: '#/components/requestBodies/PositionInput' }
+      requestBody: { $ref: '#/components/requestBodies/PositionCreate' }
       responses:
         '201': { $ref: '#/components/responses/Position' }
         '400': { $ref: '#/components/responses/Error' }
@@ -286,7 +286,7 @@ paths:
     patch:
       tags: [positions]
       summary: Изменить позицию; передаются только изменённые поля
-      requestBody: { $ref: '#/components/requestBodies/PositionInput' }
+      requestBody: { $ref: '#/components/requestBodies/PositionUpdate' }
       responses:
         '200': { $ref: '#/components/responses/Position' }
         '400': { $ref: '#/components/responses/Error' }
@@ -488,7 +488,7 @@ paths:
     post:
       tags: [payouts]
       summary: Добавить выплату вручную
-      requestBody: { $ref: '#/components/requestBodies/PayoutInput' }
+      requestBody: { $ref: '#/components/requestBodies/PayoutCreate' }
       responses:
         '201': { $ref: '#/components/responses/Payout' }
         '400': { $ref: '#/components/responses/Error' }
@@ -500,7 +500,7 @@ paths:
     patch:
       tags: [payouts]
       summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
-      requestBody: { $ref: '#/components/requestBodies/PayoutInput' }
+      requestBody: { $ref: '#/components/requestBodies/PayoutUpdate' }
       responses:
         '200': { $ref: '#/components/responses/Payout' }
         '400': { $ref: '#/components/responses/Error' }
@@ -531,7 +531,7 @@ paths:
     post:
       tags: [transactions]
       summary: Добавить операцию; меняет позицию или денежный остаток
-      requestBody: { $ref: '#/components/requestBodies/TransactionInput' }
+      requestBody: { $ref: '#/components/requestBodies/TransactionCreate' }
       responses:
         '201': { $ref: '#/components/responses/Transaction' }
         '400': { $ref: '#/components/responses/Error' }
@@ -543,7 +543,7 @@ paths:
     patch:
       tags: [transactions]
       summary: Изменить операцию
-      requestBody: { $ref: '#/components/requestBodies/TransactionInput' }
+      requestBody: { $ref: '#/components/requestBodies/TransactionUpdate' }
       responses:
         '200': { $ref: '#/components/responses/Transaction' }
         '400': { $ref: '#/components/responses/Error' }
@@ -660,7 +660,60 @@ components:
 
     TransactionType:
       type: string
-      enum: [BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION]
+      enum: [BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION, OTHER]
+
+    PositionInput:
+      type: object
+      description: При создании обязательны type, name, amount, date (§17)
+      properties:
+        type: { type: string, enum: [Вклады, Облигации, Акции, Фонды, Деньги, Прочее] }
+        name: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        invested: { type: number, description: 'Должно совпадать с quantity × averagePrice, если заданы оба' }
+        institution: { type: string }
+        currency: { type: string, enum: [RUB, USD, CNY] }
+        ticker: { type: string }
+        isin: { type: string }
+        issuer: { type: string }
+        quantity: { type: number }
+        averagePrice: { type: number }
+        currentPrice: { type: number }
+        accruedInterest: { type: number }
+        nominal: { type: number }
+        couponRate: { type: number }
+        couponDate: { type: string, format: date }
+        maturityDate: { type: string, format: date }
+        ofertaDate: { type: string, format: date }
+        rate: { type: number }
+        effectiveRate: { type: number }
+        termEndDate: { type: string, format: date }
+        capitalization: { type: boolean }
+        replenishable: { type: boolean }
+        partialWithdrawal: { type: boolean }
+        autoProlongation: { type: boolean }
+      additionalProperties: true
+    PayoutInput:
+      type: object
+      description: При создании обязательны title, amount, date
+      properties:
+        title: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
+        status: { type: string, enum: [expected, received] }
+        positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
+    TransactionInput:
+      type: object
+      description: При создании обязательны type, amount, date; для BUY и SELL — positionId
+      properties:
+        type: { $ref: '#/components/schemas/TransactionType' }
+        amount: { type: number, exclusiveMinimum: 0 }
+        date: { type: string, format: date }
+        title: { type: string }
+        positionId: { type: string }
+        commission: { type: number }
+        tax: { type: number }
 
     AttentionItem:
       type: object
@@ -719,70 +772,45 @@ components:
             unconvertedCurrencies: { type: array, items: { type: string }, description: 'Валюты без курса ЦБ, не вошедшие в суммы выплат и комиссий' }
 
   requestBodies:
-    PositionInput:
+    PositionCreate:
       required: true
       content:
         application/json:
           schema:
-            type: object
-            description: При создании обязательны type, name, amount, date (§17)
-            properties:
-              type: { type: string, enum: [Вклады, Облигации, Акции, Фонды, Деньги, Прочее] }
-              name: { type: string }
-              amount: { type: number, exclusiveMinimum: 0 }
-              date: { type: string, format: date }
-              invested: { type: number, description: 'Должно совпадать с quantity × averagePrice, если заданы оба' }
-              institution: { type: string }
-              currency: { type: string, enum: [RUB, USD, CNY] }
-              ticker: { type: string }
-              isin: { type: string }
-              issuer: { type: string }
-              quantity: { type: number }
-              averagePrice: { type: number }
-              currentPrice: { type: number }
-              accruedInterest: { type: number }
-              nominal: { type: number }
-              couponRate: { type: number }
-              couponDate: { type: string, format: date }
-              maturityDate: { type: string, format: date }
-              ofertaDate: { type: string, format: date }
-              rate: { type: number }
-              effectiveRate: { type: number }
-              termEndDate: { type: string, format: date }
-              capitalization: { type: boolean }
-              replenishable: { type: boolean }
-              partialWithdrawal: { type: boolean }
-              autoProlongation: { type: boolean }
-            additionalProperties: true
-    PayoutInput:
+            allOf:
+              - $ref: '#/components/schemas/PositionInput'
+              - required: [name, amount, date]
+    PositionUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PositionInput' }
+    PayoutCreate:
       required: true
       content:
         application/json:
           schema:
-            type: object
-            description: При создании обязательны title, amount, date
-            properties:
-              title: { type: string }
-              amount: { type: number, exclusiveMinimum: 0 }
-              date: { type: string, format: date }
-              type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
-              status: { type: string, enum: [expected, received] }
-              positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
-    TransactionInput:
+            allOf:
+              - $ref: '#/components/schemas/PayoutInput'
+              - required: [title, amount, date]
+    PayoutUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PayoutInput' }
+    TransactionCreate:
       required: true
       content:
         application/json:
           schema:
-            type: object
-            description: При создании обязательны type, amount, date; для BUY и SELL — positionId
-            properties:
-              type: { $ref: '#/components/schemas/TransactionType' }
-              amount: { type: number, exclusiveMinimum: 0 }
-              date: { type: string, format: date }
-              title: { type: string }
-              positionId: { type: string }
-              commission: { type: number }
-              tax: { type: number }
+            allOf:
+              - $ref: '#/components/schemas/TransactionInput'
+              - required: [type, amount, date]
+    TransactionUpdate:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TransactionInput' }
 
   responses:
     Error:
