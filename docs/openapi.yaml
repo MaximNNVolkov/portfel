@@ -9,8 +9,10 @@ info:
     портфеля (`baseCurrency`, поля с суффиксом `Base`). Отсутствие оценки передаётся
     как `null`, никогда не как 0 (§7.3).
 
-    Авторизация — заголовок `Authorization: Bearer <token>`; токен выдают
-    `/api/auth/register` и `/api/auth/login`. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
+    Авторизация — заголовок `Authorization: Bearer <token>` или httpOnly-cookie
+    `portfel_session` (её ставят `/api/auth/register` и `/api/auth/login`, ими же выдаётся
+    токен). Изменяющий запрос (не GET/HEAD/OPTIONS) без Bearer должен нести заголовок
+    `X-Requested-With: portfel`, иначе 403 — защита от CSRF. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
 
     Пагинация списков — `limit` (1–500) и `offset`. Без них возвращается весь список.
 
@@ -19,6 +21,7 @@ servers:
   - url: /
 security:
   - bearer: []
+  - cookie: []
 
 tags:
   - name: auth
@@ -562,6 +565,10 @@ components:
     bearer:
       type: http
       scheme: bearer
+    cookie:
+      type: apiKey
+      in: cookie
+      name: portfel_session
 
   parameters:
     id:
