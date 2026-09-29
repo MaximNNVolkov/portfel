@@ -17,7 +17,7 @@
 
 import type { AssetGroup } from './portfolio-engine.ts'
 
-export type RecommendationRuleType = 'concentration' | 'maturity' | 'drawdown' | 'payout_gap'
+export type RecommendationRuleType = 'concentration' | 'maturity' | 'drawdown' | 'payout_gap' | 'rebalance'
 
 export type Recommendation = {
   ruleType: RecommendationRuleType

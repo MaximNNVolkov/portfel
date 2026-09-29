@@ -28,6 +28,7 @@ import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
   positionToWire, positiveNumber, reconcileInvested, requiredText, MANUAL_PROVIDER, type PositionBody,
 } from './positions.ts'
+import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
@@ -343,6 +344,7 @@ app.get('/api/settings', async (request, response) => {
     portfolioName: portfolio?.name ?? 'Основной портфель',
     baseCurrency: portfolio?.baseCurrency ?? DEFAULT_BASE_CURRENCY,
     availableCurrencies: SUPPORTED_BASE_CURRENCIES,
+    targetAllocation: portfolio?.targetAllocation ?? {},
   })
 })
 app.patch('/api/settings', async (request, response) => {
@@ -352,9 +354,15 @@ app.patch('/api/settings', async (request, response) => {
   if (baseCurrencyRaw && !SUPPORTED_BASE_CURRENCIES.includes(baseCurrencyRaw)) {
     return response.status(400).json({ error: 'Неподдерживаемая базовая валюта' })
   }
+  let targetAllocation: Record<string, number> | undefined
+  try {
+    if (request.body?.targetAllocation !== undefined) targetAllocation = parseTargetAllocation(request.body.targetAllocation)
+  } catch (error) {
+    return response.status(400).json({ error: error instanceof Error ? error.message : 'Неверная целевая структура', field: 'targetAllocation' })
+  }
   const portfolio = await ensurePortfolio(db, userId, randomUUID())
-  const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw })
-  response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES })
+  const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw, targetAllocation })
+  response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES, targetAllocation: updated.targetAllocation })
 })
 
 // §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе
@@ -657,6 +665,7 @@ app.get('/api/portfolio/summary', async (request, response) => {
     commissions: commissions.total,
     taxes: taxes.total,
   })
+  const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
   response.json({
     total: aggregate.value,
     invested: aggregate.invested,
@@ -675,6 +684,8 @@ app.get('/api/portfolio/summary', async (request, response) => {
     commissions: returns.commissions,
     taxes: returns.taxes,
     groups: aggregate.groups,
+    // Целевая структура: по категории — цель, текущая доля и сумма до цели. [] — цель не задана.
+    rebalance: buildRebalance(aggregate.groups, aggregate.value, targets),
     // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
     valuation: {
       incomplete: aggregate.valuationIncomplete,
@@ -760,7 +771,14 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
     const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
     return amount === null ? [] : [{ date: payout.date, amount, status: payout.status, type: payout.type }]
   })
-  return { recommendations: buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots), valuationById }
+  // Целевая структура задана — отклонение от неё заменяет общее правило «группа занимает
+  // больше 25%»: 45% во вкладах при цели 45% — не проблема.
+  const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
+  const hasTargets = Object.keys(targets).length > 0
+  const rebalance = rebalanceRecommendations(buildRebalance(aggregate.groups, aggregate.value, targets), context.baseCurrency)
+  const recommendations = buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots)
+    .filter((item) => !(hasTargets && item.ruleType === 'concentration' && item.payload.kind === 'group'))
+  return { recommendations: [...rebalance, ...recommendations], valuationById }
 }
 app.get('/api/recommendations', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return

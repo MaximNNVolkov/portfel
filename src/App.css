@@ -76,3 +76,11 @@
 }
 /* Два коротких поля в строку (количество и цена операции). */
 .modal-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* Целевая структура в настройках: поля долей по категориям. */
+.target-card { margin-top: 18px; }
+.target-card h2 { margin: 0 0 6px; color: var(--ink); font: 700 16px 'Manrope', sans-serif; }
+.target-card p { margin: 0; font-size: 12px; }
+.target-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.target-card .form-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.target-hint { margin: 10px 0 0; font-size: 12px; }
+@media (max-width: 680px) { .target-grid { grid-template-columns: 1fr 1fr; } }
