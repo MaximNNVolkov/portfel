@@ -962,20 +962,20 @@ export async function sumPayouts(db: Db, userId: string, today: string): Promise
 // ---------------------------------------------------------------------------
 
 export async function upsertSnapshot(
-  db: Db, portfolioId: string, id: string, date: string, value: number, invested: number | null,
+  db: Db, portfolioId: string, id: string, date: string, value: number, invested: number | null, result: number | null = null,
 ): Promise<void> {
   await db.query(
-    `INSERT INTO portfolio.portfolio_snapshots (id, portfolio_id, snapshot_date, total_value, invested)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO portfolio.portfolio_snapshots (id, portfolio_id, snapshot_date, total_value, invested, financial_result)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (portfolio_id, snapshot_date)
-     DO UPDATE SET total_value = EXCLUDED.total_value, invested = EXCLUDED.invested`,
-    [id, portfolioId, date, value, invested],
+     DO UPDATE SET total_value = EXCLUDED.total_value, invested = EXCLUDED.invested, financial_result = EXCLUDED.financial_result`,
+    [id, portfolioId, date, value, invested, result],
   )
 }
 
-export async function listSnapshots(db: Db, userId: string): Promise<Array<{ date: string; value: number; invested: number | null }>> {
+export async function listSnapshots(db: Db, userId: string): Promise<Array<{ date: string; value: number; invested: number | null; result: number | null }>> {
   const result = await db.query(
-    `SELECT s.snapshot_date, s.total_value, s.invested
+    `SELECT s.snapshot_date, s.total_value, s.invested, s.financial_result
        FROM portfolio.portfolio_snapshots s
        JOIN portfolio.portfolios f ON f.id = s.portfolio_id
       WHERE f.user_id = $1 ORDER BY s.snapshot_date ASC`,
@@ -985,6 +985,7 @@ export async function listSnapshots(db: Db, userId: string): Promise<Array<{ dat
     date: row.snapshot_date,
     value: Number(row.total_value),
     invested: row.invested === null ? null : Number(row.invested),
+    result: row.financial_result === null || row.financial_result === undefined ? null : Number(row.financial_result),
   }))
 }
 

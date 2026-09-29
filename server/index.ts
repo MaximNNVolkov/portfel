@@ -18,7 +18,7 @@ import { sendPasswordResetEmail } from './mailer.ts'
 import { configureRateStore } from './market-data.ts'
 import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
-  aggregateByGroup, aggregateByKey, calculateReturns, convertCurrency, evaluatePosition, sumInBase,
+  aggregateByGroup, aggregateByKey, convertCurrency, evaluatePosition, sumInBase,
   type Breakdown, type EngineContext, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
@@ -32,7 +32,7 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate, portfolioResult,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
@@ -45,7 +45,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumCashBalances, sumPayouts, sumRealizedSales, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  sumCashBalances, updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -58,7 +58,7 @@ import {
 // breaking every frontend helper that expects a plain date string).
 types.setTypeParser(1082, (value) => value)
 
-type Snapshot = { date: string; value: number; invested: number | null }
+type Snapshot = { date: string; value: number; invested: number | null; result: number | null }
 type User = { id: string; email: string; passwordHash: string; salt: string }
 
 const app = express()
@@ -684,20 +684,13 @@ app.get('/api/ocr/documents/:id', async (request, response) => {
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
-  const [payouts, costs, sales, baseCurrency] = await Promise.all([sumPayouts(db, userId, localToday()), sumTransactionCosts(db, userId), sumRealizedSales(db, userId), resolveBaseCurrency(db, userId)])
+  const baseCurrency = await resolveBaseCurrency(db, userId)
   const context = await engineContext(baseCurrency)
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
-  // Реализованный результат (§10.2): закрытые вклады и погашенные бумаги плюс продажи.
-  const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
-    + sumInBase(sales, context).total
-  // Выплаты, комиссии и налоги бывают в разных валютах (дивиденды в USD, купоны в CNY) —
-  // складываются только после пересчёта в базовую валюту (§13).
+  const { payouts, received, commissions, taxes, returns } = await portfolioResult(db, userId, positions, aggregate, context)
   const expected = sumInBase(payouts.expected, context)
   const expectedPrincipal = sumInBase(payouts.expectedPrincipal, context)
   const overdue = sumInBase(payouts.overdue, context)
-  const received = sumInBase(payouts.received, context)
-  const commissions = sumInBase(costs.commissions, context)
-  const taxes = sumInBase(costs.taxes, context)
   const unconverted = [...new Set([expected, expectedPrincipal, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
   // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
   // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
@@ -705,16 +698,6 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const cash = cashValuations.some((item) => item.valueBase === null)
     ? null
     : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
-  // База доходности — позиции с известным P&L: приблизительная оценка без котировки
-  // не должна выдавать себя за «0% изменения» (§7.3, BUG-09).
-  const returns = calculateReturns({
-    currentValue: aggregate.pnlValue,
-    invested: aggregate.pnlInvested,
-    // Полученный доход плюс реализованный результат закрытых вкладов и погашенных бумаг (§10.2).
-    payoutsReceived: received.total + realized,
-    commissions: commissions.total,
-    taxes: taxes.total,
-  })
   const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
   response.json({
     total: aggregate.value,
@@ -764,21 +747,35 @@ app.get('/api/portfolio/history', async (request, response) => {
 // (пополнение, снятие, проценты) с ключом повторной загрузки, так что тот же файл
 // второй раз ничего не задваивает.
 async function statementInputs(client: Db, userId: string, body: unknown) {
-  const { text, mapping } = (body ?? {}) as { text?: unknown; mapping?: unknown }
+  const { text, mapping, exclude, only } = (body ?? {}) as { text?: unknown; mapping?: unknown; exclude?: unknown; only?: unknown }
   if (typeof text !== 'string' || !text.trim()) throw new Error('Файл выписки пустой')
   const parsed = parseCsv(text)
   if (!parsed.headers.length || !parsed.records.length) throw new Error('В файле нет строк с операциями')
   const chosen = parseMapping(mapping, parsed.headers)
-  const rows = statementRows(parsed, chosen)
+  // Выписка по карте — это ещё и бытовые траты (критик К22): их можно снять галочками или
+  // загрузить только поступления и проценты.
+  const excluded = new Set(Array.isArray(exclude) ? exclude.map(Number).filter(Number.isInteger) : [])
+  const incomeOnly = only === 'income'
   const known = new Set((await listTransactions(client, userId)).map((item) => item.externalId).filter(Boolean))
-  const withStatus = rows.map((row) => ({ ...row, duplicate: Boolean(row.externalId && known.has(row.externalId)) }))
-  return { headers: parsed.headers, mapping: chosen, rows: withStatus }
+  const rows = statementRows(parsed, chosen).map((row) => ({
+    ...row,
+    duplicate: Boolean(row.externalId && known.has(row.externalId)),
+    skipped: excluded.has(row.line) || (incomeOnly && row.type === 'WITHDRAW'),
+  }))
+  return { headers: parsed.headers, mapping: chosen, rows }
 }
-const importCounts = (rows: (StatementRow & { duplicate: boolean })[]) => ({
+type ImportRow = StatementRow & { duplicate: boolean; skipped: boolean }
+const importable = (row: ImportRow) => !row.error && !row.duplicate && !row.skipped
+const importCounts = (rows: ImportRow[]) => ({
   found: rows.length,
   errors: rows.filter((row) => row.error).length,
   duplicates: rows.filter((row) => !row.error && row.duplicate).length,
-  toImport: rows.filter((row) => !row.error && !row.duplicate).length,
+  skipped: rows.filter((row) => !row.error && !row.duplicate && row.skipped).length,
+  toImport: rows.filter(importable).length,
+  // Сколько придёт и уйдёт по загружаемым строкам, в рублях — чтобы было видно, что выписка
+  // по карте вот-вот обнулит свободные деньги.
+  incomeRub: rows.filter((row) => importable(row) && row.type !== 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
+  expenseRub: rows.filter((row) => importable(row) && row.type === 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
 })
 app.post('/api/imports/statement/preview', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -791,10 +788,17 @@ app.post('/api/imports/statement', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const counts = await withTransaction(db, async (client) => {
+      // Два одновременных импорта одного файла не должны оба пройти проверку дубликатов
+      // (критик К30): импорт одного пользователя выполняется по очереди.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`statement-import:${userId}`])
       const { rows } = await statementInputs(client, userId, request.body)
-      const accountId = await defaultAccountId(client, userId)
+      // Банк из выписки — отдельный счёт, чтобы «Где хранится» показывал, откуда деньги.
+      const institution = optionalText((request.body as { institution?: unknown } | undefined)?.institution)
+      const accountId = institution
+        ? (await ensureAccount(client, (await ensurePortfolio(client, userId, randomUUID())).id, randomUUID(), { type: 'bank', provider: institution, currency: 'RUB' })).id
+        : await defaultAccountId(client, userId)
       for (const row of rows) {
-        if (row.error || row.duplicate || !row.type || !row.date || row.amount === undefined) continue
+        if (!importable(row) || !row.type || !row.date || row.amount === undefined) continue
         const transaction: Transaction = {
           id: randomUUID(), accountId, type: row.type, date: row.date, amount: row.amount, currency: row.currency,
           commission: 0, tax: 0, source: 'manual', externalId: row.externalId,
@@ -806,7 +810,7 @@ app.post('/api/imports/statement', async (request, response) => {
       await recordSnapshot(client, userId)
       return importCounts(rows)
     })
-    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors })
+    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors, skipped: counts.skipped })
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось загрузить выписку' }) }
 })
 
@@ -823,13 +827,19 @@ async function taxInputs(request: Request, userId: string) {
     (transaction.instrumentId && names.get(transaction.instrumentId))
     || (transaction.description !== transaction.type ? transaction.description : undefined)
     || transaction.institution || '—'
-  return { year, transactions, toRub, nameOf }
+  // Себестоимость погашенной облигации — вложенное в позицию (§10.2): погашение выше цены
+  // покупки облагается как доход по бумагам. Возврат тела вклада доходом не является.
+  const bondInvested = new Map(positions.filter((position) => position.instrument.groupType === 'bond')
+    .map((position) => [`${position.accountId}|${position.instrumentId}`, position.invested]))
+  const redemptionCost = (transaction: Transaction) =>
+    transaction.instrumentId ? bondInvested.get(`${transaction.accountId}|${transaction.instrumentId}`) : undefined
+  return { year, transactions, toRub, nameOf, redemptionCost }
 }
 app.get('/api/tax/estimate', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const { year, transactions, toRub } = await taxInputs(request, userId)
-    response.json(estimateTax(transactions, year, toRub))
+    const { year, transactions, toRub, redemptionCost } = await taxInputs(request, userId)
+    response.json(estimateTax(transactions, year, toRub, redemptionCost, localDate()))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Некорректный запрос' }) }
 })
 app.get('/api/tax/export', async (request, response) => {

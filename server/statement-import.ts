@@ -16,6 +16,8 @@ export type StatementMapping = {
   expense: number | null
   description: number | null
   currency: number | null
+  /** Статус операции (у Т-Банка — OK/FAILED): непроведённые не загружаются. */
+  status: number | null
 }
 export type StatementRowType = 'DEPOSIT' | 'WITHDRAW' | 'INTEREST'
 export type StatementRow = {
@@ -75,7 +77,11 @@ export function parseCsv(text: string): ParsedStatement {
   }
   if (cell !== '' || row.length) { row.push(cell); rows.push(row) }
   const nonEmpty = rows.filter((item) => item.some((value) => value.trim() !== ''))
-  const [headers = [], ...records] = nonEmpty
+  // Над таблицей у многих банков шапка («Выписка по счёту…», «Период…», критик К26):
+  // заголовок — первая строка минимум из двух колонок, где одна из них про дату.
+  const headerIndex = nonEmpty.findIndex((item) =>
+    item.filter((value) => value.trim()).length >= 2 && item.some((value) => /дата|date/i.test(value)))
+  const [headers = [], ...records] = headerIndex > 0 ? nonEmpty.slice(headerIndex) : nonEmpty
   return { headers: headers.map((value) => value.trim()), records }
 }
 
@@ -95,8 +101,11 @@ export function guessMapping(headers: string[]): StatementMapping {
   const expense = take(findColumn(headers, [/расход/i, /списан/i, /^дебет/i, /debit/i], used))
   const amount = income !== null && expense !== null
     ? null
-    : take(findColumn(headers, [/сумма\s*операц/i, /сумма\s*в\s*валюте\s*сч/i, /сумма\s*платеж/i, /^сумма$/i, /сумма/i, /amount/i], used))
-  const currency = take(findColumn(headers, [/валюта\s*операц/i, /валюта/i, /currency/i], used))
+    // Сумма в валюте счёта важнее суммы в валюте покупки (критик К24): покупка за 50 USD
+    // по рублёвой карте списала рубли, а не доллары.
+    : take(findColumn(headers, [/сумма\s*платеж/i, /сумма\s*в\s*валюте\s*сч/i, /сумма\s*операц/i, /^сумма$/i, /сумма/i, /amount/i], used))
+  const currency = take(findColumn(headers, [/валюта\s*платеж/i, /валюта\s*сч/i, /валюта\s*операц/i, /валюта/i, /currency/i], used))
+  const status = take(findColumn(headers, [/статус/i, /status/i], used))
   const description = take(findColumn(headers, [/описани/i, /назначени/i, /комментар/i, /категори/i, /контрагент/i, /description/i], used))
   return {
     date,
@@ -105,6 +114,7 @@ export function guessMapping(headers: string[]): StatementMapping {
     expense: amount === null ? expense : null,
     description,
     currency,
+    status,
   }
 }
 
@@ -145,7 +155,12 @@ export function parseStatementAmount(value: string): number | null {
   return negative ? -number : number
 }
 
-const INTEREST_PATTERN = /процент|капитализац|начислен[иы][ея]?\s+%|выплата\s+%|interest/i
+// Доход — только начисление процентов на остаток или вклад. «Процент» в описании бывает
+// и у кредита («возврат переплаты процентов по кредиту», критик К27) — это не доход.
+const INTEREST_PATTERN = /(выплат\S*|начислен\S*|капитализац\S*)\s+(процент|%)|процент\S*\s+(на\s+остаток|по\s+(вклад|депозит|сч[её]т|накопит))|капитализац|interest/i
+const NOT_INTEREST_PATTERN = /кредит|займ|ипотек|переплат|возврат|штраф|пени/i
+// Непроведённые операции: отказ, отмена, холд (у Альфы — референс HOLD, критик К23, К25).
+const NOT_POSTED_PATTERN = /^(failed|declined|cancel+ed|rejected|hold|отклон\S*|отмен\S*|не\s+проведен\S*|ошибка|в\s+обработке)$/i
 
 function cellAt(record: string[], index: number | null): string {
   return index === null ? '' : (record[index] ?? '').trim()
@@ -160,6 +175,9 @@ export function statementRows(parsed: ParsedStatement, mapping: StatementMapping
     const currency = currencyText ? CURRENCY_ALIASES[currencyText] ?? currencyText : 'RUB'
     const row: StatementRow = { line, currency, description }
     if (mapping.date === null) return { ...row, error: 'Не выбрана колонка с датой' }
+    if (NOT_POSTED_PATTERN.test(cellAt(record, mapping.status)) || record.some((cell) => /^hold$/i.test(cell.trim()))) {
+      return { ...row, error: 'Операция не проведена банком (отказ или холд)' }
+    }
     const date = parseStatementDate(cellAt(record, mapping.date))
     if (!date) return { ...row, error: `Не распознана дата «${cellAt(record, mapping.date)}»` }
 
@@ -176,10 +194,13 @@ export function statementRows(parsed: ParsedStatement, mapping: StatementMapping
 
     if (signed === 0) return { ...row, date, error: 'Нулевая сумма' }
     if (!SUPPORTED_CURRENCIES.includes(currency)) return { ...row, date, amount: Math.abs(signed), error: `Валюта «${currency}» не поддерживается` }
-    const type: StatementRowType = signed < 0 ? 'WITHDRAW' : INTEREST_PATTERN.test(description) ? 'INTEREST' : 'DEPOSIT'
-    // Ключ повторной загрузки: та же выписка второй раз не задваивает деньги, а две
-    // одинаковые строки в одном файле (две покупки кофе за день) остаются двумя.
-    const base = `${date}|${signed}|${currency}|${description.toLowerCase()}`
+    const type: StatementRowType = signed < 0
+      ? 'WITHDRAW'
+      : INTEREST_PATTERN.test(description) && !NOT_INTEREST_PATTERN.test(description) ? 'INTEREST' : 'DEPOSIT'
+    // Ключ повторной загрузки — сама строка файла, а не выбранные колонки: смена колонки
+    // «Описание» не делает ту же выписку новой (критик К29). Две одинаковые строки в одном
+    // файле (две покупки кофе за день) остаются двумя.
+    const base = record.map((cell) => cell.trim()).join('\u0001')
     const occurrence = (seen.get(base) ?? 0) + 1
     seen.set(base, occurrence)
     const externalId = `import:${createHash('sha256').update(`${base}|${occurrence}`).digest('hex').slice(0, 32)}`
@@ -201,6 +222,6 @@ export function parseMapping(raw: unknown, headers: string[]): StatementMapping 
   }
   return {
     date: column('date'), amount: column('amount'), income: column('income'), expense: column('expense'),
-    description: column('description'), currency: column('currency'),
+    description: column('description'), currency: column('currency'), status: column('status'),
   }
 }

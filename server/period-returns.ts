@@ -2,12 +2,14 @@
 // портфеля (§21). Чистый модуль, как portfolio-engine.ts: без БД и Express.
 //
 // Упрощение MVP (§10: «допустима упрощённая формула простой доходности без учёта таймингов
-// пополнений»): результат периода — изменение нереализованного результата (стоимость минус
-// вложено) между снимками, поэтому покупки и пополнения не выдаются за рост; процент —
-// к стоимости на начало периода. Выплаты за период в эту цифру не входят — это сказано
-// в подписи на экране.
+// пополнений»): результат периода — изменение финансового результата портфеля (§10.6:
+// изменение стоимости + выплаты + реализованное − комиссии − налоги) между снимками.
+// Пополнения и покупки его не меняют, продажа с прибылью не превращается в «убыток»
+// (критик К38: раньше считалась разница «стоимость − вложено», а у свободных денег
+// «вложено» равно остатку). Процент — к стоимости на начало периода. Старые снимки без
+// сохранённого результата в расчёт не берутся.
 
-export type ReturnSnapshot = { date: string; value: number; invested: number | null }
+export type ReturnSnapshot = { date: string; value: number; invested: number | null; result: number | null }
 export type PeriodKey = 'day' | 'month' | 'year' | 'all'
 export type PeriodReturn = {
   period: PeriodKey
@@ -30,11 +32,11 @@ function shiftDays(date: string, days: number): string {
 
 export function periodReturns(snapshots: ReturnSnapshot[], today: string): PeriodReturn[] {
   const usable = snapshots
-    .filter((item) => item.invested !== null && Number.isFinite(item.value) && item.date <= today)
+    .filter((item) => item.result !== null && Number.isFinite(item.result) && Number.isFinite(item.value) && item.date <= today)
     .sort((left, right) => left.date.localeCompare(right.date))
   if (usable.length < 2) return []
   const last = usable[usable.length - 1]
-  const gain = (item: ReturnSnapshot) => item.value - (item.invested ?? 0)
+  const gain = (item: ReturnSnapshot) => item.result ?? 0
   const result: PeriodReturn[] = []
   for (const period of ['day', 'month', 'year', 'all'] as PeriodKey[]) {
     let base = usable[0]

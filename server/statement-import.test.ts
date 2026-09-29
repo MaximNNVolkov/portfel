@@ -40,7 +40,7 @@ test('даты и суммы в банковских форматах', () => {
 
 test('колонки угадываются по заголовкам выписки', () => {
   assert.deepEqual(guessMapping(['Дата операции', 'Дата платежа', 'Статус', 'Сумма операции', 'Валюта операции', 'Категория', 'Описание']), {
-    date: 0, amount: 3, income: null, expense: null, description: 6, currency: 4,
+    date: 0, amount: 3, income: null, expense: null, description: 6, currency: 4, status: 2,
   })
   const split = guessMapping(['Дата', 'Приход', 'Расход', 'Назначение платежа'])
   assert.equal(split.amount, null)
@@ -80,6 +80,42 @@ test('приход и расход в двух колонках', () => {
 test('выбор колонок пользователем проверяется', () => {
   assert.equal(parseMapping({ description: '' }, ['Дата', 'Сумма', 'Описание']).description, null)
   assert.throws(() => parseMapping({ date: 7 }, ['Дата', 'Сумма']), /Колонка/)
+})
+
+test('шапка над таблицей пропускается, заголовок — строка с датой (К26)', () => {
+  const parsed = parseCsv('Выписка по счёту 40817…\nПериод: 01.03.2026 — 31.03.2026\n\nДата;Сумма;Описание\n01.03.2026;100;x\n')
+  assert.deepEqual(parsed.headers, ['Дата', 'Сумма', 'Описание'])
+  assert.equal(parsed.records.length, 1)
+})
+
+test('Т-Банк: сумма платежа важнее суммы операции, FAILED не загружается (К23, К24)', () => {
+  const parsed = parseCsv([
+    'Дата операции;Дата платежа;Номер карты;Статус;Сумма операции;Валюта операции;Сумма платежа;Валюта платежа;Категория;Описание',
+    '05.03.2026 12:00:00;05.03.2026;*1234;OK;-50,00;USD;-4100,00;RUB;Сервисы;Подписка',
+    '06.03.2026 12:00:00;06.03.2026;*1234;FAILED;-99999,00;RUB;-99999,00;RUB;Переводы;Перевод',
+  ].join('\n'))
+  const rows = statementRows(parsed, guessMapping(parsed.headers))
+  assert.deepEqual([rows[0].type, rows[0].amount, rows[0].currency], ['WITHDRAW', 4100, 'RUB'])
+  assert.match(rows[1].error!, /не проведена/)
+})
+
+test('холд Альфы не загружается (К25)', () => {
+  const parsed = parseCsv('Дата;Референс;Описание;Сумма\n05.03.2026;HOLD;Покупка;-500\n06.03.2026;CRD_1;Покупка;-500\n')
+  const rows = statementRows(parsed, guessMapping(parsed.headers))
+  assert.ok(rows[0].error)
+  assert.equal(rows[1].type, 'WITHDRAW')
+})
+
+test('проценты по кредиту — не доход, проценты на остаток — доход (К27)', () => {
+  const parsed = parseCsv('Дата;Сумма;Описание\n01.03.2026;120;Возврат переплаты процентов по кредиту\n31.03.2026;340;Выплата процентов на остаток\n31.03.2026;50;Капитализация\n')
+  assert.deepEqual(statementRows(parsed, guessMapping(parsed.headers)).map((row) => row.type), ['DEPOSIT', 'INTEREST', 'INTEREST'])
+})
+
+test('смена колонки описания не меняет ключ повторной загрузки (К29)', () => {
+  const parsed = parseCsv('Дата;Сумма;Категория;Описание\n01.03.2026;100;Прочее;Перевод\n')
+  const mapping = guessMapping(parsed.headers)
+  const first = statementRows(parsed, mapping)[0].externalId
+  assert.equal(statementRows(parsed, { ...mapping, description: 2 })[0].externalId, first)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')

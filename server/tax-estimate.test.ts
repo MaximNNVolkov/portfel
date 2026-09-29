@@ -72,5 +72,40 @@ test('CSV: BOM, точка с запятой, запятая в дробях, э
   assert.match(csv, /2025-05-01;Купон;"ОФЗ; 26238";1234,5;RUB;1234,5;0;Вручную/)
 })
 
+test('убыток от продаж уменьшает купоны, но не дивиденды (К32)', () => {
+  const result = estimateTax([
+    tx({ type: 'SELL', amount: 100_000, costBasis: 200_000 }),
+    tx({ type: 'COUPON', amount: 60_000 }),
+    tx({ type: 'DIVIDEND', amount: 10_000 }),
+  ], 2025, rub)
+  assert.equal(result.lines.find((line) => line.key === 'sales')!.taxBase, -60_000)
+  assert.equal(result.taxBase, 10_000)
+  assert.equal(result.tax, 1_300)
+})
+
+test('погашение выше цены покупки — доход, продажа без себестоимости считается отдельно (К33, К35)', () => {
+  const result = estimateTax(
+    [tx({ type: 'REDEMPTION', amount: 10_000, instrumentId: 'b1' }), tx({ type: 'SELL', amount: 5_000 })],
+    2025, rub, (item) => (item.instrumentId === 'b1' ? 9_500 : undefined),
+  )
+  assert.equal(result.lines.find((line) => line.key === 'sales')!.taxBase, 500)
+  assert.equal(result.salesWithoutCost, 1)
+})
+
+test('проценты 2021–2022 не облагаются, валютные вклады 2024 — тоже (К34, К37)', () => {
+  const exempt = estimateTax([tx({ amount: 900_000, date: '2022-05-01' })], 2022, rub)
+  assert.equal(exempt.tax, 0)
+  assert.equal(exempt.keyRateAssumed, false)
+  const currency = estimateTax([tx({ amount: 5_000, currency: 'USD', date: '2024-05-01' })], 2024, rub)
+  assert.equal(currency.lines.find((line) => line.key === 'deposit_interest')!.income, 0)
+  assert.equal(estimateTax([], 2026, rub, undefined, '2026-09-29').keyRateAssumed, true)
+})
+
+test('уплаченный налог в CSV — в колонке налога, продажа без себестоимости — выручкой (К35, К36)', () => {
+  const rows = taxIncomeRows([tx({ type: 'TAX', amount: 700 }), tx({ type: 'SELL', amount: 5_000 })], 2025, rub, () => 'x')
+  assert.deepEqual([rows[0].amount, rows[0].withheld], [0, 700])
+  assert.match(rows[1].kind, /Выручка/)
+})
+
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
 process.exit(failed ? 1 : 0)
