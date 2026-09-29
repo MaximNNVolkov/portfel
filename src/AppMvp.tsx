@@ -828,6 +828,8 @@ function ListPagination({
   onPageSizeChange: (size: number) => void;
 }) {
   const bucket = pageSize <= 20 ? 20 : pageSize <= 50 ? 50 : 100;
+  // Короткий список целиком на экране — переключатель под ним только шумит.
+  if (!hasMore && bucket === 20) return null;
   return (
     <div className="list-pagination">
       {hasMore ? (
@@ -887,9 +889,11 @@ const attentionSeverityColors: Record<AttentionItem["severity"], string> = {
 };
 // Реинвестирование на MVP — переход к добавлению продукта с подставленной суммой и
 // банком, без отдельной сущности «деньги к вложению» (CLIENT_FLOW_PLAN §6, вопрос 1).
-function reinvestLink(amount: number | undefined, institution: string | undefined, from: string) {
+function reinvestLink(amount: number | undefined, institution: string | undefined, from: string, currency?: string) {
   const params = new URLSearchParams();
   if (amount) params.set("amount", String(Math.round(amount * 100) / 100));
+  // Сумма передаётся в валюте выплаты: купон в USD не должен лечь в форму как рубли.
+  if (currency && currency !== "RUB") params.set("currency", currency);
   if (institution && institution !== "Ручной ввод") params.set("institution", institution);
   params.set("reinvest", from);
   return `/products/new?${params.toString()}`;
@@ -897,7 +901,7 @@ function reinvestLink(amount: number | undefined, institution: string | undefine
 function attentionLink(item: AttentionItem): { to: string; label: string } | null {
   switch (item.action) {
     case "reinvest":
-      return { to: reinvestLink(item.amount, item.institution, item.title), label: "Реинвестировать" };
+      return { to: reinvestLink(item.amount, item.institution, item.title, item.currency), label: "Реинвестировать" };
     case "open_position":
       return item.positionId ? { to: `/products/${item.positionId}`, label: "Открыть" } : null;
     case "edit_position":
@@ -1648,7 +1652,7 @@ function AppMvp() {
               <span className="nav-icon">{icon}</span>
               {label}
               {isV2 && <span className="v2-badge">v2</span>}
-              {label === "Рекомендации" && (
+              {label === "Рекомендации" && attention?.some((item) => item.kind === "insight") && (
                 <span className="notification-dot" />
               )}
             </NavLink>
@@ -1692,7 +1696,17 @@ function AppMvp() {
               }
               to="/attention"
             >
-              ♧{urgentCount > 0 && <span className="attention-badge">{urgentCount}</span>}
+              <svg className="bell-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path
+                  d="M12 3a6 6 0 0 0-6 6v3.6l-1.6 2.9A1 1 0 0 0 5.3 17h13.4a1 1 0 0 0 .9-1.5L18 12.6V9a6 6 0 0 0-6-6Zm-2.3 15.5a2.4 2.4 0 0 0 4.6 0"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              {urgentCount > 0 && <span className="attention-badge">{urgentCount}</span>}
             </Link>
             <button
               className="mobile-menu"
@@ -2766,7 +2780,7 @@ function PaymentRow({
               </button>
             )}
             {payment.status === "received" && (
-              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title)}>
+              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title, payment.currency)}>
                 Реинвестировать
               </Link>
             )}
@@ -3020,7 +3034,7 @@ function PaymentsPage({
                 : undefined;
               const typeLabel = payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type];
               return (
-                <div className="list-row attention-row" key={payment.id}>
+                <div className="list-row attention-row attention-row-compact" key={payment.id}>
                   <Link className="product-row-summary" to={`/payments/${payment.id}/edit`}>
                     <span className="product-row-line1">
                       <span className="product-row-name">
@@ -4714,7 +4728,10 @@ function ProductFormPage({
   const [date, setDate] = useState(todayIsoDate);
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState(() => searchParams.get("institution") ?? "");
-  const [currency, setCurrency] = useState("RUB");
+  const [currency, setCurrency] = useState(() => {
+    const fromQuery = searchParams.get("currency");
+    return fromQuery && ["RUB", "USD", "CNY"].includes(fromQuery) ? fromQuery : "RUB";
+  });
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   const [file, setFile] = useState<File | null>(null);
   const [recognizing, setRecognizing] = useState(false);

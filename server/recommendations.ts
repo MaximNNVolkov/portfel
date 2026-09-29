@@ -83,10 +83,16 @@ export const DEFAULT_RULES: RecommendationRules = {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
-const MONTH_NAMES_GENITIVE = [
-  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+// «в сентябре», «в ноябре» — предложный падеж для фразы «ожидаются в …».
+const MONTH_NAMES_PREPOSITIONAL = [
+  'январе', 'феврале', 'марте', 'апреле', 'мае', 'июне',
+  'июле', 'августе', 'сентябре', 'октябре', 'ноябре', 'декабре',
 ]
+
+// Доля для текста — с запятой, как принято в русском: «37,2%», а не «37.2%».
+function percentLabel(value: number): string {
+  return String(round1(value)).replace('.', ',')
+}
 
 function round1(value: number): number {
   return Math.round(value * 10) / 10
@@ -136,7 +142,7 @@ export function detectConcentration(
     if (share <= rules.concentrationThresholdPercent) continue
     results.push({
       ruleType: 'concentration',
-      text: `Инструмент «${position.name}» (группа «${position.group}») занимает ${round1(share)}% портфеля`,
+      text: `Инструмент «${position.name}» (группа «${position.group}») занимает ${percentLabel(share)}% портфеля`,
       payload: { kind: 'instrument', id: position.id, name: position.name, sharePercent: round1(share) },
     })
   }
@@ -151,7 +157,7 @@ export function detectConcentration(
     if (share <= rules.concentrationThresholdPercent) continue
     results.push({
       ruleType: 'concentration',
-      text: `Эмитент «${issuer}» занимает ${round1(share)}% портфеля`,
+      text: `Эмитент «${issuer}» занимает ${percentLabel(share)}% портфеля`,
       payload: { kind: 'issuer', issuer, sharePercent: round1(share) },
     })
   }
@@ -166,7 +172,7 @@ export function detectConcentration(
     if (share <= rules.concentrationThresholdPercent) continue
     results.push({
       ruleType: 'concentration',
-      text: `Группа «${group}» занимает ${round1(share)}% портфеля`,
+      text: `Группа «${group}» занимает ${percentLabel(share)}% портфеля`,
       payload: { kind: 'group', group, sharePercent: round1(share) },
     })
   }
@@ -244,7 +250,7 @@ export function detectPayoutGaps(
     const monthIndex = startMonth + offset
     const year = startYear + Math.floor(monthIndex / 12)
     const normalizedMonth = ((monthIndex % 12) + 12) % 12
-    months.push({ key: monthKey(year, normalizedMonth), label: `${MONTH_NAMES_GENITIVE[normalizedMonth]} ${year}`, total: 0 })
+    months.push({ key: monthKey(year, normalizedMonth), label: `${MONTH_NAMES_PREPOSITIONAL[normalizedMonth]} ${year}`, total: 0 })
   }
   const byKey = new Map(months.map((month) => [month.key, month]))
 
@@ -265,10 +271,9 @@ export function detectPayoutGaps(
   const gapMonths = months.filter((month) => month.total <= average * rules.payoutGapMaxShareOfAverage)
   if (!gapMonths.length) return []
 
-  const label = gapMonths.map((month) => month.label).join(', ')
-  const text = gapMonths.length === 1
-    ? `В ${gapMonths[0].label} ожидаются низкие или нулевые выплаты (в среднем портфель приносит ${formatMoney(average)} в месяц)`
-    : `Низкие или нулевые выплаты ожидаются в: ${label} (в среднем портфель приносит ${formatMoney(average)} в месяц)`
+  const labels = gapMonths.map((month) => month.label)
+  const label = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(', ')} и ${labels.at(-1)}`
+  const text = `Мало выплат в ${label} — в среднем портфель приносит ${formatMoney(average)} в месяц`
 
   return [{
     ruleType: 'payout_gap',
