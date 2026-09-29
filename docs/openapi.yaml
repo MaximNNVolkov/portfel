@@ -605,6 +605,7 @@ components:
         priceUnavailable: { type: boolean }
         priceUnavailableReason: { type: [string, 'null'], enum: [no-price, no-rate, null] }
         estimated: { type: boolean, description: 'Котируемая бумага без котировки — в стоимости есть, в P&L нет' }
+        accruedInterest: { type: [number, 'null'], description: 'НКД облигации или начисленные, но не выплаченные проценты вклада (оценка по ставке), в валюте инструмента' }
       additionalProperties: true
 
     Position:

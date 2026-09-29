@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexQuote } from './market-data.ts'
 import { aggregateByGroup, convertCurrency, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
-import { forecastPayouts } from './payout-forecast.ts'
+import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
@@ -44,8 +44,18 @@ export function toEngineInput(position: Position): PositionInput {
     quantity: position.quantity ?? null,
     averagePrice: position.averagePrice ?? null,
     currentPrice: position.currentPrice ?? null,
-    accruedInterest: position.accruedInterest ?? null,
+    // Начисленное по вкладу добавляется, только если текущая сумма не введена отдельно:
+    // сумма из приложения банка (ручной ввод, скриншот) уже включает проценты.
+    accruedInterest: position.accruedInterest ?? (position.instrument.groupType === 'deposit'
+      && (position.value === undefined || Math.abs(position.value - position.invested) < 0.005)
+      ? depositAccruedInterest(position, position.instrument, localDate())
+      : null),
   }
+}
+// «Сегодня» по местным часам сервера, как граница просроченных выплат в server/index.ts.
+function localDate(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
 
 // Свободные деньги (§12, §7.1, BUG-05; решение Р-2 в docs/FIX_PLAN.md) — часть портфеля:

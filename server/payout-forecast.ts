@@ -51,8 +51,9 @@ function round2(value: number): number {
 // единственным периодом на весь вклад, а не поводом отказаться от прогноза.
 function monthsPerPeriod(frequency: string | undefined): number | null {
   if (!frequency) return null
-  if (/ежемесяч/i.test(frequency)) return 1
-  if (/ежекварталь/i.test(frequency)) return 3
+  // Английские значения приходят через API и распознавание (monthly, quarterly).
+  if (/ежемесяч|month/i.test(frequency)) return 1
+  if (/ежекварталь|quarter/i.test(frequency)) return 3
   return null
 }
 
@@ -127,6 +128,37 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument): Fore
     description: `Возврат вклада «${instrument.name}»`,
   })
   return payouts
+}
+
+// Начисленные, но ещё не выплаченные проценты по вкладу на дату (критик К2) — аналог НКД
+// облигации: без них вклад под 16% весь срок показывал «доход 0» и «+0,0%». Считается по
+// тем же периодам, что и прогноз выплат: проценты прошедших периодов уже ушли выплатами,
+// поэтому начислено только за текущий период; при капитализации — всё накопленное с
+// открытия, потому что выплачивается оно одной суммой в конце срока. После окончания
+// срока начисленного нет: проценты и тело — это уже выплаты из календаря.
+export function depositAccruedInterest(position: PositionRecord, instrument: Instrument, today: string): number | null {
+  const principal = position.invested
+  const rate = instrument.rate ?? instrument.effectiveRate
+  const start = position.openedOn
+  const end = instrument.termEndDate
+  if (!start || !end || !rate || rate <= 0 || !(principal > 0)) return null
+  if (daysBetween(start, today) <= 0 || daysBetween(today, end) <= 0) return 0
+  const bounds = periodBounds(start, end, monthsPerPeriod(instrument.interestPayoutFrequency))
+  let balance = principal
+  let capitalized = 0
+  for (let index = 1; index < bounds.length; index += 1) {
+    const from = bounds[index - 1]
+    const to = bounds[index]
+    if (daysBetween(to, today) < 0) {
+      return round2(capitalized + balance * (rate / 100) * (daysBetween(from, today) / 365))
+    }
+    if (instrument.capitalization) {
+      const interest = balance * (rate / 100) * (daysBetween(from, to) / 365)
+      balance += interest
+      capitalized += interest
+    }
+  }
+  return 0
 }
 
 // Даты купонов при двух выплатах в год. Если дата выплаты купона задана — ряд идёт
