@@ -1668,12 +1668,22 @@ function AppMvp() {
             <span className="brand-mark">✳</span> Капитал
           </div>
           <div className="top-actions">
-            <span className="sync-status">
-              <span className="sync-dot" />{" "}
-              {apiOnline
-                ? "Синхронизировано с API"
-                : "Офлайн-режим · локальные данные"}
-            </span>
+            {/* Статус в шапке — это статус брокера. Без подключённого брокера «Синхронизировано
+                с API» читалось как его статус (П10), поэтому тогда индикатора нет. */}
+            {!apiOnline ? (
+              <span className="sync-status">
+                <span className="sync-dot warn" /> Офлайн-режим · локальные данные
+              </span>
+            ) : brokerStatus?.status === "connected" || brokerStatus?.status === "error" ? (
+              <Link className="sync-status" to="/integrations">
+                <span className={`sync-dot${brokerStatus.status === "error" ? " warn" : ""}`} />{" "}
+                {brokerStatus.status === "error"
+                  ? "Т-Инвестиции · не удалось обновить"
+                  : brokerStatus.lastSyncAt
+                    ? `Т-Инвестиции · ${formatDateTime(brokerStatus.lastSyncAt)}`
+                    : "Т-Инвестиции подключены"}
+              </Link>
+            ) : null}
             <Link
               className="icon-button"
               aria-label={
@@ -1896,7 +1906,7 @@ function AppMvp() {
               />
             }
           />
-          <Route path="*" element={<Navigate to="/portfolio" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
       {toast && <div className="toast">{toast}</div>}
@@ -2420,6 +2430,25 @@ function ProductRow({
   );
 }
 
+function FreeCashRow({ cash }: { cash: number | null }) {
+  return (
+    <div className="list-row">
+      <Link className="product-row-summary" to="/transactions">
+        <span className="product-row-line1">
+          <span className="product-row-name">
+            <i className={`legend type-dot ${typeColors["Деньги"]}`} title="Деньги" />
+            <strong>Свободные деньги</strong>
+          </span>
+          <span className="product-row-sum">{cash === null ? "Оценка недоступна" : money(cash)}</span>
+        </span>
+        <span className="product-row-line2">
+          <span className="muted product-row-meta">пополнения, выплаты и продажи</span>
+        </span>
+      </Link>
+    </div>
+  );
+}
+
 function ProductsPage({
   products,
   payments,
@@ -2458,7 +2487,12 @@ function ProductsPage({
   }
   const [sortBy, setSortBy] = useState<ProductSortKey>("value");
   const nearestPayoutByInstrument = useMemo(() => nearestPayoutMap(payments), [payments]);
-  const productTypes = Array.from(new Set(products.map((product) => product.type)));
+  // Свободные деньги — не инструмент, но входят в категорию «Деньги» на главной и в
+  // «Аналитике»: без этой строки категория здесь не сходилась с итогом (П8). К банку их
+  // не привязать (пополнение вводится без счёта), поэтому при фильтре по банку строки нет.
+  const cash = summary?.cash;
+  const showCash = cash !== undefined && cash !== 0 && !bank && (!group || group === "Деньги");
+  const productTypes = Array.from(new Set([...products.map((product) => product.type), ...(showCash ? ["Деньги" as AssetType] : [])]));
   const banks = Array.from(new Set(products.map((product) => product.institution).filter(Boolean))).sort();
   const filtered = products.filter(
     (product) => (!group || product.type === group) && (!bank || product.institution === bank),
@@ -2477,6 +2511,10 @@ function ProductsPage({
     const last = sections.at(-1);
     if (last && last.type === product.type) last.items.push(product);
     else sections.push({ type: product.type, items: [product] });
+  }
+  if (showCash && !sections.some((section) => section.type === "Деньги")) {
+    const at = group ? 0 : sections.findIndex((section) => rank(section.type) > rank("Деньги"));
+    sections.splice(at === -1 ? sections.length : at, 0, { type: "Деньги", items: [] });
   }
   // Итоги среза — готовые цифры бэкенда (§8, §10): категория из сводки, банк из структуры.
   const groupTotals = group ? summary?.groups.find((item) => item.group === group) : undefined;
@@ -2585,7 +2623,7 @@ function ProductsPage({
           </ul>
         </div>
       )}
-      {ordered.length === 0 ? (
+      {ordered.length === 0 && !showCash ? (
         <p className="muted">
           {products.length === 0
             ? "Пока нет добавленных инструментов."
@@ -2610,6 +2648,7 @@ function ProductsPage({
                     showInstitution={!bank}
                   />
                 ))}
+                {section.type === "Деньги" && showCash && <FreeCashRow cash={cash} />}
               </div>
             </section>
           ))}
@@ -4925,6 +4964,17 @@ function MissingRecord({ to }: { to: string }) {
     </Page>
   );
 }
+// Неизвестный адрес раньше молча открывал «Портфель», и опечатка в ссылке была не видна (П12).
+function NotFoundPage() {
+  return (
+    <Page title="Страница не найдена" subtitle="Такого адреса в приложении нет — возможно, ссылка устарела или в ней опечатка.">
+      <div className="toolbar">
+        <Link className="primary-button" to="/portfolio">Перейти к портфелю</Link>
+      </div>
+    </Page>
+  );
+}
+
 function Page({
   title,
   subtitle,
