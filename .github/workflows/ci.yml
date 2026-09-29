@@ -108,3 +108,53 @@ jobs:
         run: |
           curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "$STAND_URL/api/health"
           curl -fsS --retry 3 --retry-delay 3 "$STAND_URL/" | grep -q '<div id="root">'
+
+  # Автодеплой production (docker-compose на VPS, docs/DEPLOY.md, раздел «Автоматическая
+  # выкладка»): push в main после зелёных checks + backend-image. Окружение `production`
+  # позволяет включить ручное подтверждение в Settings → Environments. Пока секреты
+  # PROD_SSH_* не заведены, job завершается успешно с пометкой «пропущено».
+  deploy-prod:
+    needs: [checks, backend-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PROD_URL }}
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    env:
+      PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+      PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+      PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+      PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+      PROD_URL: ${{ vars.PROD_URL }}
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        run: |
+          if [ -n "$PROD_SSH_HOST" ] && [ -n "$PROD_SSH_USER" ] && [ -n "$PROD_SSH_KEY" ] && [ -n "$PROD_SSH_KNOWN_HOSTS" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Автодеплой production пропущен: не заданы секреты PROD_SSH_HOST/USER/KEY/KNOWN_HOSTS (см. docs/DEPLOY.md)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy over SSH
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PROD_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          # На сервере ключ привязан к scripts/deploy-prod.sh (command=... в authorized_keys);
+          # передаём только SHA коммита, прошедшего CI.
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ConnectTimeout=20 \
+            "$PROD_SSH_USER@$PROD_SSH_HOST" "$GITHUB_SHA"
+
+      - name: Public health check
+        if: steps.secrets.outputs.ready == 'true' && env.PROD_URL != ''
+        run: |
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "$PROD_URL/api/health"
+          curl -fsS --retry 3 --retry-delay 3 "$PROD_URL/" | grep -q '<div id="root">'
