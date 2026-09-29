@@ -652,6 +652,8 @@ components:
         currency: { type: string }
         commission: { type: number }
         tax: { type: number }
+        quantity: { type: [number, 'null'], description: 'Количество бумаг в покупке/продаже' }
+        price: { type: [number, 'null'], description: 'Цена за штуку' }
         positionId: { type: [string, 'null'] }
         instrumentId: { type: [string, 'null'] }
         accountId: { type: string }
@@ -712,6 +714,8 @@ components:
         date: { type: string, format: date }
         title: { type: string }
         positionId: { type: string }
+        quantity: { type: number, exclusiveMinimum: 0, description: 'Для BUY/SELL. Не задано — выводится из price или текущей цены позиции' }
+        price: { type: number, exclusiveMinimum: 0 }
         commission: { type: number }
         tax: { type: number }
 
