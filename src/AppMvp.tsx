@@ -232,6 +232,8 @@ type Payment = {
   overdue?: boolean;
   /** Банк или брокер счёта — приходит с бэкенда, только для показа. */
   institution?: string;
+  /** Сумма в базовой валюте портфеля по курсу ЦБ (§13); null — курса нет. */
+  amountBase?: number | null;
 };
 type TransactionType =
   | "BUY"
@@ -305,6 +307,8 @@ type PortfolioSummary = {
     unavailable: { id: string; name: string; group: string; reason: string }[];
     /** Позиции с приблизительной оценкой: в стоимости есть, в P&L нет (BUG-09). */
     estimated?: { id: string; name: string; group: string }[];
+    /** Валюты выплат/расходов без курса ЦБ — их суммы не вошли в итоги (§7.3, §13). */
+    unconvertedCurrencies?: string[];
   };
 };
 type BrokerStatus = {
@@ -698,6 +702,27 @@ const isPrincipalPayout = (payment: Payment) =>
   payment.type === "DEPOSIT_PRINCIPAL" || payment.type === "REDEMPTION";
 const isUpcoming = (payment: Payment) =>
   payment.status === "expected" && !isOverdue(payment);
+// Выплаты бывают в разных валютах: складываются только суммы в базовой валюте, которые
+// посчитал бэкенд (amountBase). Без неё (офлайн) рублёвая сумма берётся как есть.
+const payoutBase = (payment: Payment): number | null =>
+  payment.amountBase !== undefined
+    ? payment.amountBase
+    : (payment.currency || "RUB") === "RUB" ? payment.amount : null;
+function sumPayoutsBase(list: Payment[]) {
+  let total = 0;
+  let partial = false;
+  for (const payment of list) {
+    const value = payoutBase(payment);
+    if (value === null) partial = true;
+    else total += value;
+  }
+  return { total, partial };
+}
+// Сумма одной выплаты — в её собственной валюте.
+const payoutMoney = (payment: Payment) =>
+  payment.currency && payment.currency !== "RUB"
+    ? `${payment.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${payment.currency}`
+    : money(payment.amount);
 // Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
 // доходов», поэтому крупно идёт ожидаемое; полученное — подписью и только если оно есть.
 // Иначе у нового пользователя весь календарь состоял из строк «+₽ 0».
@@ -2039,6 +2064,12 @@ function Dashboard({
             сумме, оценка приблизительна.
           </div>
         )}
+        {(valuation.unconvertedCurrencies?.length ?? 0) > 0 && (
+          <div className="demo-note">
+            ⓘ Выплаты и расходы без учёта сумм в {valuation.unconvertedCurrencies!.join(", ")}: курса ЦБ
+            для них нет.
+          </div>
+        )}
         {!attention && overdue > 0 && (
           <div className="demo-note">
             ⚠ Не отмечено полученными {display(overdue)}. <Link to="/payments">Отметить</Link>
@@ -2231,9 +2262,9 @@ function nearestPayoutMap(payments: Payment[]): Map<string, NearestPayout> {
     if (!payment.instrumentId || payment.status !== "expected" || isOverdue(payment)) continue;
     const current = map.get(payment.instrumentId);
     if (!current || payment.date < current.date) {
-      map.set(payment.instrumentId, { date: payment.date, total: payment.amount, parts: [payment] });
+      map.set(payment.instrumentId, { date: payment.date, total: payoutBase(payment) ?? 0, parts: [payment] });
     } else if (payment.date === current.date) {
-      current.total += payment.amount;
+      current.total += payoutBase(payment) ?? 0;
       current.parts.push(payment);
     }
   }
@@ -2708,7 +2739,7 @@ function PaymentRow({
             />
             <strong>{title}</strong>
           </span>
-          <span className="product-row-sum">+{money(payment.amount)}</span>
+          <span className="product-row-sum">+{payoutMoney(payment)}</span>
         </span>
         <span className="product-row-line2">
           <span className="muted product-row-meta">{meta.length ? meta.join(" · ") : typeLabel}</span>
@@ -2831,9 +2862,10 @@ function PaymentsPage({
   const overduePaging = usePagedList(overduePayments);
 
   const currentMonthKey = periodKey(todayIsoDate(), "month");
-  const forecastAmount = payments
-    .filter((payment) => isUpcoming(payment) && periodKey(payment.date, "month") === currentMonthKey)
-    .reduce((sum, payment) => sum + payment.amount, 0);
+  const forecast = sumPayoutsBase(
+    payments.filter((payment) => isUpcoming(payment) && periodKey(payment.date, "month") === currentMonthKey),
+  );
+  const forecastAmount = forecast.total;
 
   const groups = useMemo(() => {
     const map = new Map<string, Payment[]>();
@@ -2847,9 +2879,10 @@ function PaymentsPage({
       key,
       label: periodLabel(key, viewMode),
       items,
-      expected: items.filter(isUpcoming).reduce((sum, item) => sum + item.amount, 0),
-      received: items.filter((item) => item.status === "received").reduce((sum, item) => sum + item.amount, 0),
-      overdue: items.filter(isOverdue).reduce((sum, item) => sum + item.amount, 0),
+      expected: sumPayoutsBase(items.filter(isUpcoming)).total,
+      received: sumPayoutsBase(items.filter((item) => item.status === "received")).total,
+      overdue: sumPayoutsBase(items.filter(isOverdue)).total,
+      partial: sumPayoutsBase(items).partial,
     }));
   }, [sorted, viewMode]);
 
@@ -2861,6 +2894,7 @@ function PaymentsPage({
       {forecastAmount > 0 && (
         <div className="demo-note">
           📅 В {periodLabel(currentMonthKey, "month").toLowerCase()} ожидается {money(forecastAmount)}
+          {forecast.partial && " — без выплат в валюте, для которой нет курса ЦБ"}
         </div>
       )}
       <div className="toolbar">
@@ -2993,7 +3027,7 @@ function PaymentsPage({
                         <i className={`legend type-dot ${payoutTypeColors[payment.type]}`} title={typeLabel} />
                         <strong>{product?.name || payment.title || typeLabel}</strong>
                       </span>
-                      <span className="product-row-sum">+{money(payment.amount)}</span>
+                      <span className="product-row-sum">+{payoutMoney(payment)}</span>
                     </span>
                     <span className="product-row-line2">
                       <span className="muted product-row-meta">
@@ -3097,7 +3131,10 @@ function PaymentsPage({
                       <span className="muted product-row-meta">
                         {group.items.length} {pluralPayouts(group.items.length)}
                       </span>
-                      <span className="muted">{value.note}</span>
+                      <span className="muted">
+                        {value.note}
+                        {group.partial && " · без части в валюте"}
+                      </span>
                     </span>
                   </button>
                   {expanded && (
@@ -3117,7 +3154,7 @@ function PaymentsPage({
                               </small>
                             </span>
                           </span>
-                          <span>+{money(payment.amount)}</span>
+                          <span>+{payoutMoney(payment)}</span>
                         </div>
                       ))}
                     </div>
@@ -3210,13 +3247,13 @@ function ProductDetailPage({
     ? payments.filter((payment) => payment.instrumentId === product.instrumentId)
     : [];
   // Возврат тела и погашение — возврат вложенного, а не доход (§10.3): в «получено» не идут.
-  const received = relatedPayments
-    .filter((payment) => payment.status === "received" && !isPrincipalPayout(payment))
-    .reduce((sum, payment) => sum + payment.amount, 0);
+  const received = sumPayoutsBase(
+    relatedPayments.filter((payment) => payment.status === "received" && !isPrincipalPayout(payment)),
+  ).total;
   // Просроченные не складываются с будущими (§22, BUG-22) — как в разделе «Выплаты».
-  const expected = relatedPayments
-    .filter((payment) => isUpcoming(payment) && !isPrincipalPayout(payment))
-    .reduce((sum, payment) => sum + payment.amount, 0);
+  const expected = sumPayoutsBase(
+    relatedPayments.filter((payment) => isUpcoming(payment) && !isPrincipalPayout(payment)),
+  ).total;
   const overduePayments = relatedPayments.filter(isOverdue).sort((a, b) => a.date.localeCompare(b.date));
   const nextPayout = nearestPayoutMap(relatedPayments).get(product.instrumentId ?? "");
   const end = product.termEndDate || product.maturityDate;
@@ -3248,7 +3285,7 @@ function ProductDetailPage({
         date: payment.date,
         label: payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type],
         color: payoutTypeColors[payment.type],
-        amount: `+${money(payment.amount)}`,
+        amount: `+${payoutMoney(payment)}`,
         to: `/payments/${payment.id}/edit`,
       })),
   ].sort((a, b) => b.date.localeCompare(a.date));
@@ -3315,7 +3352,7 @@ function ProductDetailPage({
                       <i className={`legend type-dot ${payoutTypeColors[payment.type]}`} />
                       <strong>{payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type]}</strong>
                     </span>
-                    <span className="product-row-sum">+{money(payment.amount)}</span>
+                    <span className="product-row-sum">+{payoutMoney(payment)}</span>
                   </span>
                   <span className="product-row-line2">
                     <span className="danger-text product-row-meta">{dateLabel(payment.date)} · не отмечена полученной</span>
@@ -3352,7 +3389,7 @@ function ProductDetailPage({
                       {dateLabel(nextPayout.date)}
                       {nextPayout.parts.length > 1 &&
                         ` · ${nextPayout.parts
-                          .map((part) => `${part.type === "DEPOSIT_PRINCIPAL" ? "тело вклада" : payoutTypeLabels[part.type].toLowerCase()} ${money(part.amount)}`)
+                          .map((part) => `${part.type === "DEPOSIT_PRINCIPAL" ? "тело вклада" : payoutTypeLabels[part.type].toLowerCase()} ${payoutMoney(part)}`)
                           .join(" + ")}`}
                       {nextPayout.parts.some((part) => part.source === "forecast") && " · прогноз"}
                     </span>
@@ -5566,7 +5603,7 @@ function DeletePaymentPage({
     <Page title="Удалить выплату" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
         <p>
-          Удалить <strong>{payment.title}</strong> ({money(payment.amount)}) из
+          Удалить <strong>{payment.title}</strong> ({payoutMoney(payment)}) из
           календаря выплат?
         </p>
         <div className="confirm-actions">

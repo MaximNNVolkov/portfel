@@ -683,7 +683,7 @@ app.get('/api/portfolio/structure', async (request, response) => {
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
     // «Где хранится» (CLIENT_FLOW_PLAN §4.1): банки и брокеры одним списком, включая
     // записи без банка («Ручной ввод»). Денежный остаток сюда не входит — как и в byBroker.
-    byProvider: breakdown((position) => (position.closedOn ? null : position.account.provider)),
+    byProvider: breakdown((position) => position.account.provider),
     byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
