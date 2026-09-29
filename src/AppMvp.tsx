@@ -566,6 +566,16 @@ const payoutTypeLabels: Record<PayoutType, string> = {
   REDEMPTION: "Погашение",
   OTHER: "Прочее",
 };
+// Цвет точки выплаты — из палитры .legend.*: купон и погашение — цвета облигаций,
+// дивиденды — акций, проценты — вкладов, чтобы строка читалась так же, как в «Инструментах».
+const payoutTypeColors: Record<PayoutType, string> = {
+  COUPON: "teal",
+  REDEMPTION: "indigo",
+  DIVIDEND: "coral",
+  INTEREST: "amber",
+  DEPOSIT_PRINCIPAL: "slate",
+  OTHER: "pink",
+};
 const payoutStatusLabels: Record<PayoutStatus, string> = {
   expected: "Ожидается",
   received: "Получено",
@@ -657,7 +667,6 @@ const shortMonth = (date: string) => {
   const parsed = parseIsoDate(date);
   return parsed ? RU_SHORT_MONTHS[parsed.getMonth()] : "";
 };
-const dayOfMonth = (date: string) => (parseIsoDate(date) ? date.slice(8, 10) : "—");
 const isCurrentYear = (date: string) => date.slice(0, 4) === todayIsoDate().slice(0, 4);
 const dateLabel = (date: string) => {
   const parsed = parseIsoDate(date);
@@ -694,35 +703,25 @@ const isUpcoming = (payment: Payment) =>
 // Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
 // доходов», поэтому крупно идёт ожидаемое; полученное — подписью и только если оно есть.
 // Иначе у нового пользователя весь календарь состоял из строк «+₽ 0».
-function PayoutGroupValue({
-  expected,
-  received,
-  overdue,
-}: {
-  expected: number;
-  received: number;
-  overdue: number;
-}) {
+function pluralPayouts(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return "выплата";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "выплаты";
+  return "выплат";
+}
+function payoutGroupValue(expected: number, received: number, overdue: number) {
   if (expected > 0)
-    return (
-      <>
-        <strong>+{money(expected)}</strong>
-        <small>{received > 0 ? `ожидается · получено ${money(received)}` : "ожидается"}</small>
-      </>
-    );
+    return {
+      amount: `+${money(expected)}`,
+      note: received > 0 ? `ожидается · получено ${money(received)}` : "ожидается",
+    };
   if (received > 0)
-    return (
-      <>
-        <strong>+{money(received)}</strong>
-        <small>{overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено"}</small>
-      </>
-    );
-  return (
-    <>
-      <strong>{money(overdue)}</strong>
-      <small>не отмечено полученным</small>
-    </>
-  );
+    return {
+      amount: `+${money(received)}`,
+      note: overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено",
+    };
+  return { amount: money(overdue), note: "не отмечено полученным" };
 }
 const fullDate = (date: string) => {
   const parsed = parseIsoDate(date);
@@ -1948,20 +1947,19 @@ function Dashboard({
           <div className="holding-list">
             {groups.map((groupSummary) => (
               <div className="holding-row" key={groupSummary.group}>
-                <span
-                  className={`legend ${typeColors[groupSummary.group as AssetType]}`}
-                />
-                <div className="holding-name">
-                  <strong>{groupSummary.group}</strong>
-                  <small>{groupSummary.positions} продукт(а)</small>
-                </div>
-                <div className="holding-value">
-                  <strong>{display(groupSummary.value)}</strong>
-                  <small className="teal-text">
-                    {(groupSummary.share ?? 0).toFixed(1).replace(".", ",")}%
-                  </small>
-                </div>
-                <span className="share">{Math.round(groupSummary.share ?? 0)}%</span>
+                <span className="product-row-line1">
+                  <span className="product-row-name">
+                    <i className={`legend type-dot ${typeColors[groupSummary.group as AssetType]}`} />
+                    <strong>{groupSummary.group}</strong>
+                  </span>
+                  <span className="product-row-sum">{display(groupSummary.value)}</span>
+                </span>
+                <span className="product-row-line2">
+                  <span className="muted product-row-meta">{groupSummary.positions} продукт(а)</span>
+                  <span className="muted">
+                    {(groupSummary.share ?? 0).toFixed(1).replace(".", ",")}% портфеля
+                  </span>
+                </span>
               </div>
             ))}
           </div>
@@ -1989,23 +1987,21 @@ function Dashboard({
               </p>
             )}
             {upcomingPayments.map((payment) => (
-              <div className="payment-row" key={payment.id}>
-                <div className="date-box">
-                  <strong>{dayOfMonth(payment.date)}</strong>
-                  <small>
-                    {shortMonth(payment.date).toUpperCase()}
-                    {isCurrentYear(payment.date) ? "" : ` ${payment.date.slice(0, 4)}`}
-                  </small>
-                </div>
-                <div className="payment-info">
-                  <strong>{payment.title}</strong>
-                  <small>
-                    {payoutTypeLabels[payment.type]} · {dateLabel(payment.date)}
-                  </small>
-                </div>
-                <strong className="payment-value">
-                  +{money(payment.amount)}
-                </strong>
+              <div className="upcoming-row" key={payment.id}>
+                <span className="product-row-line1">
+                  <span className="product-row-name">
+                    <i
+                      className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+                      title={payoutTypeLabels[payment.type]}
+                    />
+                    <strong>{payment.title}</strong>
+                  </span>
+                  <span className="product-row-sum teal-text">+{money(payment.amount)}</span>
+                </span>
+                <span className="product-row-line2">
+                  <span className="muted product-row-meta">{payoutTypeLabels[payment.type]}</span>
+                  <span className="muted">{dateLabel(payment.date)}</span>
+                </span>
               </div>
             ))}
           </div>
@@ -2424,22 +2420,28 @@ function PaymentRow({
     <div className="list-row">
       <button
         type="button"
-        className="list-row-summary"
+        className="product-row-summary"
         aria-expanded={expanded}
         onClick={onToggle}
       >
-        <span className="list-row-main">
-          <strong>{payment.title}</strong>
-          <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
-          {payment.source === "forecast" && (
-            <span className="type-tag slate">Прогноз</span>
-          )}
+        <span className="product-row-line1">
+          <span className="product-row-name">
+            <i
+              className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+              title={payoutTypeLabels[payment.type]}
+            />
+            <strong>{payment.title}</strong>
+          </span>
+          <span className="product-row-sum">+{money(payment.amount)}</span>
         </span>
-        <span className="list-row-value">
-          <strong>+{money(payment.amount)}</strong>
-          <small>{dateLabel(payment.date)}</small>
+        <span className="product-row-line2">
+          <span className="muted product-row-meta">
+            {payoutTypeLabels[payment.type]}
+            {payment.source === "forecast" && " · прогноз"}
+            {payment.status === "received" && " · получено"}
+          </span>
+          <span className="muted">{dateLabel(payment.date)}</span>
         </span>
-        <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
       </button>
       {expanded && (
         <div className="list-row-details">
@@ -2577,7 +2579,8 @@ function PaymentsPage({
       )}
       <div className="toolbar">
         <Link className="primary-button" to="/payments/new">
-          ＋ Добавить выплату
+          <span className="label-full">＋ Добавить выплату</span>
+          <span className="label-short">＋ Выплата</span>
         </Link>
         <div className="view-mode-switch">
           <button
@@ -2585,21 +2588,24 @@ function PaymentsPage({
             type="button"
             onClick={() => setViewMode("day")}
           >
-            По дням
+            <span className="label-full">По дням</span>
+            <span className="label-short">Дни</span>
           </button>
           <button
             className={viewMode === "month" ? "selected" : ""}
             type="button"
             onClick={() => setViewMode("month")}
           >
-            По месяцам
+            <span className="label-full">По месяцам</span>
+            <span className="label-short">Месяцы</span>
           </button>
           <button
             className={viewMode === "year" ? "selected" : ""}
             type="button"
             onClick={() => setViewMode("year")}
           >
-            По годам
+            <span className="label-full">По годам</span>
+            <span className="label-short">Годы</span>
           </button>
         </div>
       </div>
@@ -2676,20 +2682,26 @@ function PaymentsPage({
               </p>
             </div>
           </div>
-          <div className="list-card">
+          <div className="product-list">
             {overduePaging.visible.map((payment) => (
               <div className="list-row" key={payment.id}>
-                <div className="list-row-summary list-row-static">
-                  <span className="list-row-main">
-                    <strong>{payment.title}</strong>
-                    <span className="type-tag teal">{payoutTypeLabels[payment.type]}</span>
+                <div className="product-row-summary product-row-static">
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <i
+                        className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+                        title={payoutTypeLabels[payment.type]}
+                      />
+                      <strong>{payment.title}</strong>
+                    </span>
+                    <span className="product-row-sum">+{money(payment.amount)}</span>
                   </span>
-                  <span className="list-row-value">
-                    <strong>+{money(payment.amount)}</strong>
-                    <small className="danger-text">{fullDate(payment.date)} · просрочено</small>
+                  <span className="product-row-line2">
+                    <span className="muted product-row-meta">{payoutTypeLabels[payment.type]}</span>
+                    <span className="danger-text">{dateLabel(payment.date)} · просрочено</span>
                   </span>
                 </div>
-                <div className="list-row-actions">
+                <div className="list-row-actions product-row-actions">
                   <button
                     type="button"
                     className="outline-button"
@@ -2704,13 +2716,13 @@ function PaymentsPage({
                 </div>
               </div>
             ))}
-            <ListPagination
-              hasMore={overduePaging.hasMore}
-              onLoadMore={overduePaging.loadMore}
-              pageSize={overduePaging.pageSize}
-              onPageSizeChange={overduePaging.setPageSize}
-            />
           </div>
+          <ListPagination
+            hasMore={overduePaging.hasMore}
+            onLoadMore={overduePaging.loadMore}
+            pageSize={overduePaging.pageSize}
+            onPageSizeChange={overduePaging.setPageSize}
+          />
           {overduePayments.length > 1 && (
             <div className="list-row-actions">
               <button
@@ -2719,9 +2731,14 @@ function PaymentsPage({
                 disabled={markingId !== null}
                 onClick={() => void markAllReceived()}
               >
-                {markingId === "all"
-                  ? "Сохраняем..."
-                  : `Отметить все полученными (${overduePayments.length})`}
+                {markingId === "all" ? (
+                  "Сохраняем..."
+                ) : (
+                  <>
+                    <span className="label-full">Отметить все полученными ({overduePayments.length})</span>
+                    <span className="label-short">Отметить все ({overduePayments.length})</span>
+                  </>
+                )}
               </button>
             </div>
           )}
@@ -2736,74 +2753,84 @@ function PaymentsPage({
               : "Нет выплат, подходящих под выбранные условия."}
         </p>
       ) : viewMode === "day" ? (
-        <div className="list-card">
-          {dayPaging.visible.map((payment) => (
-            <PaymentRow
-              key={payment.id}
-              payment={payment}
-              expanded={expandedId === payment.id}
-              onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
-            />
-          ))}
+        <>
+          <div className="product-list">
+            {dayPaging.visible.map((payment) => (
+              <PaymentRow
+                key={payment.id}
+                payment={payment}
+                expanded={expandedId === payment.id}
+                onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
+              />
+            ))}
+          </div>
           <ListPagination
             hasMore={dayPaging.hasMore}
             onLoadMore={dayPaging.loadMore}
             pageSize={dayPaging.pageSize}
             onPageSizeChange={dayPaging.setPageSize}
           />
-        </div>
+        </>
       ) : (
-        <div className="list-card">
-          {groupPaging.visible.map((group) => {
-            const expanded = expandedId === group.key;
-            return (
-              <div className="list-row" key={group.key}>
-                <button
-                  type="button"
-                  className="list-row-summary"
-                  aria-expanded={expanded}
-                  onClick={() => setExpandedId(expanded ? null : group.key)}
-                >
-                  <span className="list-row-main">
-                    <strong>{group.label}</strong>
-                  </span>
-                  <span className="list-row-value">
-                    <PayoutGroupValue expected={group.expected} received={group.received} overdue={group.overdue} />
-                  </span>
-                  <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
-                </button>
-                {expanded && (
-                  <div className="list-row-details">
-                    <div className="list-card">
+        <>
+          <div className="product-list">
+            {groupPaging.visible.map((group) => {
+              const expanded = expandedId === group.key;
+              const value = payoutGroupValue(group.expected, group.received, group.overdue);
+              return (
+                <div className="list-row" key={group.key}>
+                  <button
+                    type="button"
+                    className="product-row-summary"
+                    aria-expanded={expanded}
+                    onClick={() => setExpandedId(expanded ? null : group.key)}
+                  >
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <strong>{group.label}</strong>
+                      </span>
+                      <span className="product-row-sum">{value.amount}</span>
+                    </span>
+                    <span className="product-row-line2 product-row-line2-flush">
+                      <span className="muted product-row-meta">
+                        {group.items.length} {pluralPayouts(group.items.length)}
+                      </span>
+                      <span className="muted">{value.note}</span>
+                    </span>
+                  </button>
+                  {expanded && (
+                    <div className="list-row-details">
                       {group.items.map((payment) => (
-                        <div className="list-row" key={payment.id}>
-                          <div className="list-row-summary list-row-static">
-                            <span className="list-row-main">
-                              <strong>{payment.title}</strong>
-                              <span className="type-tag teal">
-                                {payoutTypeLabels[payment.type]}
-                              </span>
+                        <div className="detail-line" key={payment.id}>
+                          <span className="payout-detail-name">
+                            <i
+                              className={`legend type-dot ${payoutTypeColors[payment.type]}`}
+                              title={payoutTypeLabels[payment.type]}
+                            />
+                            <span>
+                              {payment.title}
+                              <small className="muted">
+                                {dateLabel(payment.date)} · {payoutTypeLabels[payment.type]} ·{" "}
+                                {payoutStatusLabels[payment.status].toLowerCase()}
+                              </small>
                             </span>
-                            <span className="list-row-value">
-                              <strong>+{money(payment.amount)}</strong>
-                              <small>{dateLabel(payment.date)} · {payoutStatusLabels[payment.status]}</small>
-                            </span>
-                          </div>
+                          </span>
+                          <span>+{money(payment.amount)}</span>
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })}
+          </div>
           <ListPagination
             hasMore={groupPaging.hasMore}
             onLoadMore={groupPaging.loadMore}
             pageSize={groupPaging.pageSize}
             onPageSizeChange={groupPaging.setPageSize}
           />
-        </div>
+        </>
       )}
     </Page>
   );
@@ -3099,48 +3126,52 @@ function BreakdownList({
 }) {
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
   return (
-    <article className="allocation-card">
-      <div className="section-heading compact">
-        <div>
-          <h2>{title}</h2>
-          <p>{items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}</p>
-        </div>
+    <section className="breakdown-section">
+      <div className="breakdown-heading">
+        <h2>{title}</h2>
+        <span className="muted">
+          {items.length === 0 ? emptyHint : `${items.length} позици${items.length === 1 ? "я" : "и"}`}
+        </span>
       </div>
       {items.length > 0 && (
-        <div className="list-card">
-          {visible.map((item) => {
-            const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-            return (
-              <div className="list-row" key={item.key}>
-                <div className="list-row-summary list-row-static">
-                  <div className="list-row-main">
-                    <strong>{item.key}</strong>
-                    {item.priceUnavailable > 0 && (
-                      <small className="danger-text">
-                        {" "}
-                        · цена недоступна ({item.priceUnavailable})
-                      </small>
-                    )}
-                  </div>
-                  <div className="list-row-value">
-                    <strong>{money(item.value)}</strong>
-                    <small className={pnl.className}>
-                      {Math.round(item.share ?? 0)}% · {pnl.percentText}
-                    </small>
+        <>
+          <div className="product-list">
+            {visible.map((item) => {
+              const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+              return (
+                <div className="list-row" key={item.key}>
+                  <div className="product-row-summary product-row-static">
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <strong>{item.key}</strong>
+                      </span>
+                      <span className="product-row-sum">{money(item.value)}</span>
+                    </span>
+                    <span className="product-row-line2 product-row-line2-flush">
+                      <span className="muted product-row-meta">
+                        {Math.round(item.share ?? 0)}% портфеля
+                        {item.priceUnavailable > 0 && (
+                          <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
+                        )}
+                      </span>
+                      <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
+                        {pnl.percentText}
+                      </span>
+                    </span>
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
           <ListPagination
             hasMore={hasMore}
             onLoadMore={loadMore}
             pageSize={pageSize}
             onPageSizeChange={setPageSize}
           />
-        </div>
+        </>
       )}
-    </article>
+    </section>
   );
 }
 
@@ -3178,10 +3209,13 @@ function AnalyticsPage({
 
   return (
     <Page title="Аналитика" subtitle="Базовые показатели портфеля">
-      <div className="analytics-grid">
+      <div className="stat-strip">
         <article className="stat-card">
           <span>Доходность</span>
-          <strong>+{(profitPercent ?? 0).toFixed(2).replace(".", ",")}%</strong>
+          <strong className={(profitPercent ?? 0) < 0 ? "danger-text" : "teal-text"}>
+            {(profitPercent ?? 0) < 0 ? "" : "+"}
+            {(profitPercent ?? 0).toFixed(2).replace(".", ",")}%
+          </strong>
           <small>простая доходность</small>
         </article>
         <article className="stat-card">
@@ -3194,16 +3228,6 @@ function AnalyticsPage({
           <strong>{Math.round(bonds?.share ?? pct(bonds?.value ?? 0, total))}%</strong>
           <small>от общей стоимости</small>
         </article>
-      </div>
-      <div className="insight-box">
-        <span>✦</span>
-        <div>
-          <strong>Распределение выглядит сбалансированным</strong>
-          <p>
-            Более половины капитала находится в инструментах с регулярными
-            выплатами.
-          </p>
-        </div>
       </div>
       {structureError && <p className="form-error">{structureError}</p>}
       {structure && (
@@ -3244,12 +3268,12 @@ type RecommendationItem = {
 // требуют внимания в ближайшее время, разрыв в выплатах — нейтральная информация о прогнозе.
 const RECOMMENDATION_STYLE: Record<
   RecommendationRuleType,
-  { icon: string; warning: boolean }
+  { label: string; color: string; warning: boolean }
 > = {
-  concentration: { icon: "!", warning: true },
-  maturity: { icon: "⏳", warning: true },
-  drawdown: { icon: "↓", warning: true },
-  payout_gap: { icon: "ℹ", warning: false },
+  concentration: { label: "Концентрация", color: "coral", warning: true },
+  maturity: { label: "Погашение", color: "amber", warning: true },
+  drawdown: { label: "Просадка", color: "pink", warning: true },
+  payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
 };
 
 function Recommendations({ token }: { token: string }) {
@@ -3287,17 +3311,20 @@ function Recommendations({ token }: { token: string }) {
         <p>Пока нет замечаний по портфелю.</p>
       )}
       {!error && items !== null && items.length > 0 && (
-        <div className="recommendation-list">
+        <div className="product-list">
           {items.map((item, index) => {
             const style = RECOMMENDATION_STYLE[item.ruleType];
             return (
-              <article
-                key={`${item.ruleType}-${index}`}
-                className={`recommendation${style.warning ? " warning" : ""}`}
-              >
-                <span className="rec-icon">{style.icon}</span>
-                <div>
-                  <p>{item.text}</p>
+              <article className="list-row" key={`${item.ruleType}-${index}`}>
+                <div className="product-row-summary product-row-static recommendation-row">
+                  <i className={`legend type-dot ${style.color}`} title={style.label} />
+                  <span>
+                    <strong>{item.text}</strong>
+                    <small className={style.warning ? "warning-text" : "muted"}>
+                      {style.label}
+                      {style.warning ? " · требует внимания" : ""}
+                    </small>
+                  </span>
                 </div>
               </article>
             );
@@ -3543,13 +3570,21 @@ function Integrations({
                   : "Не подключено"}
           </span>
         </div>
-        {maskedToken && (
-          <p className="field-hint">Сохранённый токен: {maskedToken}</p>
-        )}
-        {lastSyncAt && (
-          <p className="field-hint">
-            Последняя синхронизация: {formatDateTime(lastSyncAt)}
-          </p>
+        {(maskedToken || lastSyncAt) && (
+          <div className="integration-facts">
+            {maskedToken && (
+              <div className="detail-line">
+                <span>Сохранённый токен</span>
+                <span>{maskedToken}</span>
+              </div>
+            )}
+            {lastSyncAt && (
+              <div className="detail-line">
+                <span>Последняя синхронизация</span>
+                <span>{formatDateTime(lastSyncAt)}</span>
+              </div>
+            )}
+          </div>
         )}
         {status === "error" && (
           <div className="demo-note">
@@ -4803,97 +4838,110 @@ function OcrSummaryPage({
         </div>
       )}
       {removedCount > 0 && (
-        <p className="muted">
+        <p className="muted ocr-removed-note">
           Удалено из портфеля: {removedCount} из {summary.items.length} распознанных записей.
         </p>
       )}
-      <div className="list-card">
-        {paging.visible.map((item) => {
-          const expanded = expandedId === item.id;
-          return (
-            <div className="list-row" key={item.id}>
-              <button
-                type="button"
-                className="list-row-summary"
-                aria-expanded={expanded}
-                onClick={() => setExpandedId(expanded ? null : item.id)}
-              >
-                <span className="list-row-main">
-                  <strong>{item.name}</strong>
-                  <span className={`type-tag ${typeColors[item.type]}`}>{item.type}</span>
-                </span>
-                <span className="list-row-value">
-                  <strong>{money(item.amount)}</strong>
-                  {item.possibleDuplicate ? (
-                    <small className="danger-text">возможный дубликат</small>
-                  ) : (
-                    <small className="teal-text">со скриншота</small>
-                  )}
-                </span>
-                <span className="expand-caret">{expanded ? "▲" : "▼"}</span>
-              </button>
-              {expanded && (
-                <div className="list-row-details">
-                  {item.possibleDuplicate && (
-                    <div className="detail-line">
-                      <span className="danger-text">
-                        ⚠ Похоже, такой инструмент уже есть в портфеле — проверьте, не дубликат ли это
+      {paging.visible.length > 0 && (
+        <>
+          <div className="product-list">
+            {paging.visible.map((item) => {
+              const expanded = expandedId === item.id;
+              return (
+                <div className="list-row" key={item.id}>
+                  <button
+                    type="button"
+                    className="product-row-summary"
+                    aria-expanded={expanded}
+                    onClick={() => setExpandedId(expanded ? null : item.id)}
+                  >
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <i className={`legend type-dot ${typeColors[item.type]}`} title={item.type} />
+                        <strong>{item.name}</strong>
                       </span>
+                      <span className="product-row-sum">{money(item.amount)}</span>
+                    </span>
+                    <span className="product-row-line2">
+                      <span className="muted product-row-meta">
+                        {item.institution ? `${item.type} · ${item.institution}` : item.type}
+                      </span>
+                      {item.possibleDuplicate ? (
+                        <span className="danger-text">возможный дубликат</span>
+                      ) : (
+                        <span className="teal-text">со скриншота</span>
+                      )}
+                    </span>
+                  </button>
+                  {expanded && (
+                    <div className="list-row-details">
+                      {item.possibleDuplicate && (
+                        <div className="detail-line">
+                          <span className="danger-text">
+                            ⚠ Похоже, такой инструмент уже есть в портфеле — проверьте, не дубликат ли это
+                          </span>
+                        </div>
+                      )}
+                      <div className="detail-line">
+                        <span>Банк / брокер</span>
+                        <span>{item.institution} · {item.currency}</span>
+                      </div>
+                      <div className="detail-line">
+                        <span>Вложено</span>
+                        <span>{money(item.invested)}</span>
+                      </div>
+                      <div className="list-row-actions">
+                        <Link className="outline-button" to={`/products/${item.id}/edit`}>
+                          Редактировать
+                        </Link>
+                        <Link
+                          className="delete-button"
+                          to={`/products/${item.id}/delete?return=${encodeURIComponent(returnTo)}`}
+                        >
+                          Удалить
+                        </Link>
+                      </div>
                     </div>
                   )}
-                  <div className="detail-line">
-                    <span>Банк / брокер</span>
-                    <span>{item.institution} · {item.currency}</span>
-                  </div>
-                  <div className="detail-line">
-                    <span>Вложено</span>
-                    <span>{money(item.invested)}</span>
-                  </div>
-                  <div className="list-row-actions">
-                    <Link className="outline-button" to={`/products/${item.id}/edit`}>
-                      Редактировать
-                    </Link>
-                    <Link
-                      className="delete-button"
-                      to={`/products/${item.id}/delete?return=${encodeURIComponent(returnTo)}`}
-                    >
-                      Удалить
-                    </Link>
-                  </div>
                 </div>
-              )}
-            </div>
-          );
-        })}
-        <ListPagination
-          hasMore={paging.hasMore}
-          onLoadMore={paging.loadMore}
-          pageSize={paging.pageSize}
-          onPageSizeChange={paging.setPageSize}
-        />
-        {summary.failures.map((failure) => (
-          <div className="list-row" key={failure.filename}>
-            <div className="list-row-summary list-row-static">
-              <span className="list-row-main">
-                <strong>Не удалось распознать {failure.filename}</strong>
-              </span>
-              <span className="list-row-value">
-                <small>{failure.reason}</small>
-              </span>
-            </div>
-            <div className="list-row-details">
-              <div className="list-row-actions">
+              );
+            })}
+          </div>
+          <ListPagination
+            hasMore={paging.hasMore}
+            onLoadMore={paging.loadMore}
+            pageSize={paging.pageSize}
+            onPageSizeChange={paging.setPageSize}
+          />
+        </>
+      )}
+      {summary.failures.length > 0 && (
+        <div className="product-list ocr-failures">
+          {summary.failures.map((failure) => (
+            <div className="list-row" key={failure.filename}>
+              <div className="product-row-summary product-row-static">
+                <span className="product-row-line1">
+                  <span className="product-row-name">
+                    <i className="legend type-dot slate" />
+                    <strong>Не удалось распознать {failure.filename}</strong>
+                  </span>
+                </span>
+                <span className="product-row-line2">
+                  <span className="muted product-row-meta">{failure.reason}</span>
+                </span>
+              </div>
+              <div className="list-row-actions product-row-actions">
                 <Link className="outline-button" to="/products/new">
                   Добавить вручную
                 </Link>
               </div>
             </div>
-          </div>
-        ))}
-        {!summary.items.length && !summary.failures.length && (
-          <p>На этом скриншоте не найдено ни одной записи.</p>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
+      {!summary.items.length && !summary.failures.length && (
+        <p>На этом скриншоте не найдено ни одной записи.</p>
+      )}
       <div className="confirm-actions" style={{ marginTop: 24 }}>
         <Link className="primary-button" to="/portfolio">
           Перейти к портфелю
