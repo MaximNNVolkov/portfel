@@ -90,6 +90,14 @@ const forgotPasswordEmailLimiter = new EmailRateLimiter()
 app.use(helmet())
 app.use(express.json())
 app.use('/api', apiLimiter)
+// CSRF (§28): cookie браузер прикладывает сам, поэтому изменяющий запрос без Bearer обязан
+// нести заголовок X-Requested-With. Чужой сайт не может выставить его без CORS-preflight,
+// а CORS сервер не разрешает. Вторая линия — SameSite=Strict у самой cookie.
+app.use('/api', (request, response, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(request.method) || bearerToken(request)) return next()
+  if (request.get('x-requested-with') !== 'portfel') return response.status(403).json({ error: 'Запрос отклонён: нет заголовка X-Requested-With' })
+  next()
+})
 // Скриншоты банковских приложений раньше раздавались статикой по /uploads без авторизации.
 // Клиенту они не нужны (распознанный результат приходит через /api/ocr/documents/:id),
 // а после распознавания воркер файл удаляет — поэтому публичной раздачи нет вовсе (§28).
@@ -180,7 +188,30 @@ function decodeUploadName(value: string) {
   }
 }
 function hashPassword(password: string, salt: string) { return scryptSync(password, salt, 64).toString('hex') }
-function authToken(request: Request) { const value = request.headers.authorization; return value?.startsWith('Bearer ') ? value.slice(7) : '' }
+// Сессия (§28): браузер держит токен в httpOnly-cookie — скрипт страницы его не видит,
+// поэтому XSS не может унести сессию. Заголовок Authorization: Bearer остаётся для
+// API-клиентов и smoke-теста (server/smoke-test.ts).
+const SESSION_COOKIE = 'portfel_session'
+function bearerToken(request: Request) { const value = request.headers.authorization; return value?.startsWith('Bearer ') ? value.slice(7) : '' }
+function cookieToken(request: Request) {
+  for (const part of (request.headers.cookie ?? '').split(';')) {
+    const [name, ...rest] = part.trim().split('=')
+    if (name === SESSION_COOKIE) return decodeURIComponent(rest.join('='))
+  }
+  return ''
+}
+function authToken(request: Request) { return bearerToken(request) || cookieToken(request) }
+function setSessionCookie(request: Request, response: Response, token: string) {
+  response.cookie(SESSION_COOKIE, token, {
+    httpOnly: true,
+    // За nginx request.secure берётся из X-Forwarded-Proto (trust proxy выше).
+    secure: request.secure || process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/api',
+    maxAge: SESSION_TTL_MS,
+  })
+}
+function clearSessionCookie(response: Response) { response.clearCookie(SESSION_COOKIE, { path: '/api' }) }
 function hashToken(token: string) { return createHash('sha256').update(token).digest('hex') }
 async function createSession(userId: string): Promise<string> {
   const token = randomBytes(32).toString('hex')
@@ -221,6 +252,7 @@ app.post('/api/auth/register', authLimiter, async (request, response) => {
     const salt = randomBytes(16).toString('hex'); const user = { id: randomUUID(), email, passwordHash: hashPassword(password, salt), salt }
     await db.query('INSERT INTO users (id, email, password_hash, salt) VALUES ($1, $2, $3, $4)', [user.id, user.email, user.passwordHash, user.salt])
     users.set(user.id, user); const token = await createSession(user.id)
+    setSessionCookie(request, response, token)
     response.status(201).json({ token, user: { id: user.id, email: user.email } })
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid credentials' }) }
 })
@@ -230,11 +262,13 @@ app.post('/api/auth/login', authLimiter, async (request, response) => {
   const result = await db.query('SELECT id, email, password_hash as "passwordHash", salt FROM users WHERE email = $1', [email])
   const user = result.rows[0] as User | undefined
   if (!user || !timingSafeEqual(Buffer.from(user.passwordHash, 'hex'), Buffer.from(hashPassword(password, user.salt), 'hex'))) return response.status(401).json({ error: 'Неверный email или пароль', field: 'password' })
-  const token = await createSession(user.id); response.json({ token, user: { id: user.id, email: user.email } })
+  const token = await createSession(user.id); setSessionCookie(request, response, token)
+  response.json({ token, user: { id: user.id, email: user.email } })
 })
 app.post('/api/auth/logout', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   await db.query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(authToken(request))])
+  clearSessionCookie(response)
   response.status(204).send()
 })
 app.get('/api/auth/me', async (request, response) => {
@@ -289,6 +323,7 @@ app.delete('/api/auth/me', async (request, response) => {
   const pendingFiles = await withTransaction(db, (client) => deleteUserData(client, userId))
   await Promise.all(pendingFiles.map((path) => unlink(path).catch(() => {})))
   users.delete(userId)
+  clearSessionCookie(response)
   response.status(204).send()
 })
 
