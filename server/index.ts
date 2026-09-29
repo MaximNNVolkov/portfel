@@ -32,7 +32,7 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER,
 } from './daily-tasks.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
@@ -42,7 +42,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  sumCashBalances, sumPayouts, sumTransactionCosts, updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -496,7 +496,9 @@ app.post('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
     const position = await withTransaction(db, async (client) => {
-      const created = await createPosition(client, userId, request.body ?? {}, 'manual')
+      const body = (request.body ?? {}) as PositionBody
+      const created = await createPosition(client, userId, body, 'manual')
+      if (body.fromCash === true) await payFromCash(client, userId, created)
       await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       return created
@@ -504,6 +506,35 @@ app.post('/api/positions', async (request, response) => {
     response.status(201).json((await valuedPositions(userId, [position]))[0])
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
 })
+// Реинвестирование (критик К4): новый продукт покупается на пришедшие деньги, а не
+// появляется в портфеле поверх них. Покупка проводится операцией BUY — свободные деньги
+// уменьшаются на ту же сумму (sumCashBalances), итог портфеля не удваивается, а удаление
+// операции возвращает деньги и уменьшает продукт, как у любой покупки.
+async function payFromCash(client: Db, userId: string, position: Position) {
+  const amount = position.invested ?? position.value
+  if (!amount || amount <= 0) throw new Error('Не указана сумма покупки')
+  const currency = position.instrument.currency
+  const balance = (await sumCashBalances(client, userId)).find((row) => row.currency === currency)?.balance ?? 0
+  if (balance + 0.005 < amount) {
+    throw new Error(`Свободных денег в ${currency} не хватает: есть ${Math.max(0, Math.round(balance * 100) / 100)}, нужно ${amount}`)
+  }
+  await insertTransaction(client, {
+    id: randomUUID(),
+    accountId: position.accountId,
+    instrumentId: position.instrumentId,
+    type: 'BUY',
+    date: position.openedOn ?? localToday(),
+    amount,
+    currency,
+    commission: 0,
+    tax: 0,
+    quantity: position.quantity,
+    price: position.averagePrice,
+    source: 'manual',
+    description: 'Покупка из свободных денег',
+  })
+}
+
 app.patch('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -902,7 +933,9 @@ app.post('/api/payouts', async (request, response) => {
         // ближайший пересчёт (§15) удалил бы её как собственную строку.
         source: 'manual',
         description: title,
+        institution: position?.account.provider,
       }
+      await syncTransactionForPayout(client, userId, record, false)
       await insertPayout(client, record)
       return record
     })
@@ -932,13 +965,66 @@ app.patch('/api/payouts/:id', async (request, response) => {
       // повторно не создаётся благодаря дедупликации по (инструмент, дата, тип).
       source: existing.source === 'forecast' ? 'manual' : existing.source,
     }
-    await updatePayout(db, userId, updated)
+    await withTransaction(db, async (client) => {
+      await syncTransactionForPayout(client, userId, updated)
+      await updatePayout(client, userId, updated)
+    })
     response.json(payoutToWire(updated, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
 })
+// Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
+// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
+// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
+// операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
+// их деньги приходят синхронизацией.
+const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
+  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION', DEPOSIT_PRINCIPAL: 'REDEMPTION',
+}
+async function syncTransactionForPayout(client: Db, userId: string, payout: Payout, stored = true) {
+  if (payout.source === 'broker' || payout.institution === TINKOFF_PROVIDER) return
+  const type = TRANSACTION_BY_PAYOUT[payout.type]
+  if (payout.status !== 'received' || !type) {
+    if (!payout.transactionId) return
+    const linked = payout.transactionId
+    payout.transactionId = undefined
+    if (stored) await updatePayout(client, userId, payout)
+    await deleteTransaction(client, userId, linked)
+    return
+  }
+  const transaction: Transaction = {
+    id: payout.transactionId ?? randomUUID(),
+    accountId: payout.accountId,
+    instrumentId: payout.instrumentId,
+    type,
+    date: payout.date,
+    amount: payout.amount,
+    currency: payout.currency,
+    commission: 0,
+    tax: 0,
+    source: 'manual',
+    description: payout.description,
+  }
+  if (payout.transactionId) {
+    const existing = await findTransaction(client, userId, payout.transactionId)
+    if (existing) {
+      await updateTransaction(client, userId, { ...existing, date: payout.date, amount: payout.amount, currency: payout.currency })
+      return
+    }
+  }
+  await insertTransaction(client, transaction)
+  payout.transactionId = transaction.id
+}
+
 app.delete('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
-  if (!(await deletePayout(db, userId, request.params.id))) return response.status(404).json({ error: 'Payout not found' })
+  const existing = await findPayout(db, userId, request.params.id)
+  if (!existing) return response.status(404).json({ error: 'Payout not found' })
+  // Выплата и её операция — одни и те же деньги (как в syncPayoutForTransaction):
+  // удалённая выплата не оставляет в свободных деньгах сумму, которой больше нет.
+  await withTransaction(db, async (client) => {
+    await deletePayout(client, userId, existing.id)
+    if (existing.transactionId && existing.source !== 'broker') await deleteTransaction(client, userId, existing.transactionId)
+  })
   response.status(204).send()
 })
 

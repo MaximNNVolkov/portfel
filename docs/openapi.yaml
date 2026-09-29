@@ -502,7 +502,8 @@ paths:
     parameters:
       - $ref: '#/components/parameters/id'
     patch:
-      tags: [payouts]
+      summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
+      description: 'Статус received заводит связанную операцию (деньги попадают в свободные), expected — удаляет её; у брокерских выплат операции приходят синхронизацией'
       summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
       requestBody: { $ref: '#/components/requestBodies/PayoutUpdate' }
       responses:
@@ -817,6 +818,10 @@ components:
             allOf:
               - $ref: '#/components/schemas/PositionInput'
               - required: [name, amount, date]
+              - properties:
+                  fromCash:
+                    type: boolean
+                    description: 'Купить на свободные деньги (реинвестирование): заводится операция BUY, 400 — если денег в валюте продукта не хватает'
     PositionUpdate:
       required: true
       content:

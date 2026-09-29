@@ -56,6 +56,8 @@ type Product = {
   forecastNote?: string;
   // Тело вклада вернулось / бумага погашена: позиция закрыта и в стоимость не входит.
   closedOn?: string;
+  // Только при создании: купить на свободные деньги (реинвестирование, критик К4).
+  fromCash?: boolean;
 };
 type ProductValuation = {
   value: number | null;
@@ -3519,16 +3521,6 @@ function ProductDetailPage({
                     </span>
                   </span>
                 </div>
-                {nextIsPrincipal && (
-                  <div className="attention-actions">
-                    <Link
-                      className="outline-button"
-                      to={reinvestLink(nextPayout.total, product.institution, product.name)}
-                    >
-                      Реинвестировать
-                    </Link>
-                  </div>
-                )}
               </div>
             )}
             {!nextIsPrincipal && end && parseIsoDate(end) && (
@@ -4950,6 +4942,9 @@ function ProductFormPage({
   // и банком, куда они пришли.
   const reinvestFrom = searchParams.get("reinvest");
   const [amount, setAmount] = useState(() => searchParams.get("amount") ?? "");
+  // Реинвестируются уже пришедшие деньги: покупка списывает их из свободных, иначе
+  // одна и та же сумма окажется в портфеле дважды — деньгами и новым продуктом.
+  const [fromCash, setFromCash] = useState(() => Boolean(reinvestFrom));
   const [date, setDate] = useState(todayIsoDate);
   const [invested, setInvested] = useState("");
   const [institution, setInstitution] = useState(() => searchParams.get("institution") ?? "");
@@ -4973,6 +4968,7 @@ function ProductFormPage({
     setType(null);
     setName("");
     setAmount("");
+    setFromCash(false);
     setDate(todayIsoDate());
     setInvested("");
     setInstitution("");
@@ -5010,6 +5006,7 @@ function ProductFormPage({
         currency,
         source: "manual",
         ...detailsToPayload(details),
+        ...(fromCash ? { fromCash: true } : {}),
       });
       setSaved(true);
     } catch (submitError) {
@@ -5218,6 +5215,13 @@ function ProductFormPage({
                 {amount} ₽ · {date}
               </p>
               <InvestedCheckNote check={reconciled} amount={amount} />
+              <label className="checkbox-label">
+                <input type="checkbox" checked={fromCash} onChange={(event) => setFromCash(event.target.checked)} />
+                Оплатить из свободных денег
+              </label>
+              {fromCash && (
+                <p className="muted">Сумма спишется со свободных денег — итог портфеля не вырастет дважды.</p>
+              )}
               <details className="details-block">
                 <summary>Добавить дополнительные детали</summary>
                 <div className="details-fields">
