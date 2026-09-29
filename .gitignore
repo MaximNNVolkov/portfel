@@ -37,3 +37,6 @@ server/data.json
 server/uploads/
 *.traineddata
 scripts/__pycache__/
+
+# Скриншоты обхода scripts/qa-cycle
+scripts/qa-cycle/shots/
