@@ -107,6 +107,8 @@ npm run build && sudo cp -r dist/. /var/www/portfel/ && sudo chown -R www-data:w
 
 ### Как работает pull-автодеплой (действующая схема)
 
+Две половины: **таймер** даёт надёжность, **вебхук** — скорость.
+
 - systemd-таймер `portfel-autodeploy.timer` (`OnUnitInactiveSec=5min`) запускает
   `portfel-autodeploy.service` → `/home/user1/.hermes/scripts/portfel_autodeploy.sh`.
 - Тик: `git fetch origin main`; если `origin/main` совпадает с `HEAD` — выход молча.
@@ -122,15 +124,40 @@ npm run build && sudo cp -r dist/. /var/www/portfel/ && sudo chown -R www-data:w
   `deploy-stand.sh` (ручной и автоматический запуск не соберут стенд одновременно).
 - Токен GitHub берётся из `~/.git-credentials` (600), токен Telegram — из `~/.hermes/.env`.
 
+### Вебхук: мгновенный тик вместо ожидания таймера
+
+`portfel-deploy-hook.service` слушает `127.0.0.1:9077`, наружу проброшен через nginx как
+`POST https://portfel.176.109.108.58.nip.io/gh-deploy` (`location = /gh-deploy` стоит перед
+SPA-фолбэком). Подписан HMAC-SHA256, секрет — `~/.config/portfel-autodeploy/webhook_secret`.
+
+Событие GitHub — **`workflow_run`, а не `push`**: на момент push'а CI ещё идёт, и тик всё
+равно увидел бы «pending». Слушатель реагирует только на
+`action=completed` + `head_branch=main` + `conclusion=success`, остальное отдаёт `202 ignored`.
+
+Вебхук — только «пинок»: он вызывает `systemctl start --no-block portfel-autodeploy.service`
+и **не принимает решений по своему payload'у**. Решает тик, который заново спрашивает у
+GitHub API статус CI. Поэтому подделанный или устаревший payload не может выложить красный
+коммит — максимум вызовет холостой тик. Ответ `202` уходит сразу, GitHub не ждёт сборку.
+
+Таймер остаётся страховкой: если вебхук не дошёл (GitHub недоступен, сеть моргнула,
+слушатель лежал), стенд всё равно обновится в пределах 5 минут.
+
 Диагностика:
 
 ```
 systemctl list-timers portfel-autodeploy
+systemctl status portfel-deploy-hook
 journalctl -u portfel-autodeploy.service -n 50
+journalctl -u portfel-deploy-hook -n 30
 tail -40 /home/user1/.local/share/portfel-autodeploy/autodeploy.log
 ```
 
-Задержка от зелёного CI до живого стенда — до 5 минут (таймер) + ~25 секунд (сборка).
+Доставки вебхука видны в GitHub: Settings → Webhooks → Recent Deliveries.
+
+Задержка от зелёного CI до живого стенда — секунды по вебхуку (или до 5 минут, если
+вебхук не дошёл и сработал таймер) + ~25 секунд на сборку.
+
+Установка и переустановка с нуля — `deploy/README.md`.
 
 Ручной путь работает всегда: `cd /home/user1/portfel && scripts/deploy-stand.sh`.
 

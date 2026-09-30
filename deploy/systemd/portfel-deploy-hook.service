@@ -1,0 +1,25 @@
+[Unit]
+Description=Portfel deploy webhook listener (GitHub workflow_run -> instant autodeploy tick)
+Documentation=file:///home/user1/portfel/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user1
+Group=user1
+Environment=PORTFEL_HOOK_PORT=9077
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/user1/.hermes/scripts/portfel_deploy_hook.py
+Restart=always
+RestartSec=5
+# Слушатель только принимает подписанный пинок и вызывает systemctl start — своего
+# состояния у него нет, писать ему некуда.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadOnlyPaths=/home/user1/.config/portfel-autodeploy
+
+[Install]
+WantedBy=multi-user.target
