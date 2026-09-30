@@ -99,7 +99,44 @@ npm run build && sudo cp -r dist/. /var/www/portfel/ && sudo chown -R www-data:w
 
 ## Автоматическая выкладка
 
-Каждый push в `main`, прошедший CI (`checks` и `backend-image`), выкладывается на стенд
+Стенд обновляется сам: **pull-режим** — сервер раз в 5 минут опрашивает GitHub. Push-путь
+из GitHub Actions (job `deploy`) сохранён в workflow, но на этом хосте он неработоспособен:
+порт 22 недоступен из интернета (наружу проброшены только 80/443), поэтому Actions не может
+зайти по SSH. Секреты `STAND_SSH_*` не заведены, и job завершается зелёным с пометкой
+«пропущено» — это ожидаемое состояние, а не сбой.
+
+### Как работает pull-автодеплой (действующая схема)
+
+- systemd-таймер `portfel-autodeploy.timer` (`OnUnitInactiveSec=5min`) запускает
+  `portfel-autodeploy.service` → `/home/user1/.hermes/scripts/portfel_autodeploy.sh`.
+- Тик: `git fetch origin main`; если `origin/main` совпадает с `HEAD` — выход молча.
+- Иначе спрашивает у GitHub API check-runs нового коммита. Выкладывается **только зелёный**
+  CI: `pending` → ждём следующего тика, `failed` → сообщение в Telegram один раз на коммит
+  (дедуп через `last_reported_failure`).
+- Зелёный коммит → `scripts/deploy-stand.sh <sha>` (та же логика, что и в push-режиме).
+- Если в коммите менялся `nginx/nginx.conf.template` — приходит предупреждение: живой
+  `/etc/nginx/sites-available/portfel` этот скрипт НЕ трогает, его правят вручную.
+- Успех — тихо, только в лог `/home/user1/.local/share/portfel-autodeploy/autodeploy.log`
+  (logrotate, weekly, 4 копии). Сообщения только про сбой.
+- Блокировки две: `flock` на тик (не запускать два тика разом) и `flock` внутри
+  `deploy-stand.sh` (ручной и автоматический запуск не соберут стенд одновременно).
+- Токен GitHub берётся из `~/.git-credentials` (600), токен Telegram — из `~/.hermes/.env`.
+
+Диагностика:
+
+```
+systemctl list-timers portfel-autodeploy
+journalctl -u portfel-autodeploy.service -n 50
+tail -40 /home/user1/.local/share/portfel-autodeploy/autodeploy.log
+```
+
+Задержка от зелёного CI до живого стенда — до 5 минут (таймер) + ~25 секунд (сборка).
+
+Ручной путь работает всегда: `cd /home/user1/portfel && scripts/deploy-stand.sh`.
+
+### Push-режим (если порт 22 когда-нибудь откроют наружу)
+
+Каждый push в `main`, прошедший CI (`checks` и `backend-image`), выкладывался бы на стенд
 job'ом `deploy` из `.github/workflows/ci.yml`: он заходит по SSH и запускает
 `scripts/deploy-stand.sh <sha>`. Скрипт делает fast-forward рабочей копии до этого коммита,
 `npm ci` (только если поменялся `package-lock.json`), `npm run build`, копирует статику
@@ -112,9 +149,7 @@ job'ом `deploy` из `.github/workflows/ci.yml`: он заходит по SSH 
 выполнить только `deploy-stand.sh` и ничего больше. Права `sudo` у скрипта — две точные
 команды из sudoers ниже.
 
-Пока секреты `STAND_SSH_*` не заведены, job завершается зелёным с пометкой «пропущено».
-
-### Разовая настройка
+### Разовая настройка push-режима
 
 1. На своём компьютере создать ключ деплоя (без пароля):
    ```

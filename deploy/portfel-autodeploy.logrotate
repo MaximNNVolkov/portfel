@@ -1,0 +1,10 @@
+/home/user1/.local/share/portfel-autodeploy/autodeploy.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su user1 user1
+    create 0644 user1 user1
+}

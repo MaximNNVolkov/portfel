@@ -1,0 +1,21 @@
+[Unit]
+Description=Portfel stand autodeploy tick (pull origin/main, deploy green CI commit)
+Documentation=file:///home/user1/.hermes/scripts/portfel_autodeploy.sh
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=user1
+Group=user1
+WorkingDirectory=/home/user1/portfel
+Environment=HOME=/home/user1
+Environment=TMPDIR=/home/user1/.hermes/cache/scratch
+# node/npm лежат в /usr/bin (nvm-версия не используется юнитами portfel).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash /home/user1/.hermes/scripts/portfel_autodeploy.sh
+TimeoutStartSec=900
+# Сборка не должна конкурировать с бэкендом за CPU.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

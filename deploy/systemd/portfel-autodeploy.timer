@@ -1,0 +1,12 @@
+[Unit]
+Description=Run portfel autodeploy tick every 5 minutes
+Documentation=file:///home/user1/.hermes/scripts/portfel_autodeploy.sh
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+Unit=portfel-autodeploy.service
+
+[Install]
+WantedBy=timers.target
