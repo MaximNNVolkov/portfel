@@ -378,6 +378,27 @@ async function run() {
       assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Пришедшие деньги уже вложены — «Уже реинвестировано» снимает напоминание в ленте.
+    await test('отметка «реинвестировано» убирает выплату из «Требует внимания»', async () => {
+      const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+      const payout = await api('/api/payouts', {
+        method: 'POST', token: tokenA,
+        body: { title: 'Смоук-тест возврат', amount: 7000, date: yesterday, type: 'COUPON', status: 'received', positionId: sharePositionId },
+      })
+      const reminder = async () => (await api('/api/attention', { token: tokenA })).json
+        .find((item: { payoutIds?: string[] }) => item.payoutIds?.includes(payout.json.id))
+      assert.equal((await reminder())?.action, 'reinvest')
+      assert.equal(payout.json.reinvested, false)
+      const bad = await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { reinvested: 'да' } })
+      assert.equal(bad.status, 400)
+      const marked = await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { reinvested: true } })
+      assert.equal(marked.json.reinvested, true)
+      assert.equal(await reminder(), undefined)
+      await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { reinvested: false } })
+      assert.ok(await reminder(), 'снятая отметка возвращает напоминание')
+      assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
     // Целевая структура: сохраняется в настройках, сводка показывает сумму до цели.
     await test('целевая структура: проверка, сохранение, сумма до цели, снятие', async () => {
       const bad = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 30 } } })

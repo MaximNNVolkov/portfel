@@ -839,6 +839,7 @@ components:
         type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
         status: { type: string, enum: [expected, received] }
         overdue: { type: boolean, description: 'Ожидалась, но дата прошла' }
+        reinvested: { type: boolean, description: 'Пришедшие деньги отмечены вложенными — напоминание «Реинвестировать» снято' }
         source: { type: string }
         instrumentId: { type: [string, 'null'] }
         accountId: { type: string }
@@ -921,6 +922,7 @@ components:
         type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
         status: { type: string, enum: [expected, received] }
         positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
+        reinvested: { type: boolean, description: 'Только при изменении: отметить пришедшие деньги вложенными (true) или снять отметку (false)' }
     TransactionInput:
       type: object
       description: При создании обязательны type, amount, date; для BUY и SELL — positionId. COUPON, DIVIDEND и INTEREST можно привязать к позиции (positionId, null — отвязать)

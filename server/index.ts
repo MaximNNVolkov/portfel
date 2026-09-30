@@ -186,6 +186,8 @@ function payoutToWire(payout: Payout, context?: EngineContext, today = localToda
     institution: payout.institution,
     // Ожидалась, но дата уже прошла (§22, BUG-22) — отдельная группа «Просрочено».
     overdue: payout.status === 'expected' && payout.date < today,
+    // Пришедшие деньги уже вложены — напоминание «Реинвестировать» не показывается.
+    reinvested: Boolean(payout.reinvestedAt),
   }
 }
 
@@ -1024,6 +1026,7 @@ app.get('/api/attention', async (request, response) => {
       currency: payout.currency,
       status: payout.status,
       institution: payout.institution,
+      reinvested: Boolean(payout.reinvestedAt),
     })),
     brokers: tinkoff ? [{ name: 'Т-Инвестиции', status: tinkoff.status, lastSyncAt: tinkoff.lastSyncAt }] : [],
     recommendations,
@@ -1108,6 +1111,13 @@ app.post('/api/payouts', async (request, response) => {
     response.status(201).json(payoutToWire(payout, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
 })
+// Отметка «уже реинвестировано» (снимает напоминание в «Требует внимания»). Сохраняется
+// время первой отметки; повторная отметка его не сдвигает.
+function reinvestedAt(value: unknown, current: string | undefined): string | undefined {
+  if (value === undefined) return current
+  if (typeof value !== 'boolean') throw new Error('reinvested: ожидается true или false')
+  return value ? current ?? new Date().toISOString() : undefined
+}
 app.patch('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -1126,6 +1136,7 @@ app.patch('/api/payouts/:id', async (request, response) => {
       date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
       type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,
       status: body.status !== undefined ? payoutStatus(body.status, existing.status) : existing.status,
+      reinvestedAt: reinvestedAt((request.body as { reinvested?: unknown }).reinvested, existing.reinvestedAt),
       // Правка прогнозной строки означает, что пользователь взял её под свой контроль:
       // дальше она живёт как ручная и переживает пересчёт, а прогноз на ту же дату/тип
       // повторно не создаётся благодаря дедупликации по (инструмент, дата, тип).

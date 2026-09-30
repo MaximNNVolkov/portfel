@@ -103,6 +103,15 @@ test('недавно полученная выплата — напоминан�
   assert.equal(items[0].action, 'reinvest')
 })
 
+test('выплата, отмеченная реинвестированной, напоминание не создаёт', () => {
+  const items = build([], [
+    payout({ id: 'done', date: '2026-09-25', status: 'received', type: 'DEPOSIT_PRINCIPAL', reinvested: true }),
+    payout({ id: 'todo', date: '2026-09-26', status: 'received' }),
+  ])
+  assert.equal(items.length, 1)
+  assert.deepEqual(items[0].payoutIds, ['todo'])
+})
+
 console.log('\nПозиции')
 
 test('вклад заканчивается в пределах 30 дней', () => {

@@ -239,6 +239,8 @@ type Payment = {
   institution?: string;
   /** Сумма в базовой валюте портфеля по курсу ЦБ (§13); null — курса нет. */
   amountBase?: number | null;
+  /** Пришедшие деньги уже вложены — напоминание «Реинвестировать» снято. */
+  reinvested?: boolean;
 };
 type TransactionType =
   | "BUY"
@@ -845,19 +847,22 @@ const attentionSeverityColors: Record<AttentionItem["severity"], string> = {
 };
 // Реинвестирование на MVP — переход к добавлению продукта с подставленной суммой и
 // банком, без отдельной сущности «деньги к вложению» (CLIENT_FLOW_PLAN §6, вопрос 1).
-function reinvestLink(amount: number | undefined, institution: string | undefined, from: string, currency?: string) {
+// payoutIds — выплаты, чьи деньги вкладываются: после сохранения продукта они отмечаются
+// реинвестированными, и напоминание в «Требует внимания» уходит само.
+function reinvestLink(amount: number | undefined, institution: string | undefined, from: string, currency?: string, payoutIds?: string[]) {
   const params = new URLSearchParams();
   if (amount) params.set("amount", String(Math.round(amount * 100) / 100));
   // Сумма передаётся в валюте выплаты: купон в USD не должен лечь в форму как рубли.
   if (currency && currency !== "RUB") params.set("currency", currency);
   if (institution && institution !== "Ручной ввод") params.set("institution", institution);
   params.set("reinvest", from);
+  if (payoutIds?.length) params.set("payouts", payoutIds.join(","));
   return `/products/new?${params.toString()}`;
 }
 function attentionLink(item: AttentionItem): { to: string; label: string } | null {
   switch (item.action) {
     case "reinvest":
-      return { to: reinvestLink(item.amount, item.institution, item.title, item.currency), label: "Реинвестировать" };
+      return { to: reinvestLink(item.amount, item.institution, item.title, item.currency, item.payoutIds), label: "Реинвестировать" };
     case "open_position":
       return item.positionId ? { to: `/products/${item.positionId}`, label: "Открыть" } : null;
     case "edit_position":
@@ -878,10 +883,12 @@ function AttentionList({
   items,
   payments,
   onMarkReceived,
+  onMarkReinvested,
 }: {
   items: AttentionItem[];
   payments: Payment[];
   onMarkReceived: (payment: Payment) => Promise<void>;
+  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const [markingId, setMarkingId] = useState<string | null>(null);
   async function markReceived(item: AttentionItem) {
@@ -891,6 +898,16 @@ function AttentionList({
         const payment = payments.find((entry) => entry.id === id);
         if (payment) await onMarkReceived(payment);
       }
+    } finally {
+      setMarkingId(null);
+    }
+  }
+  // Деньги уже вложены (здесь или в другом приложении) — снимаем напоминание без
+  // добавления продукта.
+  async function markReinvested(item: AttentionItem) {
+    setMarkingId(item.id);
+    try {
+      await onMarkReinvested(item.payoutIds ?? []);
     } finally {
       setMarkingId(null);
     }
@@ -932,6 +949,16 @@ function AttentionList({
                   </Link>
                 )
               )}
+              {item.action === "reinvest" && item.payoutIds?.length ? (
+                <button
+                  type="button"
+                  className="outline-button"
+                  disabled={markingId !== null}
+                  onClick={() => void markReinvested(item)}
+                >
+                  {markingId === item.id ? "Сохраняем..." : "Уже реинвестировано"}
+                </button>
+              ) : null}
             </div>
           </div>
         );
@@ -1316,6 +1343,27 @@ function AppMvp() {
       current.map((item) => (item.id === payment.id ? updated : item)),
     );
     setToast("Выплата отмечена полученной");
+  }
+  // «Уже реинвестировано» (из ленты внимания или после добавления продукта на эти деньги):
+  // отметка снимает напоминание; лента перезапрашивается вслед за изменением выплат.
+  async function markPaymentsReinvested(ids: string[], quiet = false) {
+    const updated = new Map<string, Payment>();
+    for (const id of ids) {
+      if (apiOnline) {
+        const response = await apiFetch(`${apiUrl}/payouts/${id}`, {
+          method: "PATCH",
+          headers: authHeaders,
+          body: JSON.stringify({ reinvested: true }),
+        });
+        if (!response.ok) throw new Error("Не удалось отметить выплату реинвестированной");
+        updated.set(id, (await response.json()) as Payment);
+      } else {
+        const payment = payments.find((item) => item.id === id);
+        if (payment) updated.set(id, { ...payment, reinvested: true });
+      }
+    }
+    setPayments((current) => current.map((item) => updated.get(item.id) ?? item));
+    if (!quiet) setToast("Отмечено: деньги реинвестированы");
   }
   async function removePayment(id: string) {
     if (apiOnline) {
@@ -1732,6 +1780,7 @@ function AppMvp() {
                 attention={attention}
                 storage={storage}
                 onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
+                onMarkReinvested={withErrorToast(markPaymentsReinvested, "Не удалось отметить выплату реинвестированной")}
               />
             }
           />
@@ -1758,6 +1807,7 @@ function AppMvp() {
                 onUnauthorized={expireSession}
                 onSubmit={addProduct}
                 onOcrComplete={applyOcrResult}
+                onMarkReinvested={(ids) => markPaymentsReinvested(ids, true)}
               />
             }
           />
@@ -1846,6 +1896,7 @@ function AppMvp() {
                 attention={attention}
                 payments={payments}
                 onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
+                onMarkReinvested={withErrorToast(markPaymentsReinvested, "Не удалось отметить выплату реинвестированной")}
               />
             }
           />
@@ -1929,6 +1980,7 @@ function Dashboard({
   attention,
   storage,
   onMarkReceived,
+  onMarkReinvested,
 }: {
   summary: PortfolioSummary | null;
   products: Product[];
@@ -1941,6 +1993,7 @@ function Dashboard({
   attention: AttentionItem[] | null;
   storage: StructureBreakdown[] | null;
   onMarkReceived: (payment: Payment) => Promise<void>;
+  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const dataLoaded = useContext(DataLoadedContext);
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
@@ -2142,7 +2195,7 @@ function Dashboard({
           {topAttention.length === 0 ? (
             <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
           ) : (
-            <AttentionList items={topAttention} payments={payments} onMarkReceived={onMarkReceived} />
+            <AttentionList items={topAttention} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
           )}
         </>
       )}
@@ -2847,7 +2900,7 @@ function PaymentRow({
     product ? (payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : typeLabel) : title !== typeLabel ? typeLabel : null,
     institution,
     payment.source === "forecast" && payment.status === "expected" ? "прогноз" : null,
-    payment.status === "received" ? "получено" : null,
+    payment.status === "received" ? (payment.reinvested ? "реинвестировано" : "получено") : null,
   ].filter(Boolean);
   return (
     <div className="list-row">
@@ -2891,8 +2944,8 @@ function PaymentRow({
                 {marking ? "Сохраняем..." : "Отметить полученной"}
               </button>
             )}
-            {payment.status === "received" && (
-              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title, payment.currency)}>
+            {payment.status === "received" && !payment.reinvested && (
+              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title, payment.currency, [payment.id])}>
                 Реинвестировать
               </Link>
             )}
@@ -4909,10 +4962,12 @@ function AttentionPage({
   attention,
   payments,
   onMarkReceived,
+  onMarkReinvested,
 }: {
   attention: AttentionItem[] | null;
   payments: Payment[];
   onMarkReceived: (payment: Payment) => Promise<void>;
+  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const loaded = useContext(DataLoadedContext);
   const sections = ([1, 2, 3] as const)
@@ -4933,7 +4988,7 @@ function AttentionPage({
               <i className={`legend type-dot ${attentionSeverityColors[section.severity]}`} />
               {attentionSeverityLabels[section.severity]} · {section.items.length}
             </h2>
-            <AttentionList items={section.items} payments={payments} onMarkReceived={onMarkReceived} />
+            <AttentionList items={section.items} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
           </section>
         ))
       )}
@@ -5552,11 +5607,13 @@ function ProductFormPage({
   onUnauthorized,
   onSubmit,
   onOcrComplete,
+  onMarkReinvested,
 }: {
   token: string;
   onUnauthorized: () => void;
   onSubmit: (product: Product) => Promise<void>;
   onOcrComplete: (result: OcrUploadResult) => void;
+  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -5568,6 +5625,7 @@ function ProductFormPage({
   // Реинвестирование (CLIENT_FLOW_PLAN §4.4): форма открывается с суммой пришедших денег
   // и банком, куда они пришли.
   const reinvestFrom = searchParams.get("reinvest");
+  const reinvestPayoutIds = (searchParams.get("payouts") ?? "").split(",").filter(Boolean);
   const [amount, setAmount] = useState(() => searchParams.get("amount") ?? "");
   // Реинвестируются уже пришедшие деньги: покупка списывает их из свободных, иначе
   // одна и та же сумма окажется в портфеле дважды — деньгами и новым продуктом.
@@ -5648,6 +5706,9 @@ function ProductFormPage({
         ...detailsToPayload(details),
         ...(fromCash ? { fromCash: true } : {}),
       });
+      // Продукт куплен на пришедшие деньги — напоминание реинвестировать их больше не нужно.
+      // Сбой отметки не отменяет сохранённый продукт: её можно поставить из ленты вручную.
+      if (reinvestPayoutIds.length) await onMarkReinvested(reinvestPayoutIds).catch(() => undefined);
       setSaved(true);
     } catch (submitError) {
       setError(errorText(submitError, "Не удалось сохранить продукт"));
