@@ -2966,6 +2966,66 @@ function PaymentRow({
     </div>
   );
 }
+// Календарь выплат как инструмент планирования (§22): сверху свод «сколько придёт»,
+// ниже — период, уровень (дни / месяцы / годы) и сам календарь. Всё состояние — в адресе
+// (?by=&from=&to=), поэтому «назад» возвращает на уровень выше, а период можно сохранить
+// ссылкой.
+const isoOf = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+function shiftIso(date: string, months: number, days = 0) {
+  const parsed = new Date(`${date}T12:00:00`);
+  parsed.setMonth(parsed.getMonth() + months, parsed.getDate() + days);
+  return isoOf(parsed);
+}
+const monthStart = (date: string) => `${date.slice(0, 7)}-01`;
+const monthEnd = (date: string) => shiftIso(monthStart(date), 1, -1);
+const yearEnd = (date: string) => `${date.slice(0, 4)}-12-31`;
+const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+// Деньги, которые придут: доход отдельно от возврата вложений (критик К7) —
+// «придёт 517 000» без оговорки обещало бы доход, которого нет.
+function payoutTotals(list: Payment[]) {
+  const income = sumPayoutsBase(list.filter((item) => !isPrincipalPayout(item)));
+  const principal = sumPayoutsBase(list.filter(isPrincipalPayout));
+  return {
+    total: income.total + principal.total,
+    income: income.total,
+    principal: principal.total,
+    partial: income.partial || principal.partial,
+    count: list.length,
+  };
+}
+function totalsNote(totals: ReturnType<typeof payoutTotals>) {
+  return [
+    totals.principal > 0 ? `доход ${money(totals.income)} · возврат вложений ${money(totals.principal)}` : null,
+    totals.partial ? "без выплат в валюте без курса ЦБ" : null,
+  ].filter(Boolean).join(" · ");
+}
+type PayoutPeriod = { from: string; to: string };
+type PayoutPreset = PayoutPeriod & { id: string; label: string; by: PaymentViewMode };
+function payoutPresets(today: string): PayoutPreset[] {
+  return [
+    { id: "30d", label: "30 дней", from: today, to: shiftIso(today, 0, 30), by: "day" },
+    { id: "month", label: "Этот месяц", from: monthStart(today), to: monthEnd(today), by: "day" },
+    { id: "next", label: "Следующий месяц", from: shiftIso(monthStart(today), 1), to: monthEnd(shiftIso(monthStart(today), 1)), by: "day" },
+    { id: "12m", label: "12 месяцев", from: today, to: shiftIso(today, 12, -1), by: "month" },
+    { id: "year", label: "Этот год", from: `${today.slice(0, 4)}-01-01`, to: yearEnd(today), by: "month" },
+    { id: "ahead", label: "Всё впереди", from: today, to: "", by: "year" },
+    { id: "all", label: "Всё время", from: "", to: "", by: "year" },
+  ];
+}
+function periodTitle({ from, to }: PayoutPeriod) {
+  if (from && to && from === monthStart(from) && to === monthEnd(from)) return periodLabel(from.slice(0, 7), "month");
+  if (from && to && from.endsWith("-01-01") && to === yearEnd(from)) return `${from.slice(0, 4)} год`;
+  if (from && to) return from === to ? fullDate(from) : `${fullDate(from)} — ${fullDate(to)}`;
+  if (from) return `с ${fullDate(from)}`;
+  if (to) return `по ${fullDate(to)}`;
+  return "всё время";
+}
+const LEVEL_LABELS: Record<PaymentViewMode, [string, string]> = {
+  day: ["По дням", "Дни"],
+  month: ["По месяцам", "Месяцы"],
+  year: ["По годам", "Годы"],
+};
 function PaymentsPage({
   payments,
   products,
@@ -2976,14 +3036,48 @@ function PaymentsPage({
   onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<PaymentViewMode>("day");
+  // Раскрытая выплата внутри раскрытого периода — отдельно, чтобы период не сворачивался.
+  const [innerId, setInnerId] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<PayoutType | "all">("all");
-  // Из карточки инструмента «Все выплаты» открывает календарь уже отфильтрованным по нему.
-  const [searchParams] = useSearchParams();
-  const [instrumentFilter, setInstrumentFilter] = useState<string>(() => searchParams.get("instrument") || "all");
   const [bankFilter, setBankFilter] = useState("all");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Из карточки инструмента «Все выплаты» открывает календарь уже отфильтрованным по нему.
+  const instrumentFilter = searchParams.get("instrument") || "all";
+  const today = todayIsoDate();
+  const presets = useMemo(() => payoutPresets(today), [today]);
+  // Без параметров — год вперёд по месяцам: самый частый вопрос «сколько придёт и когда».
+  const hasPeriod = searchParams.has("from") || searchParams.has("to");
+  const defaultPreset = presets.find((preset) => preset.id === "12m")!;
+  const period: PayoutPeriod = hasPeriod
+    ? { from: searchParams.get("from") ?? "", to: searchParams.get("to") ?? "" }
+    : defaultPreset;
+  const byParam = searchParams.get("by");
+  const level: PaymentViewMode =
+    byParam === "day" || byParam === "month" || byParam === "year" ? byParam : hasPeriod ? "month" : defaultPreset.by;
+  // Порядок проверки — от «круглых» периодов: 1-го числа «30 дней» совпадает с «Этим месяцем».
+  const activePreset = ["month", "next", "year", "12m", "30d", "ahead", "all"]
+    .map((id) => presets.find((preset) => preset.id === id)!)
+    .find((preset) => preset.from === period.from && preset.to === period.to);
+  const [customOpen, setCustomOpen] = useState(false);
+  const showCustom = customOpen || (!activePreset && hasPeriod);
+
+  // Каждый шаг (смена периода, уровня, переход внутрь месяца) — запись в истории:
+  // «назад» в браузере возвращает к предыдущему виду, как требует §40.7.
+  function go(next: { from?: string; to?: string; by?: PaymentViewMode }) {
+    const params = new URLSearchParams(searchParams);
+    const merged = { from: period.from, to: period.to, by: level, ...next };
+    params.set("from", merged.from);
+    params.set("to", merged.to);
+    params.set("by", merged.by);
+    setExpandedId(null);
+    setSearchParams(params);
+  }
+  function setInstrumentFilter(value: string) {
+    const params = new URLSearchParams(searchParams);
+    if (value === "all") params.delete("instrument");
+    else params.set("instrument", value);
+    setSearchParams(params, { replace: true });
+  }
 
   const instrumentOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -2994,31 +3088,32 @@ function PaymentsPage({
     });
     return Array.from(map.entries());
   }, [payments, products]);
-
-  // Замечание 24: перепутанные «С» и «По» дают пустой список, который выглядит как
-  // «выплаты пропали» — предупреждаем и предлагаем поменять границы местами.
-  const rangeInverted = Boolean(dateFrom && dateTo && dateFrom > dateTo);
   const bankOptions = Array.from(
     new Set(payments.map((payment) => payoutInstitution(payment, products)).filter((name): name is string => Boolean(name))),
   ).sort();
-  const activeFilters = [typeFilter !== "all", instrumentFilter !== "all", bankFilter !== "all", Boolean(dateFrom), Boolean(dateTo)]
-    .filter(Boolean).length;
-  const filtered = payments.filter((payment) => {
+  const activeFilters = [typeFilter !== "all", instrumentFilter !== "all", bankFilter !== "all"].filter(Boolean).length;
+  // Фильтры по типу, инструменту и банку действуют на всё: свод, календарь, просроченные.
+  const matching = payments.filter((payment) => {
     if (typeFilter !== "all" && payment.type !== typeFilter) return false;
     if (instrumentFilter !== "all" && payment.instrumentId !== instrumentFilter) return false;
     if (bankFilter !== "all" && payoutInstitution(payment, products) !== bankFilter) return false;
-    if (dateFrom && payment.date < dateFrom) return false;
-    if (dateTo && payment.date > dateTo) return false;
     return true;
   });
-  // Просроченные — отдельной группой над календарём (BUG-22): в общий список и в суммы
-  // «ожидается» они не попадают, иначе прошедшие даты складываются с будущими.
-  const overduePayments = filtered
-    .filter(isOverdue)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  const sorted = filtered
-    .filter((payment) => !isOverdue(payment))
-    .sort((a, b) => a.date.localeCompare(b.date));
+  // Просроченные — отдельной группой (BUG-22): ни в свод, ни в календарь они не попадают,
+  // иначе прошедшие даты складываются с будущими. Показываются при любом периоде.
+  const overduePayments = matching.filter(isOverdue).sort((a, b) => a.date.localeCompare(b.date));
+  const calendar = matching.filter((payment) => !isOverdue(payment)).sort((a, b) => a.date.localeCompare(b.date));
+  const upcoming = calendar.filter(isUpcoming);
+
+  // Замечание 24: перепутанные «С» и «По» дают пустой список, который выглядит как
+  // «выплаты пропали» — предупреждаем и предлагаем поменять границы местами.
+  const rangeInverted = Boolean(period.from && period.to && period.from > period.to);
+  const inPeriod = calendar.filter(
+    (payment) => (!period.from || payment.date >= period.from) && (!period.to || payment.date <= period.to),
+  );
+  const periodExpected = payoutTotals(inPeriod.filter(isUpcoming));
+  const periodReceived = payoutTotals(inPeriod.filter((payment) => payment.status === "received"));
+
   const [markingId, setMarkingId] = useState<string | null>(null);
   async function markReceived(payment: Payment) {
     setMarkingId(payment.id);
@@ -3040,168 +3135,199 @@ function PaymentsPage({
   }
   const overduePaging = usePagedList(overduePayments);
 
-  // Прогноз на 30 дней, доход отдельно от возврата вложений (критик К7): «ожидается 517 000»
-  // из погашения на 500 000 и купонов на 17 000 обещало доход, которого нет.
-  const horizon = (() => {
-    const end = new Date(`${todayIsoDate()}T12:00:00`);
-    end.setDate(end.getDate() + 30);
-    return `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`;
-  })();
-  const nextMonth = payments.filter((payment) => isUpcoming(payment) && payment.date <= horizon);
-  const forecastIncome = sumPayoutsBase(nextMonth.filter((payment) => !isPrincipalPayout(payment)));
-  const forecastPrincipal = sumPayoutsBase(nextMonth.filter(isPrincipalPayout));
-  const forecastPartial = forecastIncome.partial || forecastPrincipal.partial;
+  // Свод: четыре горизонта, каждый — ссылка на свой период в календаре.
+  const summaryCards = (["month", "next", "12m", "ahead"] as const).map((id) => {
+    const preset = presets.find((item) => item.id === id)!;
+    const list = upcoming.filter((payment) => payment.date >= preset.from && (!preset.to || payment.date <= preset.to));
+    return { preset, totals: payoutTotals(list) };
+  });
 
-  const groups = useMemo(() => {
+  // Строки календаря. На уровнях «месяцы» и «годы» пустые периоды тоже показываются:
+  // «в марте ничего не придёт» — такой же ответ для планирования, как сумма.
+  const rows = (() => {
     const map = new Map<string, Payment[]>();
-    sorted.forEach((payment) => {
-      const key = periodKey(payment.date, viewMode);
-      const list = map.get(key) ?? [];
-      list.push(payment);
-      map.set(key, list);
+    inPeriod.forEach((payment) => {
+      const key = level === "day" ? payment.date : periodKey(payment.date, level);
+      map.set(key, [...(map.get(key) ?? []), payment]);
     });
-    return Array.from(map.entries()).map(([key, items]) => ({
-      key,
-      label: periodLabel(key, viewMode),
-      items,
-      expected: sumPayoutsBase(items.filter(isUpcoming)).total,
-      received: sumPayoutsBase(items.filter((item) => item.status === "received")).total,
-      overdue: sumPayoutsBase(items.filter(isOverdue)).total,
-      partial: sumPayoutsBase(items).partial,
-    }));
-  }, [sorted, viewMode]);
+    if (level !== "day" && inPeriod.length > 0 && !rangeInverted) {
+      const first = period.from || inPeriod[0].date;
+      const last = period.to || inPeriod[inPeriod.length - 1].date;
+      let cursor = level === "year" ? `${first.slice(0, 4)}-01-01` : monthStart(first);
+      for (let guard = 0; cursor <= last && guard < 600; guard += 1) {
+        const key = periodKey(cursor, level);
+        if (!map.has(key)) map.set(key, []);
+        cursor = shiftIso(cursor, level === "year" ? 12 : 1);
+      }
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, items]) => {
+        const expected = payoutTotals(items.filter(isUpcoming));
+        const received = payoutTotals(items.filter((item) => item.status === "received"));
+        return { key, items, expected, received, amount: expected.total + received.total };
+      });
+  })();
+  const maxAmount = Math.max(...rows.map((row) => row.amount), 0);
+  const rowPaging = usePagedList(rows);
 
-  const dayPaging = usePagedList(sorted);
-  const groupPaging = usePagedList(groups);
+  function rowLabel(key: string) {
+    if (level !== "day") return periodLabel(key, level);
+    const parsed = parseIsoDate(key);
+    return parsed ? `${dateLabel(key)}, ${WEEKDAYS[parsed.getDay()]}` : key;
+  }
+  // Переход на уровень ниже: год → его месяцы, месяц → его дни.
+  function drillDown(key: string) {
+    if (level === "year") go({ from: `${key}-01-01`, to: `${key}-12-31`, by: "month" });
+    else if (level === "month") go({ from: `${key}-01`, to: monthEnd(`${key}-01`), by: "day" });
+  }
 
   return (
-    <Page title="Выплаты" subtitle="Календарь ожидаемых доходов">
-      {(forecastIncome.total > 0 || forecastPrincipal.total > 0) && (
-        <div className="demo-note">
-          📅 В ближайшие 30 дней:{" "}
-          {[
-            forecastIncome.total > 0 ? `доход ${money(forecastIncome.total)}` : null,
-            forecastPrincipal.total > 0 ? `возврат вложений ${money(forecastPrincipal.total)}` : null,
-          ].filter(Boolean).join(" · ")}
-          {forecastPartial && " — без выплат в валюте, для которой нет курса ЦБ"}
-        </div>
-      )}
-      <div className="toolbar">
-        <Link className="primary-button" to="/payments/new">
-          <span className="label-full">＋ Добавить выплату</span>
-          <span className="label-short">＋ Выплата</span>
-        </Link>
-        <div className="view-mode-switch">
+    <Page title="Выплаты" subtitle="Сколько денег придёт и когда">
+      <div className="payout-summary">
+        {summaryCards.map(({ preset, totals }) => (
           <button
-            className={viewMode === "day" ? "selected" : ""}
             type="button"
-            onClick={() => setViewMode("day")}
+            key={preset.id}
+            className={`payout-summary-card${activePreset?.id === preset.id ? " selected" : ""}`}
+            onClick={() => go({ from: preset.from, to: preset.to, by: preset.by })}
           >
-            <span className="label-full">По дням</span>
-            <span className="label-short">Дни</span>
+            <span>{preset.label}</span>
+            <strong>{totals.total > 0 ? `+${money(totals.total)}` : "—"}</strong>
+            <small>{totals.count > 0 ? `${totals.count} ${pluralPayouts(totals.count)}` : "выплат нет"}</small>
+            {totals.principal > 0 && <small>в т.ч. возврат {money(totals.principal)}</small>}
           </button>
-          <button
-            className={viewMode === "month" ? "selected" : ""}
-            type="button"
-            onClick={() => setViewMode("month")}
-          >
-            <span className="label-full">По месяцам</span>
-            <span className="label-short">Месяцы</span>
-          </button>
-          <button
-            className={viewMode === "year" ? "selected" : ""}
-            type="button"
-            onClick={() => setViewMode("year")}
-          >
-            <span className="label-full">По годам</span>
-            <span className="label-short">Годы</span>
-          </button>
-        </div>
+        ))}
       </div>
-      <details className="filters-disclosure" open={activeFilters > 0 || undefined}>
-        <summary>Фильтры{activeFilters > 0 ? ` · ${activeFilters}` : ""}</summary>
-      <div className="filters-bar">
-        <label className="inline-select">
-          <span>Тип</span>
-          <select
-            value={typeFilter}
-            onChange={(event) => setTypeFilter(event.target.value as PayoutType | "all")}
-          >
-            <option value="all">Все типы</option>
-            {Object.entries(payoutTypeLabels).map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
-        </label>
-        {instrumentOptions.length > 0 && (
-          <label className="inline-select">
-            <span>Инструмент</span>
-            <select
-              value={instrumentFilter}
-              onChange={(event) => setInstrumentFilter(event.target.value)}
+
+      <div className="payout-period">
+        <div className="payout-presets" role="group" aria-label="Период">
+          {presets.map((preset) => (
+            <button
+              type="button"
+              key={preset.id}
+              className={activePreset?.id === preset.id && !customOpen ? "selected" : ""}
+              onClick={() => {
+                setCustomOpen(false);
+                go({ from: preset.from, to: preset.to, by: preset.by });
+              }}
             >
-              <option value="all">Все инструменты</option>
-              {instrumentOptions.map(([id, name]) => (
-                <option key={id} value={id}>{name}</option>
-              ))}
-            </select>
-          </label>
+              {preset.label}
+            </button>
+          ))}
+          <button type="button" className={showCustom ? "selected" : ""} onClick={() => setCustomOpen(true)}>
+            Свой период
+          </button>
+        </div>
+        {showCustom && (
+          <div className="filters-bar payout-custom">
+            <label className="inline-select">
+              <span>С</span>
+              <input type="date" value={period.from} onChange={(event) => go({ from: event.target.value })} />
+            </label>
+            <label className="inline-select">
+              <span>По</span>
+              <input type="date" value={period.to} onChange={(event) => go({ to: event.target.value })} />
+            </label>
+          </div>
         )}
-        {bankOptions.length > 1 && (
-          <label className="inline-select">
-            <span>Банк / брокер</span>
-            <select value={bankFilter} onChange={(event) => setBankFilter(event.target.value)}>
-              <option value="all">Все</option>
-              {bankOptions.map((name) => (
-                <option key={name} value={name}>{name}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label className="inline-select">
-          <span>С</span>
-          <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
-        </label>
-        <label className="inline-select">
-          <span>По</span>
-          <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
-        </label>
       </div>
-      </details>
+
       {rangeInverted && (
         <div className="demo-note" role="alert">
-          ⚠ Начало периода позже конца: {fullDate(dateFrom)} → {fullDate(dateTo)}. Под такие условия
+          ⚠ Начало периода позже конца: {fullDate(period.from)} → {fullDate(period.to)}. Под такие условия
           не попадёт ни одна выплата.{" "}
-          <button
-            type="button"
-            className="inline-link-button"
-            onClick={() => {
-              setDateFrom(dateTo);
-              setDateTo(dateFrom);
-            }}
-          >
+          <button type="button" className="inline-link-button" onClick={() => go({ from: period.to, to: period.from })}>
             Поменять местами
           </button>
         </div>
       )}
+
+      <div className="payout-period-total">
+        <div>
+          <span className="muted">{periodTitle(period).replace(/^./, (letter) => letter.toUpperCase())}</span>
+          <strong>
+            {periodExpected.total > 0 ? `+${money(periodExpected.total)}` : periodReceived.total > 0 ? `+${money(periodReceived.total)}` : "—"}
+          </strong>
+          <small className="muted">
+            {[
+              periodExpected.total > 0 ? "ожидается" : periodReceived.total > 0 ? "получено" : "выплат нет",
+              periodExpected.total > 0 && periodReceived.total > 0 ? `уже пришло ${money(periodReceived.total)}` : null,
+              inPeriod.length > 0 ? `${inPeriod.length} ${pluralPayouts(inPeriod.length)}` : null,
+              totalsNote(periodExpected.total > 0 ? periodExpected : periodReceived) || null,
+            ].filter(Boolean).join(" · ")}
+          </small>
+        </div>
+        <div className="view-mode-switch" role="group" aria-label="Уровень">
+          {(["day", "month", "year"] as const).map((mode) => (
+            <button key={mode} type="button" className={level === mode ? "selected" : ""} onClick={() => go({ by: mode })}>
+              <span className="label-full">{LEVEL_LABELS[mode][0]}</span>
+              <span className="label-short">{LEVEL_LABELS[mode][1]}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="toolbar payout-toolbar">
+        <details className="filters-disclosure" open={activeFilters > 0 || undefined}>
+          <summary>Фильтры{activeFilters > 0 ? ` · ${activeFilters}` : ""}</summary>
+          <div className="filters-bar">
+            <label className="inline-select">
+              <span>Тип</span>
+              <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as PayoutType | "all")}>
+                <option value="all">Все типы</option>
+                {Object.entries(payoutTypeLabels).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+            {instrumentOptions.length > 0 && (
+              <label className="inline-select">
+                <span>Инструмент</span>
+                <select value={instrumentFilter} onChange={(event) => setInstrumentFilter(event.target.value)}>
+                  <option value="all">Все инструменты</option>
+                  {instrumentOptions.map(([id, name]) => (
+                    <option key={id} value={id}>{name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {bankOptions.length > 1 && (
+              <label className="inline-select">
+                <span>Банк / брокер</span>
+                <select value={bankFilter} onChange={(event) => setBankFilter(event.target.value)}>
+                  <option value="all">Все</option>
+                  {bankOptions.map((name) => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        </details>
+        <Link className="outline-button" to="/payments/new">
+          <span className="label-full">＋ Добавить выплату</span>
+          <span className="label-short">＋ Выплата</span>
+        </Link>
+      </div>
+
       {products
         .filter((product) => product.forecastNote)
         .map((product) => (
           <div className="demo-note" key={product.id}>
             ⚠ «{product.name}»: {product.forecastNote?.toLowerCase()}.{" "}
-            {product.source !== "broker" && (
-              <Link to={`/products/${product.id}/edit`}>Заполнить</Link>
-            )}
+            {product.source !== "broker" && <Link to={`/products/${product.id}/edit`}>Заполнить</Link>}
           </div>
         ))}
+
       {overduePayments.length > 0 && (
-        <section className="overdue-block">
-          <div className="section-heading compact">
-            <div>
-              <h2>Просрочено</h2>
-              <p>Дата прошла — отметьте, если деньги пришли.</p>
-            </div>
-          </div>
+        // Свёрнуто в одну строку: экран — про планирование, а семь прошедших процентов
+        // по вкладу не должны отодвигать календарь на экран вниз.
+        <details className="overdue-block payout-overdue">
+          <summary>
+            ⚠ Не отмечены полученными: {overduePayments.length} {pluralPayouts(overduePayments.length)} на{" "}
+            {money(sumPayoutsBase(overduePayments).total)} — дата прошла, отметьте, если деньги пришли
+          </summary>
           <div className="product-list">
             {overduePaging.visible.map((payment) => {
               const product = payment.instrumentId
@@ -3264,90 +3390,102 @@ function PaymentsPage({
               </button>
             </div>
           )}
-        </section>
+        </details>
       )}
-      {sorted.length === 0 ? (
-        <p className="muted">
-          {payments.length === 0
-            ? "Пока нет добавленных выплат."
-            : rangeInverted
-              ? "Период задан наоборот — поменяйте «С» и «По» местами."
-              : overduePayments.length > 0
-                ? "Других выплат, кроме просроченных выше, нет."
-                : "Нет выплат, подходящих под выбранные условия."}
-        </p>
-      ) : viewMode === "day" ? (
-        <>
-          <div className="product-list">
-            {dayPaging.visible.map((payment) => (
-              <PaymentRow
-                key={payment.id}
-                payment={payment}
-                products={products}
-                expanded={expandedId === payment.id}
-                onToggle={() => setExpandedId(expandedId === payment.id ? null : payment.id)}
-                onMarkReceived={(item) => void markReceived(item)}
-                marking={markingId !== null}
-              />
-            ))}
-          </div>
-          <ListPagination
-            hasMore={dayPaging.hasMore}
-            onLoadMore={dayPaging.loadMore}
-            pageSize={dayPaging.pageSize}
-            onPageSizeChange={dayPaging.setPageSize}
-          />
-        </>
+
+      {inPeriod.length === 0 ? (
+        <div className="payout-empty">
+          <p className="muted">
+            {payments.length === 0
+              ? "Пока нет выплат. Они появятся сами, когда у вклада или облигации будут заполнены ставка и даты, — или добавьте выплату вручную."
+              : rangeInverted
+                ? "Период задан наоборот — поменяйте «С» и «По» местами."
+                : `За период «${periodTitle(period)}» выплат нет.`}
+          </p>
+          {payments.length > 0 && !rangeInverted && activePreset?.id !== "ahead" && (
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() => {
+                const ahead = presets.find((preset) => preset.id === "ahead")!;
+                go({ from: ahead.from, to: ahead.to, by: ahead.by });
+              }}
+            >
+              Показать всё впереди
+            </button>
+          )}
+        </div>
       ) : (
         <>
-          <div className="product-list">
-            {groupPaging.visible.map((group) => {
-              const expanded = expandedId === group.key;
-              const value = payoutGroupValue(group.expected, group.received, group.overdue);
+          <div className="product-list payout-calendar">
+            {rowPaging.visible.map((row) => {
+              const expanded = expandedId === row.key;
+              const empty = row.items.length === 0;
+              const value = payoutGroupValue(row.expected.total, row.received.total, 0);
+              const principal = row.expected.principal + row.received.principal;
               return (
-                <div className="list-row" key={group.key}>
+                <div className={`list-row${empty ? " payout-row-empty" : ""}`} key={row.key}>
                   <button
                     type="button"
                     className="product-row-summary"
-                    aria-expanded={expanded}
-                    onClick={() => setExpandedId(expanded ? null : group.key)}
+                    aria-expanded={empty ? undefined : expanded}
+                    disabled={empty}
+                    onClick={() => setExpandedId(expanded ? null : row.key)}
                   >
                     <span className="product-row-line1">
                       <span className="product-row-name">
-                        <strong>{group.label}</strong>
+                        <strong>{rowLabel(row.key)}</strong>
                       </span>
-                      <span className="product-row-sum">{value.amount}</span>
+                      <span className="product-row-sum">{empty ? "—" : value.amount}</span>
+                    </span>
+                    <span className="payout-bar" aria-hidden="true">
+                      <i style={{ width: `${maxAmount > 0 ? Math.max((row.amount / maxAmount) * 100, row.amount > 0 ? 2 : 0) : 0}%` }} />
                     </span>
                     <span className="product-row-line2 product-row-line2-flush">
                       <span className="muted product-row-meta">
-                        {group.items.length} {pluralPayouts(group.items.length)}
+                        {empty
+                          ? "выплат нет"
+                          : level === "day"
+                            ? row.items
+                                .map((payment) => {
+                                  const product = payment.instrumentId
+                                    ? products.find((item) => item.instrumentId === payment.instrumentId)
+                                    : undefined;
+                                  return product?.name || payment.title || payoutTypeLabels[payment.type];
+                                })
+                                .join(", ")
+                            : `${row.items.length} ${pluralPayouts(row.items.length)}`}
                       </span>
-                      <span className="muted">
-                        {value.note}
-                        {group.partial && " · без части в валюте"}
-                      </span>
+                      {!empty && (
+                        <span className="muted">
+                          {[value.note, principal > 0 ? `в т.ч. возврат ${money(principal)}` : null].filter(Boolean).join(" · ")}
+                          {(row.expected.partial || row.received.partial) && " · без части в валюте"}
+                        </span>
+                      )}
                     </span>
                   </button>
                   {expanded && (
-                    <div className="list-row-details">
-                      {group.items.map((payment) => (
-                        <div className="detail-line" key={payment.id}>
-                          <span className="payout-detail-name">
-                            <i
-                              className={`legend type-dot ${payoutTypeColors[payment.type]}`}
-                              title={payoutTypeLabels[payment.type]}
-                            />
-                            <span>
-                              {payment.title}
-                              <small className="muted">
-                                {dateLabel(payment.date)} · {payoutTypeLabels[payment.type]} ·{" "}
-                                {payoutStatusLabels[payment.status].toLowerCase()}
-                              </small>
-                            </span>
-                          </span>
-                          <span>+{payoutMoney(payment)}</span>
+                    <div className="list-row-details payout-row-details">
+                      {level !== "day" && (
+                        <div className="list-row-actions payout-drill">
+                          <button type="button" className="outline-button" onClick={() => drillDown(row.key)}>
+                            {level === "year" ? `${row.key} по месяцам →` : `${rowLabel(row.key)} по дням →`}
+                          </button>
                         </div>
-                      ))}
+                      )}
+                      <div className="product-list">
+                        {row.items.map((payment) => (
+                          <PaymentRow
+                            key={payment.id}
+                            payment={payment}
+                            products={products}
+                            expanded={innerId === payment.id || row.items.length === 1}
+                            onToggle={() => setInnerId(innerId === payment.id ? null : payment.id)}
+                            onMarkReceived={(item) => void markReceived(item)}
+                            marking={markingId !== null}
+                          />
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3355,10 +3493,10 @@ function PaymentsPage({
             })}
           </div>
           <ListPagination
-            hasMore={groupPaging.hasMore}
-            onLoadMore={groupPaging.loadMore}
-            pageSize={groupPaging.pageSize}
-            onPageSizeChange={groupPaging.setPageSize}
+            hasMore={rowPaging.hasMore}
+            onLoadMore={rowPaging.loadMore}
+            pageSize={rowPaging.pageSize}
+            onPageSizeChange={rowPaging.setPageSize}
           />
         </>
       )}
