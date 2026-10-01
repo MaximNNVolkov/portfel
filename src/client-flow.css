@@ -105,6 +105,7 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .payout-window-title span, .payout-window-title small { font-size: 11px; }
 .payout-window-title strong { color: var(--ink); font: 700 22px 'Manrope', sans-serif; }
 .payout-window-arrow { flex: 0 0 auto; min-width: 42px; padding: 9px 0; color: var(--mint); font-size: 16px; line-height: 1; cursor: pointer; }
+.payout-window-arrow:disabled { cursor: default; opacity: .35; }
 .payout-window-reset { display: block; margin: -4px auto 12px; }
 .payout-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .payout-cell { display: grid; gap: 4px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--paper); font: inherit; text-align: left; cursor: pointer; }
@@ -137,9 +138,8 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .payout-cell strong { font-size: 13px; }
 }
 .payout-summary-card { align-content: start; }
-.payout-overdue { margin: 6px 0 18px; padding: 12px 14px; border: 1px solid var(--border-danger); border-radius: 9px; background: var(--danger-soft); }
-.payout-overdue > summary { cursor: pointer; color: var(--ink); font-size: 12px; line-height: 1.4; }
-.payout-overdue[open] > summary { margin-bottom: 12px; }
+
+
 .payout-toolbar { align-items: center; }
 .payout-toolbar .filters-disclosure { flex: 1; min-width: 0; }
 .payout-toolbar > .outline-button { flex: 0 0 auto; }
