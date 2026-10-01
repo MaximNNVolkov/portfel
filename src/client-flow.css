@@ -85,3 +85,47 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .stat-strip { grid-template-columns: 1fr; }
   .stat-strip .stat-card + .stat-card { border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* «Выплаты»: свод → период → уровень → календарь (docs/IMPROVEMENT_PLAN.md, П23). */
+.payout-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
+.payout-summary-card { display: grid; gap: 4px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--paper); font: inherit; text-align: left; cursor: pointer; }
+.payout-summary-card:hover, .payout-summary-card.selected { border-color: var(--mint); }
+.payout-summary-card.selected { background: var(--mint-soft); }
+.payout-summary-card span { color: var(--muted); font-size: 11px; }
+.payout-summary-card strong { overflow: hidden; color: var(--mint); font: 700 17px 'Manrope', sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.payout-summary-card small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.payout-period { margin-bottom: 14px; }
+.payout-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.payout-presets button { border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; color: var(--text-secondary); background: var(--paper); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.payout-presets button.selected { color: var(--mint); border-color: var(--mint); background: var(--mint-soft); }
+.payout-custom { margin: 12px 0 0; }
+.payout-period-total { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 18px; margin: 18px 0 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-subtle); }
+.payout-period-total > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.payout-period-total span { font-size: 12px; }
+.payout-period-total strong { color: var(--ink); font: 700 22px 'Manrope', sans-serif; }
+.payout-period-total small { font-size: 11px; }
+.payout-period-total .view-mode-switch { margin-left: 0; }
+.payout-toolbar { align-items: flex-start; justify-content: space-between; }
+.payout-toolbar .filters-disclosure { margin-bottom: 0; }
+.payout-bar { display: block; height: 4px; margin: 6px 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.payout-bar i { display: block; height: 100%; border-radius: 2px; background: var(--mint); }
+.payout-row-empty .product-row-summary { cursor: default; opacity: .6; }
+.payout-row-details { padding-top: 4px; }
+.payout-row-details .product-list { display: grid; gap: 8px; }
+.payout-drill { justify-content: flex-start; margin: 0 0 10px; }
+.payout-empty { display: grid; justify-items: start; gap: 10px; }
+@media (max-width: 680px) {
+  .payout-summary { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .payout-summary-card { padding: 12px; }
+  .payout-summary-card strong { font-size: 15px; }
+  .payout-presets { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .payout-period-total { padding: 14px; }
+  .payout-period-total .view-mode-switch { width: 100%; }
+}
+.payout-summary-card { align-content: start; }
+.payout-overdue { margin: 6px 0 18px; padding: 12px 14px; border: 1px solid var(--border-danger); border-radius: 9px; background: var(--danger-soft); }
+.payout-overdue > summary { cursor: pointer; color: var(--ink); font-size: 12px; line-height: 1.4; }
+.payout-overdue[open] > summary { margin-bottom: 12px; }
+.payout-toolbar { align-items: center; }
+.payout-toolbar .filters-disclosure { flex: 1; min-width: 0; }
+.payout-toolbar > .outline-button { flex: 0 0 auto; }
