@@ -129,3 +129,12 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .payout-toolbar { align-items: center; }
 .payout-toolbar .filters-disclosure { flex: 1; min-width: 0; }
 .payout-toolbar > .outline-button { flex: 0 0 auto; }
+
+/* Поиск бумаги на Московской бирже в форме ввода (§17, §20). */
+.security-picker { display: grid; gap: 8px; }
+.security-results { display: grid; gap: 4px; max-height: 320px; margin: 0; padding: 4px; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); list-style: none; }
+.security-results button { display: grid; gap: 2px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.security-results button:hover, .security-results button:focus-visible { background: var(--line); }
+.security-results small { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.security-picked { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--mint); border-radius: 9px; background: var(--paper); }
+.security-picked .muted { font-size: 12px; }

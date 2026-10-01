@@ -30,7 +30,7 @@ export function optionalBool(value: unknown): boolean | undefined {
 // Сообщения об ошибках доходят до пользователя (тестер, Т11) — по-русски и с названием поля.
 const FIELD_LABELS: Record<string, string> = {
   name: 'Название', title: 'Название', amount: 'Сумма', date: 'Дата', invested: 'Вложено', type: 'Тип',
-  token: 'Токен', quantity: 'Количество', averagePrice: 'Средняя цена', currentPrice: 'Текущая цена',
+  token: 'Токен', quantity: 'Количество', averagePrice: 'Цена покупки', currentPrice: 'Текущая цена',
   accruedInterest: 'НКД', nominal: 'Номинал', couponRate: 'Купон', rate: 'Ставка', effectiveRate: 'Эффективная ставка',
   maturityDate: 'Дата погашения', termEndDate: 'Дата окончания', couponDate: 'Дата купона', ofertaDate: 'Дата оферты',
   commission: 'Комиссия', tax: 'Налог',

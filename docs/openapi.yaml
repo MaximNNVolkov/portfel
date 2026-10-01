@@ -254,6 +254,61 @@ paths:
                         priceUpdatedAt: { type: [string, 'null'], format: date-time }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/market-data/search:
+    get:
+      tags: [market-data]
+      summary: Поиск акций, облигаций и фондов MOEX по тикеру, названию или ISIN (§17, §20)
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 64 } }
+      responses:
+        '200':
+          description: До 10 торгуемых бумаг; запрос короче двух символов — пустой список
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    secid: { type: string }
+                    shortName: { type: string }
+                    name: { type: string }
+                    isin: { type: string }
+                    group: { type: string, enum: [share, bond, fund] }
+        '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/market-data/securities/{secid}:
+    get:
+      tags: [market-data]
+      summary: Описание и текущая цена бумаги MOEX для автозаполнения формы
+      parameters:
+        - { name: secid, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Параметры бумаги; цена облигации — в деньгах за одну бумагу, не в % от номинала
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secid: { type: string }
+                  name: { type: string }
+                  shortName: { type: string }
+                  isin: { type: string }
+                  group: { type: string, enum: [share, bond, fund] }
+                  currency: { type: string }
+                  price: { type: number, nullable: true }
+                  accruedInterest: { type: number, nullable: true }
+                  nominal: { type: number }
+                  couponRate: { type: number }
+                  nextCouponDate: { type: string, format: date }
+                  maturityDate: { type: string, format: date }
+                  offerDate: { type: string, format: date }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
   /api/positions:
     get:
       tags: [positions]
@@ -271,6 +326,10 @@ paths:
     post:
       tags: [positions]
       summary: Добавить инструмент вручную (§17)
+      description: >-
+        Для облигаций, акций и фондов достаточно тикера и количества (без суммы): название,
+        ISIN, валюта, купон, погашение и текущая цена берутся с MOEX. Цена покупки
+        (averagePrice) необязательна — без неё вложено считается по текущей цене.
       requestBody: { $ref: '#/components/requestBodies/PositionCreate' }
       responses:
         '201': { $ref: '#/components/responses/Position' }
