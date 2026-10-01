@@ -15,7 +15,8 @@ import {
   EmailRateLimiter, createPasswordResetToken, findResetToken, invalidateUserResetTokens, validateResetToken,
 } from './password-reset.ts'
 import { sendPasswordResetEmail } from './mailer.ts'
-import { configureRateStore } from './market-data.ts'
+import { configureRateStore, getMoexSecurity, searchMoexSecurities } from './market-data.ts'
+import { fillSecurityFromMoex } from './security-lookup.ts'
 import { normalizeTinkoffToken, tinkoffConnector } from './brokers/tinkoff.ts'
 import {
   aggregateByGroup, aggregateByKey, convertCurrency, evaluatePosition, sumInBase,
@@ -51,6 +52,8 @@ import {
   type Db, type Instrument,
   type ListOptions, type Payout, type PayoutStatus, type PayoutType, type Position,
   type Transaction, type TransactionType,
+  updatePositionMarketPrice,
+  recordInstrumentPrice,
 } from './repository.ts'
 
 // DATE OID: return the raw "YYYY-MM-DD" text instead of letting node-pg parse it into a
@@ -494,6 +497,23 @@ app.post('/api/market-data/refresh', async (request, response) => {
   response.json(result)
 })
 
+// §17, §20: поиск бумаги по тикеру, названию или ISIN для формы ручного ввода и её
+// описание с MOEX — пользователь вводит тикер и количество, остальное подставляется.
+app.get('/api/market-data/search', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const query = typeof request.query.q === 'string' ? request.query.q.slice(0, 64) : ''
+  const result = await searchMoexSecurities(query)
+  if (result.status !== 'ok') return response.status(502).json({ error: 'Московская биржа не отвечает. Попробуйте позже' })
+  response.json(result.value)
+})
+app.get('/api/market-data/securities/:secid', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const result = await getMoexSecurity(String(request.params.secid).slice(0, 64))
+  if (result.status === 'not_found') return response.status(404).json({ error: 'Бумага не найдена на Московской бирже' })
+  if (result.status !== 'ok') return response.status(502).json({ error: 'Московская биржа не отвечает. Попробуйте позже' })
+  response.json(result.value)
+})
+
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'portfolio-api' }))
 
 // ---------------------------------------------------------------------------
@@ -540,9 +560,20 @@ app.get('/api/positions/:id', async (request, response) => {
 app.post('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
+    // Бумага по тикеру: недостающее берётся с MOEX до транзакции — запрос к бирже
+    // не должен держать соединение с базой.
+    const fill = await fillSecurityFromMoex((request.body ?? {}) as PositionBody)
     const position = await withTransaction(db, async (client) => {
-      const body = (request.body ?? {}) as PositionBody
+      const body = fill.body
       const created = await createPosition(client, userId, body, 'manual')
+      if (fill.quoted && fill.price !== null) {
+        // Цена с биржи — котировка с датой, как после «Обновить цены», а не введённое число.
+        await updatePositionMarketPrice(client, userId, {
+          id: created.id, currentPrice: created.currentPrice, value: created.value, accruedInterest: created.accruedInterest,
+        })
+        await recordInstrumentPrice(client, created.instrumentId, localToday(), fill.price)
+        created.priceUpdatedAt = new Date().toISOString()
+      }
       if (body.fromCash === true) await payFromCash(client, userId, created)
       await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)

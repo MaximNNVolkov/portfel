@@ -138,7 +138,7 @@ export async function getCbrRateTable(): Promise<RateTable> {
 const MOEX_PRICE_CACHE_TTL_MS = 15 * 60 * 1000
 const moexQuoteCache = new Map<string, { quote: MoexQuote; fetchedAt: number }>()
 
-type MoexBoardRef = { engine: string; market: string; boardid: string }
+type MoexBoardRef = { engine: string; market: string; boardid: string; group?: string }
 
 // Итог запроса котировки. Причина отказа возвращается явно, чтобы пользователь видел,
 // почему цена не обновилась, а не безликое «0 из 1» (BUG-19).
@@ -149,16 +149,21 @@ export type MoexQuote =
   | { status: 'unavailable' }
 
 async function findPrimaryBoard(secid: string): Promise<MoexBoardRef | null> {
-  const url = `https://iss.moex.com/iss/securities/${encodeURIComponent(secid)}.json?iss.only=boards&boards.columns=secid,boardid,market,engine,is_primary`
+  const url = `https://iss.moex.com/iss/securities/${encodeURIComponent(secid)}.json?iss.meta=off&iss.only=boards,description&boards.columns=secid,boardid,market,engine,is_primary&description.columns=name,value`
   const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
   if (!response.ok) throw new Error(`MOEX ISS (securities) ответил ${response.status}`)
-  const body = await response.json() as { boards?: { columns: string[]; data: unknown[][] } }
+  const body = await response.json() as { boards?: { columns: string[]; data: unknown[][] }; description?: { data: unknown[][] } }
+  // GROUP из описания бумаги — то, что отличает пай фонда от акции на одном рынке shares.
+  const group = body.description?.data?.find((row) => row[0] === 'GROUP')?.[1]
   const rows = body.boards?.data ?? []
   const columns = body.boards?.columns ?? []
   const idx = (name: string) => columns.indexOf(name)
   for (const row of rows) {
     if (row[idx('is_primary')] === 1) {
-      return { engine: String(row[idx('engine')]), market: String(row[idx('market')]), boardid: String(row[idx('boardid')]) }
+      return {
+        engine: String(row[idx('engine')]), market: String(row[idx('market')]), boardid: String(row[idx('boardid')]),
+        group: typeof group === 'string' ? group : undefined,
+      }
     }
   }
   return null
@@ -169,35 +174,149 @@ function positive(value: unknown): number | null {
   return value !== null && Number.isFinite(number) && number > 0 ? number : null
 }
 
-async function fetchMoexQuote(secid: string): Promise<MoexQuote> {
+type IssBlock = { columns: string[]; data: unknown[][] }
+const issField = (block: IssBlock | undefined, name: string) => {
+  const row = block?.data?.[0]
+  const index = (block?.columns ?? []).indexOf(name)
+  return row && index >= 0 ? row[index] : null
+}
+// «0000-00-00» у бессрочных выпусков и пустые даты — это отсутствие даты, а не дата.
+const issDate = (value: unknown) =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !value.startsWith('0000') ? value : undefined
+// SUR/RUR — так ISS называет рубль.
+const issCurrency = (value: unknown) => {
+  const code = typeof value === 'string' ? value.trim().toUpperCase() : ''
+  return !code || code === 'SUR' || code === 'RUR' ? 'RUB' : code
+}
+
+/** Группа портфеля, к которой относится бумага MOEX (§7.2). */
+export type MoexSecurityGroup = 'share' | 'bond' | 'fund'
+// Группы ISS: акции, депозитарные расписки, облигации, паи ПИФ и биржевые фонды.
+const ISS_GROUPS: Record<string, MoexSecurityGroup> = {
+  stock_shares: 'share', stock_dr: 'share', stock_foreign_shares: 'share',
+  stock_bonds: 'bond', stock_eurobond: 'bond',
+  stock_ppif: 'fund', stock_etf: 'fund', stock_mpif: 'fund', stock_rpif: 'fund', stock_qnv: 'fund',
+}
+
+/** Описание бумаги MOEX для автозаполнения карточки: всё, что пользователю не нужно вводить руками. */
+export type MoexSecurity = {
+  secid: string
+  name: string
+  shortName: string
+  isin?: string
+  group: MoexSecurityGroup
+  currency: string
+  /** Цена одной бумаги в валюте бумаги (у облигаций — уже в деньгах, не в % от номинала). */
+  price: number | null
+  /** НКД на одну облигацию. */
+  accruedInterest: number | null
+  nominal?: number
+  couponRate?: number
+  nextCouponDate?: string
+  maturityDate?: string
+  offerDate?: string
+}
+
+async function fetchMoexSecurity(secid: string): Promise<MoexSecurity | null> {
   const board = await findPrimaryBoard(secid)
-  if (!board) return { status: 'not_found' }
+  if (!board) return null
   const url = `https://iss.moex.com/iss/engines/${board.engine}/markets/${board.market}/boards/${board.boardid}/securities/${encodeURIComponent(secid)}.json`
-    + '?iss.only=marketdata,securities&marketdata.columns=SECID,LAST,MARKETPRICE&securities.columns=SECID,PREVPRICE,FACEVALUE,ACCRUEDINT'
+    + '?iss.meta=off&iss.only=marketdata,securities'
   const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
   if (!response.ok) throw new Error(`MOEX ISS (marketdata) ответил ${response.status}`)
-  const body = await response.json() as {
-    marketdata?: { columns: string[]; data: unknown[][] }
-    securities?: { columns: string[]; data: unknown[][] }
-  }
-  const field = (block: { columns: string[]; data: unknown[][] } | undefined, name: string) => {
-    const row = block?.data?.[0]
-    return row ? row[(block?.columns ?? []).indexOf(name)] : null
-  }
+  const body = await response.json() as { marketdata?: IssBlock; securities?: IssBlock }
+  const securities = body.securities
+  const isBond = board.market === 'bonds'
   // Сделок сегодня может не быть (выходной, до открытия) — тогда рыночная цена,
   // а за ней цена закрытия прошлой сессии: это тоже рыночная оценка, не цена покупки.
-  const quoted = positive(field(body.marketdata, 'LAST'))
-    ?? positive(field(body.marketdata, 'MARKETPRICE'))
-    ?? positive(field(body.securities, 'PREVPRICE'))
-  if (quoted === null) return { status: 'no_price' }
-  if (board.market !== 'bonds') return { status: 'ok', price: quoted, accruedInterest: null }
-  const faceValue = positive(field(body.securities, 'FACEVALUE'))
-  if (faceValue === null) return { status: 'no_price' }
-  const accrued = Number(field(body.securities, 'ACCRUEDINT'))
+  const quoted = positive(issField(body.marketdata, 'LAST'))
+    ?? positive(issField(body.marketdata, 'MARKETPRICE'))
+    ?? positive(issField(securities, 'PREVPRICE'))
+  const faceValue = positive(issField(securities, 'FACEVALUE'))
+  const accrued = Number(issField(securities, 'ACCRUEDINT'))
+  const price = quoted === null ? null : isBond ? (faceValue === null ? null : quoted * faceValue / 100) : quoted
+  const couponRate = positive(issField(securities, 'COUPONPERCENT'))
+  const name = String(issField(securities, 'SECNAME') ?? '').trim()
+  const shortName = String(issField(securities, 'SHORTNAME') ?? '').trim()
+  const isin = String(issField(securities, 'ISIN') ?? '').trim()
   return {
-    status: 'ok',
-    price: quoted * faceValue / 100,
-    accruedInterest: Number.isFinite(accrued) ? accrued : null,
+    secid: String(issField(securities, 'SECID') ?? secid),
+    name: name || shortName || secid,
+    shortName: shortName || name || secid,
+    isin: isin || undefined,
+    group: (board.group ? ISS_GROUPS[board.group] : undefined) ?? (isBond ? 'bond' : 'share'),
+    currency: issCurrency(isBond ? (issField(securities, 'FACEUNIT') ?? issField(securities, 'CURRENCYID')) : issField(securities, 'CURRENCYID')),
+    price,
+    accruedInterest: isBond && Number.isFinite(accrued) ? accrued : null,
+    nominal: isBond ? faceValue ?? undefined : undefined,
+    couponRate: isBond ? couponRate ?? undefined : undefined,
+    nextCouponDate: isBond ? issDate(issField(securities, 'NEXTCOUPON')) : undefined,
+    maturityDate: isBond ? issDate(issField(securities, 'MATDATE')) : undefined,
+    offerDate: isBond ? issDate(issField(securities, 'OFFERDATE')) : undefined,
+  }
+}
+
+async function fetchMoexQuote(secid: string): Promise<MoexQuote> {
+  const security = await fetchMoexSecurity(secid)
+  if (!security) return { status: 'not_found' }
+  if (security.price === null) return { status: 'no_price' }
+  return { status: 'ok', price: security.price, accruedInterest: security.accruedInterest }
+}
+
+export type MoexLookup<T> = { status: 'ok'; value: T } | { status: 'not_found' } | { status: 'unavailable' }
+
+/**
+ * Полное описание бумаги по коду MOEX (тикер или SECID облигации) для ручного ввода:
+ * пользователь вводит только тикер и количество, остальное берётся отсюда (§17, §20).
+ */
+export async function getMoexSecurity(secid: string): Promise<MoexLookup<MoexSecurity>> {
+  const key = secid.trim().toUpperCase()
+  if (!key) return { status: 'not_found' }
+  try {
+    const security = await fetchMoexSecurity(key)
+    return security ? { status: 'ok', value: security } : { status: 'not_found' }
+  } catch (error) {
+    logError('moex-security', error)
+    return { status: 'unavailable' }
+  }
+}
+
+/** Строка подсказки поиска: что найдено и в какую группу портфеля попадёт. */
+export type MoexSearchItem = { secid: string; shortName: string; name: string; isin?: string; group: MoexSecurityGroup }
+
+/**
+ * Поиск бумаг MOEX по тикеру, названию или ISIN (подсказки в форме ввода). Только бумаги,
+ * которые сейчас торгуются, и только акции, облигации и фонды — другие группы ISS
+ * (индексы, фьючерсы, валюта) в портфель как бумага не добавляются.
+ */
+export async function searchMoexSecurities(query: string): Promise<MoexLookup<MoexSearchItem[]>> {
+  const q = query.trim()
+  if (q.length < 2) return { status: 'ok', value: [] }
+  try {
+    const url = `https://iss.moex.com/iss/securities.json?iss.meta=off&limit=20&q=${encodeURIComponent(q)}`
+      + '&securities.columns=secid,shortname,name,isin,group,is_traded'
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) throw new Error(`MOEX ISS (search) ответил ${response.status}`)
+    const body = await response.json() as { securities?: IssBlock }
+    const columns = body.securities?.columns ?? []
+    const at = (row: unknown[], name: string) => row[columns.indexOf(name)]
+    const items: MoexSearchItem[] = []
+    for (const row of body.securities?.data ?? []) {
+      const group = ISS_GROUPS[String(at(row, 'group'))]
+      if (!group || Number(at(row, 'is_traded')) !== 1) continue
+      const isin = String(at(row, 'isin') ?? '').trim()
+      items.push({
+        secid: String(at(row, 'secid')),
+        shortName: String(at(row, 'shortname') ?? at(row, 'secid')),
+        name: String(at(row, 'name') ?? at(row, 'shortname') ?? ''),
+        isin: isin || undefined,
+        group,
+      })
+    }
+    return { status: 'ok', value: items.slice(0, 10) }
+  } catch (error) {
+    logError('moex-search', error)
+    return { status: 'unavailable' }
   }
 }
 

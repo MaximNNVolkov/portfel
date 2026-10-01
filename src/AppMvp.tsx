@@ -41,13 +41,9 @@ type Product = {
   ofertaDate?: string;
   amortization?: boolean;
   rate?: number;
-  effectiveRate?: number;
   capitalization?: boolean;
   termEndDate?: string;
   interestPayoutFrequency?: string;
-  replenishable?: boolean;
-  partialWithdrawal?: boolean;
-  autoProlongation?: boolean;
   accountId?: string;
   instrumentId?: string;
   // Оценка Portfolio Engine (§10) в базовой валюте — приходит с каждой позицией
@@ -72,143 +68,83 @@ type ProductValuation = {
   /** НКД облигации или начисленные, но не выплаченные проценты вклада. */
   accruedInterest?: number | null;
 };
+// Необязательные параметры вклада и параметры выпуска облигации. У бумаг остальное —
+// название, ISIN, номинал, цена — приходит с MOEX и руками не вводится.
 type ProductDetails = {
-  isin: string;
-  ticker: string;
-  quantity: string;
-  averagePrice: string;
-  currentPrice: string;
-  nominal: string;
-  accruedInterest: string;
+  rate: string;
+  termEndDate: string;
+  interestPayoutFrequency: string;
+  capitalization: boolean;
   couponRate: string;
   couponDate: string;
   maturityDate: string;
   ofertaDate: string;
-  amortization: boolean;
-  rate: string;
-  effectiveRate: string;
-  capitalization: boolean;
-  termEndDate: string;
-  interestPayoutFrequency: string;
-  replenishable: boolean;
-  partialWithdrawal: boolean;
-  autoProlongation: boolean;
 };
 const emptyProductDetails: ProductDetails = {
-  isin: "",
-  ticker: "",
-  quantity: "",
-  averagePrice: "",
-  currentPrice: "",
-  nominal: "",
-  accruedInterest: "",
+  rate: "",
+  termEndDate: "",
+  interestPayoutFrequency: "",
+  capitalization: false,
   couponRate: "",
   couponDate: "",
   maturityDate: "",
   ofertaDate: "",
-  amortization: false,
-  rate: "",
-  effectiveRate: "",
-  capitalization: false,
-  termEndDate: "",
-  interestPayoutFrequency: "",
-  replenishable: false,
-  partialWithdrawal: false,
-  autoProlongation: false,
 };
 function productToDetails(product?: Product): ProductDetails {
   return {
-    isin: product?.isin || "",
-    ticker: product?.ticker || "",
-    quantity: product?.quantity !== undefined ? String(product.quantity) : "",
-    averagePrice: product?.averagePrice !== undefined ? String(product.averagePrice) : "",
-    currentPrice: product?.currentPrice !== undefined ? String(product.currentPrice) : "",
-    nominal: product?.nominal !== undefined ? String(product.nominal) : "",
-    accruedInterest: product?.accruedInterest !== undefined ? String(product.accruedInterest) : "",
+    rate: product?.rate !== undefined ? String(product.rate) : "",
+    termEndDate: product?.termEndDate || "",
+    interestPayoutFrequency: frequencyLabel(product?.interestPayoutFrequency) || "",
+    capitalization: product?.capitalization || false,
     couponRate: product?.couponRate !== undefined ? String(product.couponRate) : "",
     couponDate: product?.couponDate || "",
     maturityDate: product?.maturityDate || "",
     ofertaDate: product?.ofertaDate || "",
-    amortization: product?.amortization || false,
-    rate: product?.rate !== undefined ? String(product.rate) : "",
-    effectiveRate: product?.effectiveRate !== undefined ? String(product.effectiveRate) : "",
-    capitalization: product?.capitalization || false,
-    termEndDate: product?.termEndDate || "",
-    interestPayoutFrequency: product?.interestPayoutFrequency || "",
-    replenishable: product?.replenishable || false,
-    partialWithdrawal: product?.partialWithdrawal || false,
-    autoProlongation: product?.autoProlongation || false,
   };
 }
-// BUG-08 (§17): «вложено» должно сходиться с количеством × средней ценой. Это проверка
-// ввода, а не расчёт портфеля — сервер делает ту же проверку (reconcileInvested) и
-// отклоняет расхождение; здесь она нужна, чтобы показать его до сохранения.
-function investedCheck(details: ProductDetails, investedInput: string) {
-  const quantity = Number(details.quantity);
-  const averagePrice = Number(details.averagePrice);
-  if (!details.quantity.trim() || !details.averagePrice.trim()) return null;
-  if (!(quantity > 0 && averagePrice > 0)) return null;
-  const expected = Math.round(quantity * averagePrice * 100) / 100;
-  const typed = investedInput.trim() ? Number(investedInput) : null;
-  const mismatch =
-    typed !== null && Math.abs(typed - expected) > Math.max(1, expected * 0.001);
-  return { quantity, averagePrice, expected, typed, mismatch };
-}
-function InvestedCheckNote({
-  check,
-  amount,
-}: {
-  check: ReturnType<typeof investedCheck>;
-  amount: string;
-}) {
-  if (!check) return null;
-  if (check.mismatch) {
-    return (
-      <small className="form-error">
-        ⚠ Вложено {money(check.typed ?? 0)} не совпадает с количеством × средней ценой:{" "}
-        {check.quantity} × {money(check.averagePrice)} = {money(check.expected)}. Исправьте
-        одно из значений.
-      </small>
-    );
-  }
-  const amountValue = Number(amount);
-  const amountDiffers =
-    check.typed === null &&
-    amountValue > 0 &&
-    Math.abs(amountValue - check.expected) > Math.max(1, check.expected * 0.001);
-  return (
-    <small className={amountDiffers ? "danger-text" : "muted"}>
-      Вложено: {check.quantity} × {money(check.averagePrice)} = {money(check.expected)}
-      {amountDiffers
-        ? ` — отличается от введённой суммы ${money(amountValue)}. Вложенной суммой будет сохранено ${money(check.expected)}, текущей стоимостью — ${money(amountValue)}.`
-        : ""}
-    </small>
-  );
-}
-function detailsToPayload(details: ProductDetails) {
+const optionalNumberText = (value: string) => (value.trim() ? Number(value) : undefined);
+// Пустая строка у даты — «очистить поле»: сервер превращает её в отсутствие даты.
+function depositPayload(details: ProductDetails) {
   return {
-    isin: details.isin.trim() || undefined,
-    ticker: details.ticker.trim(),
-    quantity: details.quantity.trim() ? Number(details.quantity) : undefined,
-    averagePrice: details.averagePrice.trim() ? Number(details.averagePrice) : undefined,
-    currentPrice: details.currentPrice.trim() ? Number(details.currentPrice) : undefined,
-    nominal: details.nominal.trim() ? Number(details.nominal) : undefined,
-    accruedInterest: details.accruedInterest.trim() ? Number(details.accruedInterest) : undefined,
-    couponRate: details.couponRate.trim() ? Number(details.couponRate) : undefined,
-    couponDate: details.couponDate || undefined,
-    maturityDate: details.maturityDate || undefined,
-    ofertaDate: details.ofertaDate || undefined,
-    amortization: details.amortization || undefined,
-    rate: details.rate.trim() ? Number(details.rate) : undefined,
-    effectiveRate: details.effectiveRate.trim() ? Number(details.effectiveRate) : undefined,
-    capitalization: details.capitalization || undefined,
-    termEndDate: details.termEndDate || undefined,
-    interestPayoutFrequency: details.interestPayoutFrequency || undefined,
-    replenishable: details.replenishable || undefined,
-    partialWithdrawal: details.partialWithdrawal || undefined,
-    autoProlongation: details.autoProlongation || undefined,
+    rate: optionalNumberText(details.rate),
+    termEndDate: details.termEndDate,
+    interestPayoutFrequency: details.interestPayoutFrequency,
+    capitalization: details.capitalization,
   };
 }
+function bondPayload(details: ProductDetails) {
+  return {
+    couponRate: optionalNumberText(details.couponRate),
+    couponDate: details.couponDate,
+    maturityDate: details.maturityDate,
+    ofertaDate: details.ofertaDate,
+  };
+}
+// Бумага с Московской биржи (GET /market-data/securities/:secid): то, что пользователь
+// не вводит руками. offline — биржа не ответила, известен только введённый тикер.
+type MoexSecurity = {
+  secid: string;
+  name: string;
+  shortName: string;
+  isin?: string;
+  group: "share" | "bond" | "fund";
+  currency: string;
+  price: number | null;
+  accruedInterest: number | null;
+  nominal?: number;
+  couponRate?: number;
+  nextCouponDate?: string;
+  maturityDate?: string;
+  offerDate?: string;
+  offline?: boolean;
+};
+type MoexSearchItem = Pick<MoexSecurity, "secid" | "shortName" | "name" | "isin" | "group">;
+const moexGroupTypes: Record<MoexSecurity["group"], AssetType> = { share: "Акции", bond: "Облигации", fund: "Фонды" };
+const moexGroupLabels: Record<MoexSecurity["group"], string> = { share: "акция", bond: "облигация", fund: "фонд" };
+const securityPriceText = (value: number, currency: string) =>
+  currency === "RUB"
+    ? preciseMoney(value)
+    : `${value.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 type PayoutType =
   | "COUPON"
   | "DIVIDEND"
@@ -1813,7 +1749,12 @@ function AppMvp() {
           />
           <Route
             path="/products/:id/edit"
-            element={<EditProductPage products={products} onSubmit={withErrorToast(updateProduct, "Не удалось сохранить изменения")} />}
+            element={<EditProductPage
+                products={products}
+                token={token}
+                onUnauthorized={expireSession}
+                onSubmit={withErrorToast(updateProduct, "Не удалось сохранить изменения")}
+              />}
           />
           <Route
             path="/products/:id/delete"
@@ -3507,7 +3448,6 @@ function PaymentsPage({
 // видит её по-русски, а не сырым значением (критик К12).
 const frequencyLabels: Record<string, string> = { monthly: "Ежемесячно", quarterly: "Ежеквартально", yearly: "Ежегодно", annually: "Ежегодно", "at maturity": "В конце срока", end: "В конце срока" };
 const frequencyLabel = (value: string | undefined) => (value ? frequencyLabels[value.trim().toLowerCase()] ?? value : undefined);
-const yesNo = (value: boolean | undefined) => (value === undefined ? undefined : value ? "да" : "нет");
 const percentText = (value: number | undefined) =>
   value === undefined ? undefined : `${value.toLocaleString("ru-RU", { maximumFractionDigits: 3 })}%`;
 // Главные параметры инструмента по его типу (CLIENT_FLOW_PLAN §4.3): у вклада — ставка и
@@ -3520,40 +3460,31 @@ function instrumentParams(product: Product): [string, React.ReactNode][] {
       ? `${preciseMoney(product.currentPrice)}${product.priceUpdatedAt ? ` · ${formatDateTime(product.priceUpdatedAt)}` : ""}`
       : "Актуальная цена недоступна"
     : undefined;
+  // Цена покупки и текущая цена — за одну бумагу: стоимость и вложено уже в шапке карточки.
   const rows: [string, React.ReactNode | undefined][] =
     product.type === "Вклады"
       ? [
-          ["Ставка", product.rate !== undefined ? `${percentText(product.rate)}${product.effectiveRate ? ` (эффективная ${percentText(product.effectiveRate)})` : ""}` : undefined],
+          ["Ставка", percentText(product.rate)],
           ["Открыт", date(product.date)],
           ["Окончание", date(product.termEndDate)],
           ["Выплата процентов", frequencyLabel(product.interestPayoutFrequency)],
+          ["Капитализация", product.capitalization ? "да" : undefined],
           [
             "Начислено, не выплачено",
             product.valuation?.accruedInterest ? `≈ ${preciseMoney(product.valuation.accruedInterest)} · оценка по ставке` : undefined,
           ],
-          ["Капитализация", yesNo(product.capitalization)],
-          ["Пополнение", yesNo(product.replenishable)],
-          ["Частичное снятие", yesNo(product.partialWithdrawal)],
-          ["Автопролонгация", yesNo(product.autoProlongation)],
         ]
-      : product.type === "Облигации"
+      : quotedTypes.has(product.type)
         ? [
+            ["Количество", product.quantity !== undefined ? `${product.quantity.toLocaleString("ru-RU")} шт.` : undefined],
+            ["Цена покупки", price(product.averagePrice)],
+            ["Текущая цена", currentPrice],
             ["Купон", percentText(product.couponRate)],
             ["Погашение", date(product.maturityDate)],
             ["Оферта", date(product.ofertaDate)],
-            ["Количество", product.quantity],
-            ["Номинал", price(product.nominal)],
-            ["НКД", price(product.accruedInterest)],
-            ["Средняя цена", price(product.averagePrice)],
-            ["Текущая цена", currentPrice],
-            ["Амортизация", product.amortization ? "да" : undefined],
+            ["НКД", product.type === "Облигации" && product.accruedInterest ? price(product.accruedInterest) : undefined],
           ]
-        : [
-            ["Количество", product.quantity],
-            ["Средняя цена", price(product.averagePrice)],
-            ["Текущая цена", currentPrice],
-            ["Дата покупки", date(product.date)],
-          ];
+        : [["Дата", date(product.date)]];
   return rows.filter((row): row is [string, React.ReactNode] => row[1] !== undefined && row[1] !== "");
 }
 // Направление денег операции для знака суммы в ленте: покупка и расходы уменьшают деньги.
@@ -5509,228 +5440,218 @@ function ResetPasswordPage() {
     </div>
   );
 }
-function InstrumentDetailsFields({
-  type,
-  details,
-  onChange,
+// Поиск бумаги на Московской бирже по тикеру, названию или ISIN (§17, §20): подсказки
+// появляются по мере ввода, выбор подтягивает описание и текущую цену. Если биржа не
+// отвечает, бумагу можно сохранить по введённому тикеру — цену подтянет обновление котировок.
+function SecurityPicker({
+  token,
+  onUnauthorized,
+  value,
+  onPick,
+  initialQuery = "",
+  autoFocus,
 }: {
-  type: AssetType;
-  details: ProductDetails;
-  onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
+  token: string;
+  onUnauthorized: () => void;
+  value: MoexSecurity | null;
+  onPick: (security: MoexSecurity | null) => void;
+  initialQuery?: string;
+  autoFocus?: boolean;
 }) {
-  const fieldset = InstrumentDetailsFieldset({ type, details, onChange });
-  if (!fieldset) return null;
+  const [query, setQuery] = useState(value?.secid ?? initialQuery);
+  const [results, setResults] = useState<MoexSearchItem[]>([]);
+  const [status, setStatus] = useState<"idle" | "searching" | "loading" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const timer = useRef<number | undefined>(undefined);
+  // Ответ на устаревший запрос (пользователь уже ввёл дальше) отбрасывается.
+  const sequence = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  async function request<T>(path: string): Promise<T> {
+    const response = await apiFetch(`${apiUrl}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (response.status === 401) {
+      onUnauthorized();
+      throw new Error("Сессия истекла");
+    }
+    const body = (await response.json().catch(() => ({}))) as T & { error?: string };
+    if (!response.ok) throw new Error(body.error || "Московская биржа не отвечает. Попробуйте позже");
+    return body;
+  }
+  function fail(error: unknown) {
+    setResults([]);
+    setStatus("error");
+    setMessage(errorText(error, "Московская биржа не отвечает. Попробуйте позже"));
+  }
+  function search(text: string) {
+    setQuery(text);
+    if (value) onPick(null);
+    setMessage("");
+    window.clearTimeout(timer.current);
+    const id = ++sequence.current;
+    const trimmed = text.trim();
+    if (trimmed.length < 2) {
+      setResults([]);
+      setStatus("idle");
+      return;
+    }
+    setStatus("searching");
+    timer.current = window.setTimeout(() => {
+      request<MoexSearchItem[]>(`/market-data/search?q=${encodeURIComponent(trimmed)}`)
+        .then((items) => {
+          if (id !== sequence.current) return;
+          setResults(items);
+          setStatus("idle");
+          if (items.length === 0) setMessage("На Московской бирже ничего не найдено — проверьте тикер или название");
+        })
+        .catch((error) => {
+          if (id === sequence.current) fail(error);
+        });
+    }, 300);
+  }
+  async function pick(secid: string) {
+    window.clearTimeout(timer.current);
+    const id = ++sequence.current;
+    setQuery(secid);
+    setResults([]);
+    setStatus("loading");
+    setMessage("");
+    try {
+      const security = await request<MoexSecurity>(`/market-data/securities/${encodeURIComponent(secid)}`);
+      if (id !== sequence.current) return;
+      setStatus("idle");
+      onPick(security);
+    } catch (error) {
+      if (id === sequence.current) fail(error);
+    }
+  }
+  const typed = query.trim().toUpperCase();
   return (
-    <details className="details-block">
-      <summary>Добавить дополнительные детали</summary>
-      <div className="details-fields">{fieldset}</div>
-    </details>
+    <div className="security-picker">
+      <label>
+        Тикер или название
+        <input
+          value={query}
+          onChange={(event) => search(event.target.value)}
+          placeholder="Например, SBER, ОФЗ 26238 или ISIN"
+          autoComplete="off"
+          autoFocus={autoFocus}
+        />
+      </label>
+      {status === "searching" && <small className="muted">Ищем на Московской бирже…</small>}
+      {status === "loading" && <small className="muted">Загружаем данные бумаги…</small>}
+      {results.length > 0 && (
+        <ul className="security-results">
+          {results.map((item) => (
+            <li key={item.secid}>
+              <button type="button" onClick={() => void pick(item.secid)}>
+                <span>
+                  <strong>{item.shortName}</strong> <span className="muted">· {item.secid} · {moexGroupLabels[item.group]}</span>
+                </span>
+                <small className="muted">{item.name}</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {value && (
+        <div className="security-picked">
+          <strong>{value.shortName}</strong>
+          <span className="muted">
+            {value.offline
+              ? "Данные биржи подтянутся позже — укажите цену покупки"
+              : [
+                  value.secid,
+                  value.isin && value.isin !== value.secid ? value.isin : undefined,
+                  value.price !== null ? `цена ${securityPriceText(value.price, value.currency)}` : "цены на бирже сейчас нет",
+                  value.couponRate ? `купон ${percentText(value.couponRate)}` : undefined,
+                  value.maturityDate ? `погашение ${fullDate(value.maturityDate)}` : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+          </span>
+        </div>
+      )}
+      {message && <small className={status === "error" ? "form-error" : "muted"}>{message}</small>}
+      {status === "error" && typed.length >= 2 && !value && (
+        <button
+          type="button"
+          className="outline-button"
+          onClick={() =>
+            onPick({ secid: typed, name: typed, shortName: typed, group: "share", currency: "RUB", price: null, accruedInterest: null, offline: true })
+          }
+        >
+          Продолжить с тикером «{typed}»
+        </button>
+      )}
+    </div>
   );
 }
-function InstrumentDetailsFieldset({
-  type,
+function DepositOptionalFields({
   details,
   onChange,
 }: {
-  type: AssetType;
   details: ProductDetails;
   onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
 }) {
-  if (type === "Деньги" || type === "Прочее") return null;
-  const showPosition = type === "Облигации" || type === "Акции" || type === "Фонды";
   return (
     <>
-      {showPosition && (
-          <>
-            <label>
-              ISIN
-              <input
-                value={details.isin}
-                onChange={(event) => onChange("isin", event.target.value)}
-                placeholder="Например, RU000A1038V6"
-              />
-            </label>
-            <label>
-              Тикер
-              <input
-                value={details.ticker}
-                onChange={(event) => onChange("ticker", event.target.value.toUpperCase())}
-                placeholder="Например, SBER"
-              />
-            </label>
-            <label>
-              Количество
-              <input
-                value={details.quantity}
-                onChange={(event) => onChange("quantity", event.target.value)}
-                type="number"
-                min="0"
-              />
-            </label>
-            <label>
-              Средняя цена
-              <input
-                value={details.averagePrice}
-                onChange={(event) => onChange("averagePrice", event.target.value)}
-                type="number"
-                min="0"
-              />
-            </label>
-            <label>
-              Текущая цена
-              <input
-                value={details.currentPrice}
-                onChange={(event) => onChange("currentPrice", event.target.value)}
-                type="number"
-                min="0"
-                placeholder="Оставьте пустым, если неизвестна"
-              />
-            </label>
-          </>
-        )}
-        {type === "Облигации" && (
-          <>
-            <label>
-              Номинал
-              <input
-                value={details.nominal}
-                onChange={(event) => onChange("nominal", event.target.value)}
-                type="number"
-                min="0"
-              />
-            </label>
-            <label>
-              НКД
-              <input
-                value={details.accruedInterest}
-                onChange={(event) => onChange("accruedInterest", event.target.value)}
-                type="number"
-                min="0"
-              />
-            </label>
-            <label>
-              Купон, %
-              <input
-                value={details.couponRate}
-                onChange={(event) => onChange("couponRate", event.target.value)}
-                type="number"
-                min="0"
-                step="0.01"
-              />
-            </label>
-            <label>
-              Дата выплаты купона
-              <input
-                value={details.couponDate}
-                onChange={(event) => onChange("couponDate", event.target.value)}
-                type="date"
-              />
-            </label>
-            <label>
-              Дата погашения
-              <input
-                value={details.maturityDate}
-                onChange={(event) => onChange("maturityDate", event.target.value)}
-                type="date"
-              />
-            </label>
-            <label>
-              Оферта
-              <input
-                value={details.ofertaDate}
-                onChange={(event) => onChange("ofertaDate", event.target.value)}
-                type="date"
-              />
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={details.amortization}
-                onChange={(event) => onChange("amortization", event.target.checked)}
-              />
-              Амортизация номинала
-            </label>
-          </>
-        )}
-        {type === "Вклады" && (
-          <>
-            <label>
-              Ставка, %
-              <input
-                value={details.rate}
-                onChange={(event) => onChange("rate", event.target.value)}
-                type="number"
-                min="0"
-                step="0.01"
-              />
-            </label>
-            <label>
-              Эффективная ставка, %
-              <input
-                value={details.effectiveRate}
-                onChange={(event) => onChange("effectiveRate", event.target.value)}
-                type="number"
-                min="0"
-                step="0.01"
-              />
-            </label>
-            <label>
-              Дата окончания
-              <input
-                value={details.termEndDate}
-                onChange={(event) => onChange("termEndDate", event.target.value)}
-                type="date"
-              />
-            </label>
-            <label>
-              Периодичность выплаты процентов
-              <select
-                value={details.interestPayoutFrequency}
-                onChange={(event) => onChange("interestPayoutFrequency", event.target.value)}
-              >
-                <option value="">Не указано</option>
-                <option value="Ежемесячно">Ежемесячно</option>
-                <option value="Ежеквартально">Ежеквартально</option>
-                <option value="В конце срока">В конце срока</option>
-              </select>
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={details.capitalization}
-                onChange={(event) => onChange("capitalization", event.target.checked)}
-              />
-              Капитализация процентов
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={details.replenishable}
-                onChange={(event) => onChange("replenishable", event.target.checked)}
-              />
-              Можно пополнять
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={details.partialWithdrawal}
-                onChange={(event) => onChange("partialWithdrawal", event.target.checked)}
-              />
-              Частичное снятие без потери процентов
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={details.autoProlongation}
-                onChange={(event) => onChange("autoProlongation", event.target.checked)}
-              />
-              Автопродление
-            </label>
-          </>
-        )}
+      <label>
+        Выплата процентов
+        <select
+          value={details.interestPayoutFrequency}
+          onChange={(event) => onChange("interestPayoutFrequency", event.target.value)}
+        >
+          <option value="">Не указано</option>
+          <option value="Ежемесячно">Ежемесячно</option>
+          <option value="Ежеквартально">Ежеквартально</option>
+          <option value="В конце срока">В конце срока</option>
+        </select>
+      </label>
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={details.capitalization}
+          onChange={(event) => onChange("capitalization", event.target.checked)}
+        />
+        Капитализация процентов
+      </label>
     </>
   );
 }
+function BondIssueFields({
+  details,
+  onChange,
+}: {
+  details: ProductDetails;
+  onChange: <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) => void;
+}) {
+  return (
+    <>
+      <label>
+        Купон, %
+        <input value={details.couponRate} onChange={(event) => onChange("couponRate", event.target.value)} type="number" min="0" step="0.01" />
+      </label>
+      <label>
+        Дата ближайшего купона
+        <input value={details.couponDate} onChange={(event) => onChange("couponDate", event.target.value)} type="date" />
+      </label>
+      <label>
+        Дата погашения
+        <input value={details.maturityDate} onChange={(event) => onChange("maturityDate", event.target.value)} type="date" />
+      </label>
+      <label>
+        Оферта
+        <input value={details.ofertaDate} onChange={(event) => onChange("ofertaDate", event.target.value)} type="date" />
+      </label>
+    </>
+  );
+}
+const currencyOptions = (
+  <>
+    <option value="RUB">RUB</option>
+    <option value="USD">USD</option>
+    <option value="CNY">CNY</option>
+  </>
+);
 const wizardTypeOptions: { value: AssetType; label: string; icon: string }[] = [
   { value: "Вклады", label: "Вклад", icon: "🏦" },
   { value: "Облигации", label: "Облигация", icon: "📜" },
@@ -5738,6 +5659,7 @@ const wizardTypeOptions: { value: AssetType; label: string; icon: string }[] = [
   { value: "Фонды", label: "ПИФ", icon: "🧺" },
   { value: "Прочее", label: "Прочее", icon: "▧" },
 ];
+const typeOptionLabel = (type: AssetType) => wizardTypeOptions.find((option) => option.value === type)?.label ?? type;
 
 
 function ProductFormPage({
@@ -5769,7 +5691,10 @@ function ProductFormPage({
   // одна и та же сумма окажется в портфеле дважды — деньгами и новым продуктом.
   const [fromCash, setFromCash] = useState(() => Boolean(reinvestFrom));
   const [date, setDate] = useState(todayIsoDate);
-  const [invested, setInvested] = useState("");
+  // Бумага (§17, §20): тикер с биржи и количество; цена покупки необязательна.
+  const [security, setSecurity] = useState<MoexSecurity | null>(null);
+  const [quantity, setQuantity] = useState("");
+  const [purchasePrice, setPurchasePrice] = useState("");
   const [institution, setInstitution] = useState(() => searchParams.get("institution") ?? "");
   const [currency, setCurrency] = useState(() => {
     const fromQuery = searchParams.get("currency");
@@ -5781,8 +5706,12 @@ function ProductFormPage({
   // уводит со страницы. Шаг, для которого ещё нет данных (перезагрузка на ?step=3),
   // откатывается к первому незаполненному.
   const requestedStep = Number(searchParams.get("step"));
+  const isSecurity = type !== null && quotedTypes.has(type);
+  const stepTwoReady = isSecurity
+    ? Boolean(security) && Number(quantity) > 0
+    : Boolean(name.trim() && amount && (type !== "Вклады" || details.rate.trim()));
   const step: 1 | 2 | 3 =
-    requestedStep >= 2 && !type ? 1 : requestedStep === 3 && !(name.trim() && amount) ? 2 : requestedStep === 3 ? 3 : requestedStep === 2 ? 2 : 1;
+    requestedStep >= 2 && !type ? 1 : requestedStep === 3 && !stepTwoReady ? 2 : requestedStep === 3 ? 3 : requestedStep === 2 ? 2 : 1;
   const setStep = (next: 1 | 2 | 3) => {
     const params = new URLSearchParams(searchParams);
     if (next === 1) params.delete("step");
@@ -5806,7 +5735,9 @@ function ProductFormPage({
     setAmount("");
     setFromCash(false);
     setDate(todayIsoDate());
-    setInvested("");
+    setSecurity(null);
+    setQuantity("");
+    setPurchasePrice("");
     setInstitution("");
     setCurrency("RUB");
     setDetails(emptyProductDetails);
@@ -5817,33 +5748,46 @@ function ProductFormPage({
     setType(value);
     setStep(2);
   };
+  // Выбор бумаги другой группы (искали «акцию», выбрали облигацию) переводит и тип.
+  const pickSecurity = (picked: MoexSecurity | null) => {
+    setSecurity(picked);
+    setError("");
+    if (picked && !picked.offline) setType(moexGroupTypes[picked.group]);
+  };
   const goToConfirm = (event: FormEvent) => {
     event.preventDefault();
+    if (isSecurity && !security) {
+      setError("Выберите бумагу из списка подсказок");
+      return;
+    }
     setError("");
     setStep(3);
   };
-  const reconciled = investedCheck(details, invested);
   const submit = async () => {
     if (!type) return;
-    if (reconciled?.mismatch) return;
     setSaving(true);
     setError("");
+    const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual", ...(fromCash ? { fromCash: true } : {}) };
+    // Бумага уходит без суммы: название, параметры выпуска и цену сервер берёт с MOEX.
+    // У вклада и прочего одна сумма — она же вложенная.
+    const payload = isSecurity && security
+      ? {
+          ...common,
+          ticker: security.secid,
+          ...(security.offline ? { name: security.shortName } : {}),
+          quantity: Number(quantity),
+          averagePrice: purchasePrice.trim() ? Number(purchasePrice) : undefined,
+        }
+      : {
+          ...common,
+          name,
+          amount: Number(amount),
+          invested: Number(amount),
+          currency,
+          ...(type === "Вклады" ? depositPayload(details) : {}),
+        };
     try {
-      await onSubmit({
-        id: crypto.randomUUID(),
-        name,
-        type,
-        amount: Number(amount),
-        invested: reconciled
-          ? (reconciled.typed ?? reconciled.expected)
-          : Number(invested || amount),
-        date,
-        institution: institution || "Ручной ввод",
-        currency,
-        source: "manual",
-        ...detailsToPayload(details),
-        ...(fromCash ? { fromCash: true } : {}),
-      });
+      await onSubmit(payload as unknown as Product);
       // Продукт куплен на пришедшие деньги — напоминание реинвестировать их больше не нужно.
       // Сбой отметки не отменяет сохранённый продукт: её можно поставить из ленты вручную.
       if (reinvestPayoutIds.length) await onMarkReinvested(reinvestPayoutIds).catch(() => undefined);
@@ -6005,36 +5949,97 @@ function ProductFormPage({
           )}
           {step === 2 && type && (
             <form className="modal-form" onSubmit={goToConfirm}>
-              <label>
-                Название
-                <input
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Например, ОФЗ 26241"
-                  autoFocus
-                  required
-                />
-              </label>
-              <label>
-                Сумма
-                <input
-                  value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
-                  type="number"
-                  min="1"
-                  placeholder="100000"
-                  required
-                />
-              </label>
-              <label>
-                Дата
-                <input
-                  value={date}
-                  onChange={(event) => setDate(event.target.value)}
-                  type="date"
-                  required
-                />
-              </label>
+              {isSecurity ? (
+                <>
+                  <SecurityPicker
+                    token={token}
+                    onUnauthorized={onUnauthorized}
+                    value={security}
+                    onPick={pickSecurity}
+                    autoFocus
+                  />
+                  <label>
+                    Количество, шт.
+                    <input
+                      value={quantity}
+                      onChange={(event) => setQuantity(event.target.value)}
+                      type="number"
+                      min="0"
+                      step="any"
+                      placeholder="10"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Дата покупки
+                    <input value={date} onChange={(event) => setDate(event.target.value)} type="date" required />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label>
+                    Название
+                    <input
+                      value={name}
+                      onChange={(event) => setName(event.target.value)}
+                      placeholder={type === "Вклады" ? "Например, Вклад «Надёжный»" : "Например, доля в ООО"}
+                      autoFocus
+                      required
+                    />
+                  </label>
+                  {type === "Вклады" && (
+                    <label>
+                      Банк
+                      <input
+                        value={institution}
+                        onChange={(event) => setInstitution(event.target.value)}
+                        placeholder="Например, Сбербанк"
+                      />
+                    </label>
+                  )}
+                  <label>
+                    {type === "Вклады" ? "Сумма открытия" : "Сумма"}
+                    <input
+                      value={amount}
+                      onChange={(event) => setAmount(event.target.value)}
+                      type="number"
+                      min="1"
+                      placeholder="100000"
+                      required
+                    />
+                  </label>
+                  {type === "Вклады" && (
+                    <label>
+                      Ставка, % годовых
+                      <input
+                        value={details.rate}
+                        onChange={(event) => updateDetail("rate", event.target.value)}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="18"
+                        required
+                      />
+                    </label>
+                  )}
+                  <label>
+                    {type === "Вклады" ? "Дата открытия" : "Дата"}
+                    <input value={date} onChange={(event) => setDate(event.target.value)} type="date" required />
+                  </label>
+                  {type === "Вклады" && (
+                    <label>
+                      Дата окончания
+                      <input
+                        value={details.termEndDate}
+                        onChange={(event) => updateDetail("termEndDate", event.target.value)}
+                        type="date"
+                      />
+                      <small className="muted">У накопительного счёта без срока оставьте пустым.</small>
+                    </label>
+                  )}
+                </>
+              )}
+              {error && <small className="form-error">{error}</small>}
               <div className="wizard-actions">
                 <button type="button" className="outline-button" onClick={() => setStep(1)}>
                   Назад
@@ -6047,13 +6052,50 @@ function ProductFormPage({
           )}
           {step === 3 && type && (
             <div className="confirm-card">
-              <p>
-                <strong>{name}</strong>
-                <br />
-                {wizardTypeOptions.find((option) => option.value === type)?.label ?? type} ·{" "}
-                {amount} ₽ · {date}
-              </p>
-              <InvestedCheckNote check={reconciled} amount={amount} />
+              {isSecurity && security ? (
+                <p>
+                  <strong>{security.shortName}</strong>
+                  {!security.offline && <span className="muted"> · {security.secid}</span>}
+                  <br />
+                  {typeOptionLabel(type)} · {quantity} шт. · {fullDate(date)}
+                  <br />
+                  {security.price !== null ? (
+                    <span className="muted">
+                      Цена на бирже {securityPriceText(security.price, security.currency)} — стоимость ≈{" "}
+                      {securityPriceText(security.price * Number(quantity), security.currency)}
+                    </span>
+                  ) : (
+                    <span className="attention-text">Цены на бирже сейчас нет — укажите цену покупки.</span>
+                  )}
+                </p>
+              ) : (
+                <p>
+                  <strong>{name}</strong>
+                  <br />
+                  {typeOptionLabel(type)} · {money(Number(amount))} · {fullDate(date)}
+                  {type === "Вклады" && details.rate && ` · ${percentText(Number(details.rate))}`}
+                  {type === "Вклады" && details.termEndDate && ` · до ${fullDate(details.termEndDate)}`}
+                  {institution && (
+                    <>
+                      <br />
+                      <span className="muted">{institution}</span>
+                    </>
+                  )}
+                </p>
+              )}
+              {isSecurity && security?.price === null && (
+                <label>
+                  Цена покупки за 1 шт.
+                  <input
+                    value={purchasePrice}
+                    onChange={(event) => setPurchasePrice(event.target.value)}
+                    type="number"
+                    min="0"
+                    step="any"
+                    required
+                  />
+                </label>
+              )}
               <label className="checkbox-label">
                 <input type="checkbox" checked={fromCash} onChange={(event) => setFromCash(event.target.checked)} />
                 Оплатить из свободных денег
@@ -6064,33 +6106,42 @@ function ProductFormPage({
               <details className="details-block">
                 <summary>Добавить дополнительные детали</summary>
                 <div className="details-fields">
-                  <label>
-                    Банк или брокер
-                    <input
-                      value={institution}
-                      onChange={(event) => setInstitution(event.target.value)}
-                      placeholder="Необязательно"
-                    />
-                  </label>
-                  <label>
-                    Валюта
-                    <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
-                      <option value="RUB">RUB</option>
-                      <option value="USD">USD</option>
-                      <option value="CNY">CNY</option>
-                    </select>
-                  </label>
-                  <label>
-                    Вложено (сумма покупки)
-                    <input
-                      value={invested}
-                      onChange={(event) => setInvested(event.target.value)}
-                      type="number"
-                      min="1"
-                      placeholder={reconciled ? String(reconciled.expected) : "100000"}
-                    />
-                  </label>
-                  {InstrumentDetailsFieldset({ type, details, onChange: updateDetail })}
+                  {isSecurity && security?.price !== null && (
+                    <label>
+                      Цена покупки за 1 шт.
+                      <input
+                        value={purchasePrice}
+                        onChange={(event) => setPurchasePrice(event.target.value)}
+                        type="number"
+                        min="0"
+                        step="any"
+                        placeholder={security ? String(security.price) : ""}
+                      />
+                      <small className="muted">
+                        Если не указать, вложенным считается стоимость по сегодняшней цене — доход начнёт
+                        считаться с этого дня.
+                      </small>
+                    </label>
+                  )}
+                  {type !== "Вклады" && (
+                    <label>
+                      {isSecurity ? "Брокер" : "Банк или брокер"}
+                      <input
+                        value={institution}
+                        onChange={(event) => setInstitution(event.target.value)}
+                        placeholder="Необязательно"
+                      />
+                    </label>
+                  )}
+                  {type === "Вклады" && <DepositOptionalFields details={details} onChange={updateDetail} />}
+                  {!isSecurity && (
+                    <label>
+                      Валюта
+                      <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
+                        {currencyOptions}
+                      </select>
+                    </label>
+                  )}
                 </div>
               </details>
               {error && <small className="form-error">{error}</small>}
@@ -6107,7 +6158,7 @@ function ProductFormPage({
                   type="button"
                   className="primary-button"
                   onClick={() => void submit()}
-                  disabled={saving || Boolean(reconciled?.mismatch)}
+                  disabled={saving || (isSecurity && security?.price === null && !(Number(purchasePrice) > 0))}
                 >
                   {saving ? "Сохраняем..." : "Добавить"}
                 </button>
@@ -6134,30 +6185,42 @@ function ProductFormPage({
     </Page>
   );
 }
+// Правка инструмента (§9, §40.4): у вклада и прочего — одна сумма открытия, у бумаги —
+// количество и необязательная цена покупки; стоимость бумаги считается по цене биржи.
 function EditProductPage({
   products,
+  token,
+  onUnauthorized,
   onSubmit,
 }: {
   products: Product[];
+  token: string;
+  onUnauthorized: () => void;
   onSubmit: (product: Product) => void;
 }) {
   const { id } = useParams();
   const product = products.find((item) => item.id === id);
   const [name, setName] = useState(product?.name || "");
   const [type, setType] = useState<AssetType>(product?.type || "Облигации");
-  const [amount, setAmount] = useState(String(product?.amount || ""));
-  const [invested, setInvested] = useState(String(product?.invested || ""));
+  const [amount, setAmount] = useState(String(product?.invested || product?.amount || ""));
   const [institution, setInstitution] = useState(product?.institution || "");
   const [currency, setCurrency] = useState(product?.currency || "RUB");
+  const [date, setDate] = useState(product?.date || "");
+  const [quantity, setQuantity] = useState(product?.quantity !== undefined ? String(product.quantity) : "");
+  const [purchasePrice, setPurchasePrice] = useState(product?.averagePrice !== undefined ? String(product.averagePrice) : "");
+  const [security, setSecurity] = useState<MoexSecurity | null>(null);
   const [details, setDetails] = useState<ProductDetails>(productToDetails(product));
   useEffect(() => {
     if (!product) return;
     setName(product.name);
     setType(product.type);
-    setAmount(String(product.amount));
-    setInvested(String(product.invested));
+    setAmount(String(product.invested || product.amount));
     setInstitution(product.institution);
     setCurrency(product.currency);
+    setDate(product.date || "");
+    setQuantity(product.quantity !== undefined ? String(product.quantity) : "");
+    setPurchasePrice(product.averagePrice !== undefined ? String(product.averagePrice) : "");
+    setSecurity(null);
     setDetails(productToDetails(product));
     // Перезаполняется и когда запись пришла позже первого рендера (прямая ссылка, BUG-18).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6165,82 +6228,186 @@ function EditProductPage({
   if (!product) return <MissingRecord to="/products" />;
   const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
     setDetails((current) => ({ ...current, [key]: value }));
-  const reconciled = investedCheck(details, invested);
+  const isSecurity = quotedTypes.has(type);
+  const pickSecurity = (picked: MoexSecurity | null) => {
+    setSecurity(picked);
+    if (picked && !picked.offline) {
+      setType(moexGroupTypes[picked.group]);
+      setName(picked.shortName);
+    }
+  };
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (reconciled?.mismatch) return;
+    const base = { id: product.id, name, type, institution: institution || "Ручной ввод", ...(date ? { date } : {}) };
+    if (!isSecurity) {
+      // Одна сумма: сколько положено (§17). Текущая стоимость вклада — эта сумма плюс
+      // начисленные проценты, их считает Portfolio Engine по ставке.
+      onSubmit({
+        ...base,
+        amount: Number(amount),
+        invested: Number(amount),
+        currency,
+        ...(type === "Вклады" ? depositPayload(details) : {}),
+      } as unknown as Product);
+      return;
+    }
+    const count = Number(quantity);
+    const picked = security && !security.offline ? security : null;
+    const marketPrice = picked ? picked.price : product.currentPrice ?? null;
+    // Цена покупки не указана — вложено считается по текущей цене бумаги.
+    const averagePrice = purchasePrice.trim() ? Number(purchasePrice) : marketPrice ?? undefined;
+    const valuePrice = marketPrice ?? averagePrice;
     onSubmit({
-      ...product,
-      name,
-      type,
-      amount: Number(amount),
-      invested: reconciled
-        ? (reconciled.typed ?? reconciled.expected)
-        : Number(invested || amount),
-      institution: institution || "Ручной ввод",
-      currency,
-      ...detailsToPayload(details),
-    });
+      ...base,
+      quantity: count,
+      averagePrice,
+      ...(valuePrice !== undefined ? { amount: count * valuePrice } : {}),
+      ...(security
+        ? {
+            ticker: security.secid,
+            ...(picked
+              ? {
+                  isin: picked.isin,
+                  currency: picked.currency,
+                  nominal: picked.nominal,
+                  currentPrice: picked.price ?? undefined,
+                  accruedInterest: picked.accruedInterest !== null ? picked.accruedInterest * count : undefined,
+                  couponRate: picked.couponRate,
+                  couponDate: picked.nextCouponDate,
+                  maturityDate: picked.maturityDate,
+                  ofertaDate: picked.offerDate,
+                }
+              : {}),
+          }
+        : {
+            // НКД хранится на всю позицию — при новом количестве пересчитывается на него.
+            ...(product.accruedInterest && product.quantity && count !== product.quantity
+              ? { accruedInterest: (product.accruedInterest / product.quantity) * count }
+              : {}),
+            ...(type === "Облигации" ? bondPayload(details) : {}),
+          }),
+    } as unknown as Product);
   };
+  const pickerBlock = (
+    <SecurityPicker
+      token={token}
+      onUnauthorized={onUnauthorized}
+      value={security}
+      onPick={pickSecurity}
+      initialQuery={product.ticker || ""}
+    />
+  );
   return (
     <Page title="Редактировать инструмент" subtitle={product.name} back>
       <form className="modal-form" onSubmit={submit}>
         <label>
-          Название
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            required
-          />
-        </label>
-        <label>
-          Текущая стоимость
-          <input
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            type="number"
-            min="1"
-            required
-          />
-        </label>
-        <label>
-          Вложено (сумма покупки)
-          <input
-            value={invested}
-            onChange={(event) => setInvested(event.target.value)}
-            type="number"
-            min="1"
-          />
-        </label>
-        <label>
-          Банк или брокер
-          <input
-            value={institution}
-            onChange={(event) => setInstitution(event.target.value)}
-          />
-        </label>
-        <label>
-          Валюта
-          <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
-            <option value="RUB">RUB</option>
-            <option value="USD">USD</option>
-            <option value="CNY">CNY</option>
-          </select>
-        </label>
-        <label>
           Тип продукта
-          <select
-            value={type}
-            onChange={(event) => setType(event.target.value as AssetType)}
-          >
+          <select value={type} onChange={(event) => setType(event.target.value as AssetType)}>
             {Object.keys(typeColors).map((item) => (
               <option key={item}>{item}</option>
             ))}
           </select>
         </label>
-        <InstrumentDetailsFields type={type} details={details} onChange={updateDetail} />
-        <InvestedCheckNote check={reconciled} amount={amount} />
-        <button className="primary-button" type="submit" disabled={Boolean(reconciled?.mismatch)}>
+        {isSecurity && !product.ticker && (
+          <>
+            <p className="muted">Укажите бумагу — название, купон и цену подставим с Московской биржи.</p>
+            {pickerBlock}
+          </>
+        )}
+        <label>
+          Название
+          <input value={name} onChange={(event) => setName(event.target.value)} required />
+        </label>
+        {isSecurity ? (
+          <>
+            <label>
+              Количество, шт.
+              <input value={quantity} onChange={(event) => setQuantity(event.target.value)} type="number" min="0" step="any" required />
+            </label>
+            <label>
+              Цена покупки за 1 шт.
+              <input
+                value={purchasePrice}
+                onChange={(event) => setPurchasePrice(event.target.value)}
+                type="number"
+                min="0"
+                step="any"
+                placeholder={product.currentPrice !== undefined ? String(product.currentPrice) : "Необязательно"}
+              />
+              <small className="muted">Пусто — вложенным считается стоимость по текущей цене.</small>
+            </label>
+            <label>
+              Дата покупки
+              <input value={date} onChange={(event) => setDate(event.target.value)} type="date" />
+            </label>
+            <label>
+              Брокер
+              <input value={institution} onChange={(event) => setInstitution(event.target.value)} />
+            </label>
+          </>
+        ) : (
+          <>
+            {type === "Вклады" && (
+              <label>
+                Банк
+                <input value={institution} onChange={(event) => setInstitution(event.target.value)} />
+              </label>
+            )}
+            <label>
+              {type === "Вклады" ? "Сумма открытия" : "Сумма"}
+              <input value={amount} onChange={(event) => setAmount(event.target.value)} type="number" min="1" required />
+            </label>
+            {type === "Вклады" && (
+              <label>
+                Ставка, % годовых
+                <input value={details.rate} onChange={(event) => updateDetail("rate", event.target.value)} type="number" min="0" step="0.01" />
+              </label>
+            )}
+            <label>
+              {type === "Вклады" ? "Дата открытия" : "Дата"}
+              <input value={date} onChange={(event) => setDate(event.target.value)} type="date" />
+            </label>
+            {type === "Вклады" && (
+              <label>
+                Дата окончания
+                <input value={details.termEndDate} onChange={(event) => updateDetail("termEndDate", event.target.value)} type="date" />
+              </label>
+            )}
+          </>
+        )}
+        <details className="details-block">
+          <summary>Добавить дополнительные детали</summary>
+          <div className="details-fields">
+            {type === "Вклады" && <DepositOptionalFields details={details} onChange={updateDetail} />}
+            {isSecurity && product.ticker && (
+              <>
+                <p className="muted">Другая бумага — найдите её на бирже:</p>
+                {pickerBlock}
+              </>
+            )}
+            {type === "Облигации" && !security && (
+              <>
+                <p className="muted">Параметры выпуска обычно приходят с биржи — правьте, только если там ошибка.</p>
+                <BondIssueFields details={details} onChange={updateDetail} />
+              </>
+            )}
+            {type !== "Вклады" && !isSecurity && (
+              <label>
+                Банк или брокер
+                <input value={institution} onChange={(event) => setInstitution(event.target.value)} />
+              </label>
+            )}
+            {!isSecurity && (
+              <label>
+                Валюта
+                <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
+                  {currencyOptions}
+                </select>
+              </label>
+            )}
+          </div>
+        </details>
+        <button className="primary-button" type="submit">
           Сохранить изменения
         </button>
       </form>
