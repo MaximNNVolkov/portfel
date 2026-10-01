@@ -3005,7 +3005,8 @@ function PaymentsPage({
   const level: PaymentViewMode = byParam === "day" || byParam === "year" ? byParam : "month";
   const currentKey = cellKeyOf(today, level);
   const startParam = searchParams.get("start") ?? "";
-  const start = START_PATTERN[level].test(startParam) ? startParam : currentKey;
+  // Окно не уходит в прошлое: экран — про то, что ещё придёт.
+  const start = START_PATTERN[level].test(startParam) && startParam > currentKey ? startParam : currentKey;
   const keys = Array.from({ length: PAYOUT_CELLS }, (_, index) => shiftCell(start, level, index));
   const selParam = searchParams.get("sel") ?? "";
   const selected = keys.includes(selParam) ? selParam : null;
@@ -3051,10 +3052,11 @@ function PaymentsPage({
     if (bankFilter !== "all" && payoutInstitution(payment, products) !== bankFilter) return false;
     return true;
   });
-  // Просроченные — отдельной группой (BUG-22): ни в свод, ни в сетку они не попадают,
-  // иначе прошедшие даты складываются с будущими.
-  const overduePayments = matching.filter(isOverdue).sort((a, b) => a.date.localeCompare(b.date));
-  const calendar = matching.filter((payment) => !isOverdue(payment)).sort((a, b) => a.date.localeCompare(b.date));
+  // Прошедшие выплаты на экране не показываются (П27): он отвечает на вопрос «сколько
+  // придёт». Неотмеченные прошедшие отмечаются в «Требует внимания» и карточке продукта.
+  const calendar = matching
+    .filter((payment) => payment.date >= today && !isOverdue(payment))
+    .sort((a, b) => a.date.localeCompare(b.date));
   const upcoming = calendar.filter(isUpcoming);
 
   const [markingId, setMarkingId] = useState<string | null>(null);
@@ -3066,17 +3068,6 @@ function PaymentsPage({
       setMarkingId(null);
     }
   }
-  // Вклад, заведённый задним числом, приносит сразу пачку прошедших выплат (2.8) —
-  // отмечать их по одной было бы наказанием.
-  async function markAllReceived() {
-    setMarkingId("all");
-    try {
-      for (const payment of overduePayments) await onMarkReceived(payment);
-    } finally {
-      setMarkingId(null);
-    }
-  }
-  const overduePaging = usePagedList(overduePayments);
 
   // Свод: четыре горизонта, каждый открывает свой вид сетки.
   const nextMonth = shiftCell(cellKeyOf(today, "month"), "month", 1);
@@ -3188,83 +3179,10 @@ function PaymentsPage({
           </div>
         ))}
 
-      {overduePayments.length > 0 && (
-        // Свёрнуто в одну строку: экран — про планирование, а семь прошедших процентов
-        // по вкладу не должны отодвигать сетку на экран вниз.
-        <details className="overdue-block payout-overdue">
-          <summary>
-            ⚠ Не отмечены полученными: {overduePayments.length} {pluralPayouts(overduePayments.length)} на{" "}
-            {money(sumPayoutsBase(overduePayments).total)} — дата прошла, отметьте, если деньги пришли
-          </summary>
-          <div className="product-list">
-            {overduePaging.visible.map((payment) => {
-              const product = payment.instrumentId
-                ? products.find((item) => item.instrumentId === payment.instrumentId)
-                : undefined;
-              const typeLabel = payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type];
-              return (
-                <div className="list-row attention-row attention-row-compact" key={payment.id}>
-                  <Link className="product-row-summary" to={`/payments/${payment.id}/edit`}>
-                    <span className="product-row-line1">
-                      <span className="product-row-name">
-                        <i className={`legend type-dot ${payoutTypeColors[payment.type]}`} title={typeLabel} />
-                        <strong>{product?.name || payment.title || typeLabel}</strong>
-                      </span>
-                      <span className="product-row-sum">+{payoutMoney(payment)}</span>
-                    </span>
-                    <span className="product-row-line2">
-                      <span className="muted product-row-meta">
-                        {[typeLabel, payoutInstitution(payment, products)].filter(Boolean).join(" · ")}
-                      </span>
-                      <span className="danger-text">{dateLabel(payment.date)}</span>
-                    </span>
-                  </Link>
-                  <div className="attention-actions">
-                    <button
-                      type="button"
-                      className="outline-button"
-                      disabled={markingId !== null}
-                      onClick={() => void markReceived(payment)}
-                    >
-                      {markingId === payment.id ? "Сохраняем..." : "Деньги пришли"}
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <ListPagination
-            hasMore={overduePaging.hasMore}
-            onLoadMore={overduePaging.loadMore}
-            pageSize={overduePaging.pageSize}
-            onPageSizeChange={overduePaging.setPageSize}
-          />
-          {overduePayments.length > 1 && (
-            <div className="list-row-actions">
-              <button
-                type="button"
-                className="outline-button"
-                disabled={markingId !== null}
-                onClick={() => void markAllReceived()}
-              >
-                {markingId === "all" ? (
-                  "Сохраняем..."
-                ) : (
-                  <>
-                    <span className="label-full">Отметить все полученными ({overduePayments.length})</span>
-                    <span className="label-short">Отметить все ({overduePayments.length})</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-        </details>
-      )}
-
-      {payments.length === 0 ? (
+      {calendar.length === 0 && activeFilters === 0 ? (
         <div className="payout-empty">
           <p className="muted">
-            Пока нет выплат. Они появятся сами, когда у вклада или облигации будут заполнены ставка и даты, — или
+            Впереди выплат нет. Они появятся сами, когда у вклада или облигации будут заполнены ставка и даты, — или
             добавьте выплату вручную.
           </p>
         </div>
@@ -3289,6 +3207,7 @@ function PaymentsPage({
               type="button"
               className="outline-button payout-window-arrow"
               aria-label="Предыдущие 12"
+              disabled={start === currentKey}
               onClick={() => go({ start: shiftCell(start, level, -PAYOUT_CELLS), sel: null })}
             >
               ←
@@ -3321,7 +3240,6 @@ function PaymentsPage({
             {cells.map((cell) => {
               const [label, sub] = cellLabel(cell.key);
               const principal = cell.expected.principal + cell.received.principal;
-              const past = cell.key < currentKey;
               return (
                 <button
                   type="button"
@@ -3349,9 +3267,7 @@ function PaymentsPage({
                       ? "нет выплат"
                       : principal > 0
                         ? `${cell.items.length} · в т.ч. возврат`
-                        : past && cell.received.total > 0 && cell.expected.total === 0
-                          ? `${cell.items.length} · получено`
-                          : `${cell.items.length} ${pluralPayouts(cell.items.length)}`}
+                        : `${cell.items.length} ${pluralPayouts(cell.items.length)}`}
                   </small>
                 </button>
               );
