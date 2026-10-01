@@ -33,6 +33,7 @@ const FIELD_LABELS: Record<string, string> = {
   token: 'Токен', quantity: 'Количество', averagePrice: 'Средняя цена', currentPrice: 'Текущая цена',
   accruedInterest: 'НКД', nominal: 'Номинал', couponRate: 'Купон', rate: 'Ставка', effectiveRate: 'Эффективная ставка',
   maturityDate: 'Дата погашения', termEndDate: 'Дата окончания', couponDate: 'Дата купона', ofertaDate: 'Дата оферты',
+  commission: 'Комиссия', tax: 'Налог',
 }
 const label = (field: string) => FIELD_LABELS[field] ?? field
 
@@ -41,11 +42,35 @@ export function requiredText(value: unknown, field: string): string {
   return value.trim()
 }
 
+// Верхняя граница сумм: больше не помещается в numeric базы, и Postgres отвечал
+// пользователю «numeric field overflow» (прогон 01.10, П15).
+const MAX_AMOUNT = 1e12
 export function positiveNumber(value: unknown, field: string): number {
   const result = Number(value)
   if (!Number.isFinite(result) || result <= 0) throw new Error(`«${label(field)}» должно быть больше нуля`)
+  if (result >= MAX_AMOUNT) throw new Error(`«${label(field)}» слишком большое число`)
   return result
 }
+
+// Дата обязательна и существует в календаре: 2026-02-30 раньше доходила до Postgres
+// и возвращалась пользователю как «date/time field value out of range» (П15).
+export function requiredDate(value: unknown, field: string): string {
+  const text = requiredText(value, field)
+  checkDate(text, field)
+  return text
+}
+
+// Операция или открытие позиции не могут быть в будущем (П20). Запас в один день:
+// «сегодня» сервера считается в UTC, а у пользователя в Москве уже может быть завтра.
+export function notInFuture(date: string, field: string, now = new Date()) {
+  const limit = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  if (date > limit) throw new Error(`«${label(field)}» не может быть в будущем`)
+}
+
+// Валюты MVP (§12, §13): для остальных нет курса, и позиция показывалась «Оценка недоступна».
+export const SUPPORTED_CURRENCIES = ['RUB', 'USD', 'CNY']
+const MAX_NAME_LENGTH = 200
+const MAX_RATE = 100
 
 // Проверка параметров инструмента и позиции (тестер, Т12): отрицательные количество и
 // ставка, дата окончания раньше открытия и даты не в формате ГГГГ-ММ-ДД сохранялись и
@@ -53,15 +78,22 @@ export function positiveNumber(value: unknown, field: string): number {
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 function checkDate(value: string | undefined, field: string) {
   if (value === undefined) return
-  if (!ISO_DATE.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw new Error(`«${label(field)}»: дата должна быть в формате ГГГГ-ММ-ДД`)
+  const parsed = new Date(`${value}T00:00:00Z`)
+  if (!ISO_DATE.test(value) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw new Error(`«${label(field)}»: нет такой даты или она не в формате ГГГГ-ММ-ДД`)
 }
-function checkNonNegative(value: number | undefined, field: string) {
+export function checkNonNegative(value: number | undefined, field: string) {
   if (value !== undefined && value < 0) throw new Error(`«${label(field)}» не может быть отрицательным`)
 }
 export function validateHolding(instrument: Instrument, position: { openedOn?: string; quantity?: number; averagePrice?: number; currentPrice?: number; accruedInterest?: number }) {
   for (const field of ['maturityDate', 'termEndDate', 'couponDate', 'ofertaDate'] as const) checkDate(instrument[field], field)
   checkDate(position.openedOn, 'date')
+  if (position.openedOn) notInFuture(position.openedOn, 'date')
+  if (instrument.name.length > MAX_NAME_LENGTH) throw new Error(`«Название» длиннее ${MAX_NAME_LENGTH} символов`)
+  if (instrument.source === 'manual' && !SUPPORTED_CURRENCIES.includes(instrument.currency)) throw new Error(`Валюта ${instrument.currency} пока не поддерживается: доступны ${SUPPORTED_CURRENCIES.join(', ')}`)
   for (const field of ['nominal', 'couponRate', 'rate', 'effectiveRate'] as const) checkNonNegative(instrument[field], field)
+  for (const field of ['couponRate', 'rate', 'effectiveRate'] as const) {
+    if ((instrument[field] ?? 0) > MAX_RATE) throw new Error(`«${label(field)}» не может быть больше ${MAX_RATE}% годовых`)
+  }
   for (const field of ['averagePrice', 'currentPrice', 'accruedInterest'] as const) checkNonNegative(position[field], field)
   if (position.quantity !== undefined && position.quantity <= 0) throw new Error('«Количество» должно быть больше нуля')
   const end = instrument.termEndDate ?? instrument.maturityDate
@@ -109,7 +141,7 @@ export function instrumentFromBody(body: PositionBody, id: string, source: DataS
     groupType,
     instrumentType: optionalText(body.instrumentType) || groupType,
     name: requiredText(body.name, 'name'),
-    currency: optionalText(body.currency) || 'RUB',
+    currency: (optionalText(body.currency) || 'RUB').toUpperCase(),
     source,
     ticker: optionalText(body.ticker),
     isin: optionalText(body.isin),
@@ -139,7 +171,7 @@ export function mergeInstrument(existing: Instrument, body: PositionBody): Instr
       ? (optionalText(body.instrumentType) || groupType)
       : (body.type !== undefined ? groupType : existing.instrumentType),
     name: body.name !== undefined ? requiredText(body.name, 'name') : existing.name,
-    currency: body.currency !== undefined ? (optionalText(body.currency) || 'RUB') : existing.currency,
+    currency: body.currency !== undefined ? (optionalText(body.currency) || 'RUB').toUpperCase() : existing.currency,
     ticker: body.ticker !== undefined ? optionalText(body.ticker) : existing.ticker,
     isin: body.isin !== undefined ? optionalText(body.isin) : existing.isin,
     issuer: body.issuer !== undefined ? optionalText(body.issuer) : existing.issuer,

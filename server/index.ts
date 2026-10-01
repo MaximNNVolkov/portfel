@@ -26,7 +26,7 @@ import { buildAttention } from './attention.ts'
 import { couponForecastGap } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
-  positionToWire, positiveNumber, reconcileInvested, requiredText, validateHolding, MANUAL_PROVIDER, type PositionBody,
+  checkNonNegative, notInFuture, positionToWire, positiveNumber, reconcileInvested, requiredDate, requiredText, validateHolding, MANUAL_PROVIDER, type PositionBody,
 } from './positions.ts'
 import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
@@ -141,11 +141,36 @@ async function resolveBaseCurrency(client: Db, userId: string): Promise<string> 
 function instrumentToWire(instrument: Instrument) {
   return { ...instrument, type: GROUP_LABELS[instrument.groupType] ?? 'Прочее' }
 }
+// Ошибки проверки ввода (throw new Error('…') в разборе тела) показываются пользователю как
+// есть. Ошибка самой базы (у неё есть SQLSTATE в code) — нет: английский текст Postgres
+// вроде «numeric field overflow» пользователю ничего не говорит (прогон 01.10, П15).
+function clientError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {
+    logError('validation', error)
+    return code.startsWith('22') ? 'Некорректное значение в одном из полей' : fallback
+  }
+  return error.message
+}
+
+// Операция без описания хранит в нём код типа («DEPOSIT»), и он показывался в списке
+// как есть (П21): наружу отдаём русское название типа.
+const TRANSACTION_TITLES: Record<string, string> = {
+  BUY: 'Покупка', SELL: 'Продажа', DEPOSIT: 'Пополнение', WITHDRAW: 'Вывод средств', COUPON: 'Купон',
+  DIVIDEND: 'Дивиденды', INTEREST: 'Проценты по вкладу', FEE: 'Комиссия', TAX: 'Налог', REDEMPTION: 'Погашение', OTHER: 'Прочее',
+}
+function transactionTitle(transaction: Transaction): string {
+  const description = transaction.description?.trim()
+  if (!description || description === transaction.type) return TRANSACTION_TITLES[transaction.type] ?? transaction.type
+  return description
+}
+
 function transactionToWire(transaction: Transaction) {
   return {
     id: transaction.id,
     type: transaction.type,
-    title: transaction.description ?? '',
+    title: transactionTitle(transaction),
     amount: transaction.amount,
     date: transaction.date,
     currency: transaction.currency,
@@ -280,7 +305,7 @@ app.post('/api/auth/register', authLimiter, async (request, response) => {
     users.set(user.id, user); const token = await createSession(user.id)
     setSessionCookie(request, response, token)
     response.status(201).json({ token, user: { id: user.id, email: user.email } })
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid credentials' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось зарегистрироваться') }) }
 })
 app.post('/api/auth/login', authLimiter, async (request, response) => {
   const email = typeof request.body?.email === 'string' ? request.body.email.toLowerCase().trim() : ''
@@ -378,7 +403,7 @@ app.patch('/api/settings', async (request, response) => {
   try {
     if (request.body?.targetAllocation !== undefined) targetAllocation = parseTargetAllocation(request.body.targetAllocation)
   } catch (error) {
-    return response.status(400).json({ error: error instanceof Error ? error.message : 'Неверная целевая структура', field: 'targetAllocation' })
+    return response.status(400).json({ error: clientError(error, 'Неверная целевая структура'), field: 'targetAllocation' })
   }
   const portfolio = await ensurePortfolio(db, userId, randomUUID())
   const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw, targetAllocation })
@@ -524,7 +549,7 @@ app.post('/api/positions', async (request, response) => {
       return created
     })
     response.status(201).json((await valuedPositions(userId, [position]))[0])
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
 })
 // Реинвестирование (критик К4): новый продукт покупается на пришедшие деньги, а не
 // появляется в портфеле поверх них. Покупка проводится операцией BUY — свободные деньги
@@ -595,7 +620,7 @@ app.patch('/api/positions/:id', async (request, response) => {
         averagePrice,
         currentPrice: body.currentPrice !== undefined ? optionalNumber(body.currentPrice) : existing.currentPrice,
         accruedInterest: body.accruedInterest !== undefined ? optionalNumber(body.accruedInterest) : existing.accruedInterest,
-        openedOn: body.date !== undefined ? requiredText(body.date, 'date') : existing.openedOn,
+        openedOn: body.date !== undefined ? requiredDate(body.date, 'date') : existing.openedOn,
       }
       validateHolding(instrument, record)
       await updateInstrument(client, userId, instrument)
@@ -611,7 +636,7 @@ app.patch('/api/positions/:id', async (request, response) => {
       } satisfies Position
     })
     response.json((await valuedPositions(userId, [updated]))[0])
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid position' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
 })
 app.delete('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -795,7 +820,7 @@ app.post('/api/imports/statement/preview', async (request, response) => {
   try {
     const result = await statementInputs(db, userId, request.body)
     response.json({ ...result, counts: importCounts(result.rows) })
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось прочитать выписку' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось прочитать выписку') }) }
 })
 app.post('/api/imports/statement', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -829,7 +854,7 @@ app.post('/api/imports/statement', async (request, response) => {
       return { ...importCounts(rows), batch }
     })
     response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors, skipped: counts.skipped, batch: counts.batch })
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Не удалось загрузить выписку' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось загрузить выписку') }) }
 })
 
 // Отмена загрузки целиком: удаляются операции этой загрузки и их выплаты.
@@ -872,7 +897,7 @@ app.get('/api/tax/estimate', async (request, response) => {
   try {
     const { year, transactions, toRub, redemptionCost } = await taxInputs(request, userId)
     response.json(estimateTax(transactions, year, toRub, redemptionCost, localDate()))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Некорректный запрос' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Некорректный запрос') }) }
 })
 app.get('/api/tax/export', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -881,7 +906,7 @@ app.get('/api/tax/export', async (request, response) => {
     response.setHeader('Content-Type', 'text/csv; charset=utf-8')
     response.setHeader('Content-Disposition', `attachment; filename="dohody-${year}.csv"`)
     response.send(taxRowsToCsv(taxIncomeRows(transactions, year, toRub, nameOf)))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Некорректный запрос' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Некорректный запрос') }) }
 })
 
 // §23: доходность за день, месяц, год и всё время — по тем же снимкам, что и график.
@@ -1084,7 +1109,7 @@ app.post('/api/payouts', async (request, response) => {
     const body = (request.body ?? {}) as PositionBody
     const title = requiredText(body.title, 'title')
     const amount = positiveNumber(body.amount, 'amount')
-    const date = requiredText(body.date, 'date')
+    const date = requiredDate(body.date, 'date')
     const type = payoutType(body.type, 'OTHER')
     const status = payoutStatus(body.status, 'expected')
     const payout = await withTransaction(db, async (client) => {
@@ -1109,7 +1134,7 @@ app.post('/api/payouts', async (request, response) => {
       return record
     })
     response.status(201).json(payoutToWire(payout, await engineContext(await resolveBaseCurrency(db, userId))))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить выплату') }) }
 })
 // Отметка «уже реинвестировано» (снимает напоминание в «Требует внимания»). Сохраняется
 // время первой отметки; повторная отметка его не сдвигает.
@@ -1133,7 +1158,7 @@ app.patch('/api/payouts/:id', async (request, response) => {
       ...link,
       description: body.title !== undefined ? requiredText(body.title, 'title') : existing.description,
       amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
-      date: body.date !== undefined ? requiredText(body.date, 'date') : existing.date,
+      date: body.date !== undefined ? requiredDate(body.date, 'date') : existing.date,
       type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,
       status: body.status !== undefined ? payoutStatus(body.status, existing.status) : existing.status,
       reinvestedAt: reinvestedAt((request.body as { reinvested?: unknown }).reinvested, existing.reinvestedAt),
@@ -1147,7 +1172,7 @@ app.patch('/api/payouts/:id', async (request, response) => {
       await updatePayout(client, userId, updated)
     })
     response.json(payoutToWire(updated, await engineContext(await resolveBaseCurrency(db, userId))))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid payout' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить выплату') }) }
 })
 // Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
 // связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
@@ -1326,7 +1351,12 @@ function transactionQuantity(body: PositionBody, amount: number, position: Posit
 async function buildTransaction(client: Db, userId: string, id: string, body: PositionBody, existing?: Transaction): Promise<Transaction> {
   const type = body.type !== undefined || !existing ? transactionType(body.type) : existing.type
   const amount = body.amount !== undefined || !existing ? positiveNumber(body.amount, 'amount') : existing.amount
-  const date = body.date !== undefined || !existing ? requiredText(body.date, 'date') : existing.date
+  const date = body.date !== undefined || !existing ? requiredDate(body.date, 'date') : existing.date
+  if (body.date !== undefined) notInFuture(date, 'date')
+  const commission = optionalNumber(body.commission)
+  const tax = optionalNumber(body.tax)
+  checkNonNegative(commission, 'commission')
+  checkNonNegative(tax, 'tax')
   const description = body.title !== undefined ? optionalText(body.title) : existing?.description
   // Операции с деньгами не привязаны к инструменту: они меняют денежную позицию (§12).
   const positionId = POSITION_TYPES.includes(type) || INCOME_TYPES.includes(type)
@@ -1351,8 +1381,8 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
     currency: position?.instrument.currency ?? existing?.currency ?? 'RUB',
     quantity,
     price,
-    commission: optionalNumber(body.commission) ?? existing?.commission ?? 0,
-    tax: optionalNumber(body.tax) ?? existing?.tax ?? 0,
+    commission: commission ?? existing?.commission ?? 0,
+    tax: tax ?? existing?.tax ?? 0,
     description: description ?? type,
     source: existing?.source ?? 'manual',
   }
@@ -1380,7 +1410,7 @@ app.post('/api/transactions', async (request, response) => {
       return created
     })
     response.status(201).json(transactionToWire(transaction))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить операцию') }) }
 })
 app.patch('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -1404,7 +1434,7 @@ app.patch('/api/transactions/:id', async (request, response) => {
       return next
     })
     response.json(transactionToWire(updated))
-  } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid transaction' }) }
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить операцию') }) }
 })
 app.delete('/api/transactions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -1422,6 +1452,9 @@ app.delete('/api/transactions/:id', async (request, response) => {
   response.status(204).send()
 })
 
+// Неизвестный адрес API — JSON, как и остальные ответы, а не HTML-страница Express (П17).
+app.use('/api', (_request, response) => { response.status(404).json({ error: 'Нет такого метода API' }) })
+
 app.use((error: Error, request: Request, response: Response, _next: express.NextFunction) => {
   // Слишком большое тело — не «внутренняя ошибка», а понятная просьба (тестировщик Т16).
   if ((error as { type?: string }).type === 'entity.too.large') {
@@ -1430,6 +1463,10 @@ app.use((error: Error, request: Request, response: Response, _next: express.Next
         ? `Файл выписки слишком большой (больше ${STATEMENT_LIMIT_MB} МБ). Выгрузите выписку за более короткий период.`
         : 'Запрос слишком большой',
     })
+  }
+  // Битый JSON в теле — ошибка запроса, а не сервера (П16).
+  if ((error as { type?: string }).type === 'entity.parse.failed') {
+    return response.status(400).json({ error: 'Некорректный JSON в теле запроса' })
   }
   logError(`${request.method} ${request.path}`, error)
   response.status(500).json({ error: 'Внутренняя ошибка сервера' })

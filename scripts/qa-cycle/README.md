@@ -18,6 +18,10 @@
 `node scripts/qa-cycle/seed.mjs qa@example.com`, `node scripts/qa-cycle/seed.mjs empty@example.com empty`,
 `cd scripts/qa-cycle && mkdir -p shots && node walk.mjs x full && node walk.mjs x empty`.
 
+Другой стенд — через переменные окружения: `QA_API` (адрес API для `seed.mjs`), `QA_WEB`
+(адрес фронта для `walk.mjs`), `QA_PASSWORD`, `QA_EMAIL` и `QA_EMPTY_EMAIL` (пользователи
+обхода). На проде заводить тестовых пользователей — только с согласия владельца.
+
 `walk.mjs` импортирует Playwright по пути `/opt/node22/lib/node_modules/playwright/index.mjs`
 (так он установлен в облачной среде); локально замените на `playwright`.
 Ошибки `ERR_CERT_AUTHORITY_INVALID` (шрифты) и 403 от cbr.ru — особенности облачной среды.
