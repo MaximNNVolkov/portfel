@@ -124,6 +124,8 @@ export type Payout = {
   description?: string
   /** Банк или брокер счёта (accounts.provider). Только для чтения — выводится джойном. */
   institution?: string
+  /** Когда клиент отметил пришедшие деньги вложенными — напоминание «реинвестировать» снято. */
+  reinvestedAt?: string
 }
 
 export type BrokerConnection = {
@@ -864,7 +866,7 @@ export async function sumCashBalances(db: Db, userId: string): Promise<{ currenc
 
 const PAYOUT_FIELDS = `
   o.id, o.account_id, o.instrument_id, o.transaction_id, o.payout_date, o.type,
-  o.amount, o.currency, o.status, o.source, o.description, a.provider AS account_provider`
+  o.amount, o.currency, o.status, o.source, o.description, o.reinvested_at, a.provider AS account_provider`
 
 const PAYOUT_FROM = `
   FROM portfolio.payouts o
@@ -885,6 +887,7 @@ function mapPayout(row: any): Payout {
     transactionId: text(row.transaction_id),
     description: text(row.description),
     institution: text(row.account_provider),
+    reinvestedAt: row.reinvested_at ? new Date(row.reinvested_at).toISOString() : undefined,
   }
 }
 
@@ -910,14 +913,16 @@ function payoutValues(payout: Payout): unknown[] {
   return [
     payout.accountId, payout.instrumentId ?? null, payout.transactionId ?? null, payout.date,
     payout.type, payout.amount, payout.currency, payout.status, payout.source, payout.description ?? null,
+    payout.reinvestedAt ?? null,
   ]
 }
 
 export async function insertPayout(db: Db, payout: Payout): Promise<void> {
   await db.query(
     `INSERT INTO portfolio.payouts (
-       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, source, description
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, source, description,
+       reinvested_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [payout.id, ...payoutValues(payout)],
   )
 }
@@ -930,7 +935,7 @@ export async function updatePayout(db: Db, userId: string, payout: Payout): Prom
   const result = await db.query(
     `UPDATE portfolio.payouts o SET
        account_id = $3, instrument_id = $4, transaction_id = $5, payout_date = $6, type = $7,
-       amount = $8, currency = $9, status = $10, source = $11, description = $12
+       amount = $8, currency = $9, status = $10, source = $11, description = $12, reinvested_at = $13
      WHERE o.id = $1 AND ${OWNED_PAYOUT}`,
     [payout.id, userId, ...payoutValues(payout)],
   )

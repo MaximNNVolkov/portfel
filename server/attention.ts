@@ -72,6 +72,8 @@ export type AttentionPayout = {
   currency: string
   status: 'expected' | 'received'
   institution?: string
+  /** Клиент отметил пришедшие деньги вложенными — напоминать о них больше не нужно. */
+  reinvested?: boolean
 }
 
 export type AttentionBroker = { name: string; status: string; lastSyncAt?: string }
@@ -218,7 +220,7 @@ export function buildAttention(
   }
 
   // Пришедшие недавно: деньги лежат свободными — пора решить, куда их вложить.
-  for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'received' && payout.date >= reinvestStart && payout.date <= today))) {
+  for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'received' && !payout.reinvested && payout.date >= reinvestStart && payout.date <= today))) {
     const { name, position } = payoutSubject(group, positionOf)
     items.push({
       id: `received:${group.key}`,

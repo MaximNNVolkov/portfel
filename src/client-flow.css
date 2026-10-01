@@ -20,9 +20,9 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .attention-row .product-row-summary { flex: 1; min-width: 0; }
 .attention-meta { flex: 0 0 auto; font-size: 11px; white-space: nowrap; }
 .attention-text { display: block; margin-top: 4px; padding-left: 15px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
-.attention-actions { flex: 0 0 190px; padding: 0 16px 0 0; text-align: right; }
+.attention-actions { flex: 0 0 190px; padding: 10px 16px 10px 0; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .attention-actions .outline-button { display: inline-block; white-space: nowrap; }
-.list-row:not(.attention-row) > .attention-actions { text-align: left;  padding: 0 16px 12px 31px; }
+.list-row:not(.attention-row) > .attention-actions { align-items: flex-start; padding: 0 16px 12px 31px; }
 .attention-section + .attention-section { margin-top: 26px; }
 .attention-badge { position: absolute; top: -6px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; color: #17423e; background: #e6b961; font: 700 10px/16px 'DM Sans', sans-serif; text-align: center; }
 
@@ -62,7 +62,7 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .category-block .donut-wrap { display: none; }
   .slice-totals { grid-template-columns: 1fr 1fr; padding: 14px; }
   .attention-row { flex-direction: column; align-items: stretch; gap: 0; }
-  .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; text-align: left; }
+  .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
   .page-heading .primary-button .label-short { display: inline; }
   .page-heading .primary-button .label-full { display: none; }
 }
