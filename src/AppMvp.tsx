@@ -1218,8 +1218,12 @@ function AppMvp() {
         const result = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(result.error || "Не удалось сохранить продукт");
       }
+      const paidFromCash = Boolean((product as { fromCash?: boolean }).fromCash);
       product = (await response.json()) as Product;
-      await refreshSummary();
+      // Сервер при сохранении строит прогноз выплат (проценты и возврат вклада, купоны) —
+      // без перечитывания «Выплаты» показывали старый список до перезагрузки страницы.
+      // Оплата из свободных денег заводит покупку — её видно в «Операциях».
+      await Promise.all([refreshSummary(), refreshPayments(), paidFromCash ? refreshTransactions() : undefined]);
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
@@ -1316,6 +1320,10 @@ function AppMvp() {
   }
   // Прогнозные выплаты пересчитываются на бэкенде при любом изменении состава портфеля —
   // после удаления позиции календарь нужно забрать заново.
+  async function refreshTransactions() {
+    const response = await apiFetch(`${apiUrl}/transactions`, { headers: authHeaders });
+    if (response.ok) setTransactions((await response.json()) as Transaction[]);
+  }
   async function refreshPayments() {
     const response = await apiFetch(`${apiUrl}/payouts`, { headers: authHeaders });
     if (response.ok) setPayments((await response.json()) as Payment[]);
@@ -1400,7 +1408,8 @@ function AppMvp() {
         return;
       }
       product = (await response.json()) as Product;
-      await refreshSummary();
+      // Новые ставка, срок, купон или количество — прогноз выплат пересчитан на сервере.
+      await Promise.all([refreshSummary(), refreshPayments()]);
     }
     setProducts((current) =>
       current.map((item) => (item.id === product.id ? product : item)),
@@ -1418,6 +1427,7 @@ function AppMvp() {
     } else if (apiOnline && result.items.length > 0) {
       void refreshProducts();
       void refreshSummary();
+      void refreshPayments();
     } else {
       setProducts((current) => [...current, ...result.items]);
     }
