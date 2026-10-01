@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # Ручной запуск: если GitHub не создал прогон на push в main (так было 01.10 с #36),
+  # автодеплой стенда ждёт зелёный CI и без этого не выложит коммит.
+  workflow_dispatch:
 
 jobs:
   checks:
