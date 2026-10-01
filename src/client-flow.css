@@ -86,41 +86,55 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .stat-strip .stat-card + .stat-card { border-left: 0; border-top: 1px solid var(--line); }
 }
 
-/* «Выплаты»: свод → период → уровень → календарь (docs/IMPROVEMENT_PLAN.md, П23). */
+/* «Выплаты»: свод → сетка из 12 периодов → выплаты выбранного (docs/IMPROVEMENT_PLAN.md, П23, П26). */
 .payout-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
 .payout-summary-card { display: grid; gap: 4px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--paper); font: inherit; text-align: left; cursor: pointer; }
-.payout-summary-card:hover, .payout-summary-card.selected { border-color: var(--mint); }
-.payout-summary-card.selected { background: var(--mint-soft); }
+.payout-summary-card:hover { border-color: var(--mint); }
 .payout-summary-card span { color: var(--muted); font-size: 11px; }
 .payout-summary-card strong { overflow: hidden; color: var(--mint); font: 700 17px 'Manrope', sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .payout-summary-card small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.payout-period { margin-bottom: 14px; }
-.payout-presets { display: flex; flex-wrap: wrap; gap: 6px; }
-.payout-presets button { border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; color: var(--text-secondary); background: var(--paper); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
-.payout-presets button.selected { color: var(--mint); border-color: var(--mint); background: var(--mint-soft); }
-.payout-custom { margin: 12px 0 0; }
-.payout-period-total { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 18px; margin: 18px 0 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-subtle); }
-.payout-period-total > div:first-child { display: grid; gap: 4px; min-width: 0; }
-.payout-period-total span { font-size: 12px; }
-.payout-period-total strong { color: var(--ink); font: 700 22px 'Manrope', sans-serif; }
-.payout-period-total small { font-size: 11px; }
-.payout-period-total .view-mode-switch { margin-left: 0; }
 .payout-toolbar { align-items: flex-start; justify-content: space-between; }
 .payout-toolbar .filters-disclosure { margin-bottom: 0; }
 .payout-bar { display: block; height: 4px; margin: 6px 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .payout-bar i { display: block; height: 100%; border-radius: 2px; background: var(--mint); }
-.payout-row-empty .product-row-summary { cursor: default; opacity: .6; }
-.payout-row-details { padding-top: 4px; }
-.payout-row-details .product-list { display: grid; gap: 8px; }
-.payout-drill { justify-content: flex-start; margin: 0 0 10px; }
 .payout-empty { display: grid; justify-items: start; gap: 10px; }
+.payout-grid-block { margin-top: 18px; }
+.payout-grid-block .payout-level { margin: 0 0 14px; }
+.payout-window { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-subtle); }
+.payout-window-title { display: grid; flex: 1; gap: 3px; min-width: 0; text-align: center; }
+.payout-window-title span, .payout-window-title small { font-size: 11px; }
+.payout-window-title strong { color: var(--ink); font: 700 22px 'Manrope', sans-serif; }
+.payout-window-arrow { flex: 0 0 auto; min-width: 42px; padding: 9px 0; color: var(--mint); font-size: 16px; line-height: 1; cursor: pointer; }
+.payout-window-reset { display: block; margin: -4px auto 12px; }
+.payout-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.payout-cell { display: grid; gap: 4px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--paper); font: inherit; text-align: left; cursor: pointer; }
+.payout-cell:hover { border-color: var(--mint); }
+.payout-cell.current { box-shadow: inset 0 0 0 1px var(--mint); }
+.payout-cell.selected { border-color: var(--mint); background: var(--mint-soft); }
+.payout-cell-label { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
+.payout-cell-label small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.payout-cell strong { overflow: hidden; color: var(--mint); font: 700 16px 'Manrope', sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.payout-cell.empty strong { color: var(--muted); }
+.payout-cell .payout-bar { margin: 2px 0; }
+.payout-cell-note { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.payout-selected { margin-top: 16px; }
+.payout-selected-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; margin-bottom: 12px; }
+.payout-selected-head > div { display: grid; gap: 3px; min-width: 0; }
+.payout-selected-head span, .payout-selected-head small { font-size: 11px; }
+.payout-selected-head strong { color: var(--ink); font: 700 20px 'Manrope', sans-serif; }
+.payout-selected .product-list { display: grid; gap: 8px; }
+.payout-hint { margin: 14px 0 0; font-size: 11px; text-align: center; }
 @media (max-width: 680px) {
   .payout-summary { grid-template-columns: 1fr 1fr; gap: 8px; }
   .payout-summary-card { padding: 12px; }
   .payout-summary-card strong { font-size: 15px; }
-  .payout-presets { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
-  .payout-period-total { padding: 14px; }
-  .payout-period-total .view-mode-switch { width: 100%; }
+  .payout-grid-block .payout-level { width: 100%; }
+  .payout-window { gap: 8px; padding: 12px 10px; }
+  .payout-window-title strong { font-size: 18px; }
+  .payout-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .payout-cell { gap: 3px; padding: 9px 8px; }
+  .payout-cell-label { font-size: 11px; }
+  .payout-cell strong { font-size: 13px; }
 }
 .payout-summary-card { align-content: start; }
 .payout-overdue { margin: 6px 0 18px; padding: 12px 14px; border: 1px solid var(--border-danger); border-radius: 9px; background: var(--danger-soft); }
