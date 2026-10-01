@@ -399,6 +399,40 @@ async function run() {
       assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Прогон 01.10 (П15–П21): ошибки ввода — по-русски и без текста Postgres.
+    await test('проверка ввода: даты, суммы, ставка, валюта, JSON и неизвестный адрес', async () => {
+      const position = (body: Record<string, unknown>) => api('/api/positions', {
+        method: 'POST', token: tokenA, body: { name: 'Смоук-проверка', type: 'Вклад', amount: 1000, date: '2026-01-10', ...body },
+      })
+      const rejected = async (body: Record<string, unknown>, message: RegExp) => {
+        const response = await position(body)
+        assert.equal(response.status, 400, JSON.stringify(body))
+        assert.match(response.json.error, message)
+      }
+      await rejected({ amount: 1e16 }, /слишком большое/)
+      await rejected({ date: '2026-02-30' }, /нет такой даты/)
+      await rejected({ date: '2999-01-01' }, /не может быть в будущем/)
+      await rejected({ name: 'а'.repeat(201) }, /длиннее 200/)
+      await rejected({ rate: 500, termEndDate: '2027-01-10' }, /больше 100%/)
+      await rejected({ type: 'Деньги', currency: 'EUR' }, /EUR пока не поддерживается/)
+
+      const future = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2999-01-01' } })
+      assert.equal(future.status, 400)
+      const negativeFee = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2026-01-10', commission: -1 } })
+      assert.equal(negativeFee.status, 400)
+      const untitled = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2026-01-10' } })
+      assert.equal(untitled.json.title, 'Пополнение', 'без описания — русское название типа, а не DEPOSIT')
+      assert.equal((await api(`/api/transactions/${untitled.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+
+      const broken = await fetch(`${BASE_URL}/api/positions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` }, body: '{bad',
+      })
+      assert.equal(broken.status, 400)
+      const unknown = await api('/api/no-such-route', { token: tokenA })
+      assert.equal(unknown.status, 404)
+      assert.equal(unknown.json.error, 'Нет такого метода API')
+    })
+
     // Целевая структура: сохраняется в настройках, сводка показывает сумму до цели.
     await test('целевая структура: проверка, сохранение, сумма до цели, снятие', async () => {
       const bad = await api('/api/settings', { method: 'PATCH', token: tokenA, body: { targetAllocation: { Акции: 50, Вклады: 30 } } })

@@ -12,6 +12,7 @@
 | `systemd/portfel-deploy-hook.service` | `/etc/systemd/system/portfel-deploy-hook.service` |
 | `portfel-autodeploy.logrotate` | `/etc/logrotate.d/portfel-autodeploy` |
 | `nginx-gh-deploy.conf` | блок внутри `/etc/nginx/sites-available/portfel` (443-server) |
+| `nginx-static.conf` | блок внутри `/etc/nginx/sites-available/portfel` (443-server): сжатие, кэш статики, MIME манифеста |
 
 ## Почему pull, а не GitHub Actions по SSH
 
@@ -70,7 +71,7 @@ chmod 600 /home/user1/.config/portfel-autodeploy/webhook_secret
 sudo systemctl enable --now portfel-autodeploy.timer portfel-deploy-hook.service
 ```
 
-Блок `nginx-gh-deploy.conf` вставить в 443-server `/etc/nginx/sites-available/portfel`
+Блоки `nginx-gh-deploy.conf` и `nginx-static.conf` вставить в 443-server `/etc/nginx/sites-available/portfel`
 перед `location /` (иначе SPA-фолбэк перехватит запрос), затем
 `sudo nginx -t && sudo systemctl reload nginx`.
 

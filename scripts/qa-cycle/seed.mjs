@@ -1,8 +1,9 @@
-const B='http://localhost:3001'
+const B=process.env.QA_API||'http://localhost:3001'
+const PASSWORD=process.env.QA_PASSWORD||'password123'
 async function api(p,{method='GET',token,body}={}){const r=await fetch(B+p,{method,headers:{'content-type':'application/json','x-requested-with':'portfel',...(token?{authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});let j=null;try{j=await r.json()}catch{};if(r.status>=400)console.log('ERR',method,p,r.status,JSON.stringify(j));return j}
 const email=process.argv[2]||'qa@example.com'
-let reg=await api('/api/auth/register',{method:'POST',body:{email,password:'password123'}})
-if(!reg?.token) reg=await api('/api/auth/login',{method:'POST',body:{email,password:'password123'}})
+let reg=await api('/api/auth/register',{method:'POST',body:{email,password:PASSWORD}})
+if(!reg?.token) reg=await api('/api/auth/login',{method:'POST',body:{email,password:PASSWORD}})
 const t=reg.token
 if(process.argv[3]!=='empty'){
 const P=[
