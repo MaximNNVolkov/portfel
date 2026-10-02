@@ -3069,16 +3069,23 @@ function PaymentsPage({
     }
   }
 
-  // Свод: четыре горизонта, каждый открывает свой вид сетки.
-  const nextMonth = shiftCell(cellKeyOf(today, "month"), "month", 1);
+  // Свод: текущий и два следующих месяца плюс 12 полных месяцев (П28). Подписи — сами
+  // месяцы, а не «этот / следующий»: так не нужно соображать, о каком месяце речь.
+  // Прошедшие дни текущего месяца не входят — как и во всём экране (П27).
+  const thisMonth = cellKeyOf(today, "month");
+  const monthCards = [0, 1, 2].map((offset) => {
+    const key = shiftCell(thisMonth, "month", offset);
+    return { id: key, label: periodLabel(key, "month").replace(/ г\.$/, ""), from: `${key}-01`, to: monthEnd(`${key}-01`), sel: key };
+  });
+  const lastMonth = shiftCell(thisMonth, "month", 11);
+  const shortMonth = (key: string) => `${periodLabel(key, "month").split(" ")[0]} ${key.slice(2, 4)}`;
   const summaryCards = [
-    { id: "month", label: "Этот месяц", from: today, to: monthEnd(today), target: { by: "month" as const, start: cellKeyOf(today, "month"), sel: cellKeyOf(today, "month") } },
-    { id: "next", label: "Следующий месяц", from: `${nextMonth}-01`, to: monthEnd(`${nextMonth}-01`), target: { by: "month" as const, start: cellKeyOf(today, "month"), sel: nextMonth } },
-    { id: "12m", label: "12 месяцев", from: today, to: shiftIso(today, 12, -1), target: { by: "month" as const, start: cellKeyOf(today, "month"), sel: null } },
-    { id: "ahead", label: "Всё впереди", from: today, to: "", target: { by: "year" as const, start: cellKeyOf(today, "year"), sel: null } },
+    ...monthCards,
+    { id: "12m", label: `${shortMonth(thisMonth)} — ${shortMonth(lastMonth)}`, from: `${thisMonth}-01`, to: monthEnd(`${lastMonth}-01`), sel: null },
   ].map((card) => ({
     ...card,
-    totals: payoutTotals(upcoming.filter((payment) => payment.date >= card.from && (!card.to || payment.date <= card.to))),
+    target: { by: "month" as const, start: thisMonth, sel: card.sel },
+    totals: payoutTotals(upcoming.filter((payment) => payment.date >= card.from && payment.date <= card.to)),
   }));
 
   // Ячейки сетки. Пустые тоже показываются: «в марте ничего не придёт» — такой же ответ
@@ -3169,15 +3176,6 @@ function PaymentsPage({
           <span className="label-short">＋ Выплата</span>
         </Link>
       </div>
-
-      {products
-        .filter((product) => product.forecastNote)
-        .map((product) => (
-          <div className="demo-note" key={product.id}>
-            ⚠ «{product.name}»: {product.forecastNote?.toLowerCase()}.{" "}
-            {product.source !== "broker" && <Link to={`/products/${product.id}/edit`}>Заполнить</Link>}
-          </div>
-        ))}
 
       {calendar.length === 0 && activeFilters === 0 ? (
         <div className="payout-empty">
