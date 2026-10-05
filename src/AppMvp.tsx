@@ -2184,31 +2184,6 @@ function Dashboard({
           </div>
         )}
       </article>
-      {attention && (
-        <>
-          <section className="section-heading">
-            <div>
-              {/* Число в заголовке — то же, что на колокольчике (критик К9): срочное и важное.
-                  «К сведению» считается отдельно, чтобы два счётчика не спорили. */}
-              {/* Срочного нет — заголовок «К сведению», а не повисшее «и N к сведению» (Т22). */}
-              <h2>{urgentAttention > 0 ? `Требует внимания · ${urgentAttention}` : attention.length > 0 ? `К сведению · ${attention.length}` : "Требует внимания"}</h2>
-              {urgentAttention > 0 && attention.length > urgentAttention && (
-                <p className="muted">и {attention.length - urgentAttention} к сведению</p>
-              )}
-            </div>
-            {attention.length > topAttention.length && (
-              <Link className="outline-button" to="/attention">
-                Все <span>→</span>
-              </Link>
-            )}
-          </section>
-          {topAttention.length === 0 ? (
-            <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
-          ) : (
-            <AttentionList items={topAttention} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
-          )}
-        </>
-      )}
       <section className="section-heading">
         <div>
           <h2>Категории</h2>
@@ -2342,6 +2317,32 @@ function Dashboard({
           </div>
         )}
       </article>
+      {/* Внимание — внизу экрана: список длинный и оттеснял структуру портфеля (П30). */}
+      {attention && (
+        <>
+          <section className="section-heading">
+            <div>
+              {/* Число в заголовке — то же, что на колокольчике (критик К9): срочное и важное.
+                  «К сведению» считается отдельно, чтобы два счётчика не спорили. */}
+              {/* Срочного нет — заголовок «К сведению», а не повисшее «и N к сведению» (Т22). */}
+              <h2>{urgentAttention > 0 ? `Требует внимания · ${urgentAttention}` : attention.length > 0 ? `К сведению · ${attention.length}` : "Требует внимания"}</h2>
+              {urgentAttention > 0 && attention.length > urgentAttention && (
+                <p className="muted">и {attention.length - urgentAttention} к сведению</p>
+              )}
+            </div>
+            {attention.length > topAttention.length && (
+              <Link className="outline-button" to="/attention">
+                Все <span>→</span>
+              </Link>
+            )}
+          </section>
+          {topAttention.length === 0 ? (
+            <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
+          ) : (
+            <AttentionList items={topAttention} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
+          )}
+        </>
+      )}
       {!apiOnline && (
         <div className="demo-note">
           <span>✦</span> Нет связи с сервером — данные сохраняются только
