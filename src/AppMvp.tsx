@@ -997,6 +997,47 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
     </div>
   );
 }
+const STRUCTURE_CUTS = { type: "По типам", bank: "По банкам", currency: "По валютам" } as const;
+type StructureCut = keyof typeof STRUCTURE_CUTS;
+const currencyNames: Record<string, string> = { RUB: "Рубли", USD: "Доллары", CNY: "Юани" };
+// Разрез по валютам — byCurrency из /api/portfolio/structure; суммы уже в базовой валюте.
+// Фильтра по валюте в списке инструментов нет, поэтому строки без перехода.
+function CurrencyList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
+  return (
+    <div className="product-list">
+      {items.map((item) => {
+        const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+        return (
+          <div className="list-row" key={item.key}>
+            <div className="product-row-summary product-row-static">
+              <span className="product-row-line1">
+                <span className="product-row-name">
+                  <strong>{currencyNames[item.key] ?? item.key}</strong>
+                </span>
+                <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : display(item.value)}</span>
+              </span>
+              <span className="product-row-line2 product-row-line2-flush">
+                <span className="muted product-row-meta">
+                  {item.key} · {item.positions} {pluralPositions(item.positions)}
+                  {!unvalued(item) && item.share !== null && ` · ${Math.round(item.share)}% портфеля`}
+                  {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
+                </span>
+                <span className={pnl.className}>{pnl.percentText}</span>
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function pluralPositions(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return "позиция";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "позиции";
+  return "позиций";
+}
 // «для 1 инструмента», «для 3 инструментов» — родительный падеж после предлога.
 function instrumentsGenitive(count: number) {
   return count % 10 === 1 && count % 100 !== 11 ? "инструмента" : "инструментов";
@@ -1069,9 +1110,10 @@ function AppMvp() {
   // Лента «Требует внимания» и разрез «Где хранится» считаются на бэкенде; null — ещё не
   // загружены или нет связи (тогда блоки на главной не показываются, а не врут пустотой).
   const [loadedAttention, setAttention] = useState<AttentionItem[] | null>(null);
-  const [loadedStorage, setStorage] = useState<StructureBreakdown[] | null>(null);
+  const [loadedStructure, setStructure] = useState<PortfolioStructure | null>(null);
   const attention = apiOnline ? loadedAttention : null;
-  const storage = apiOnline ? loadedStorage : null;
+  const structure = apiOnline ? loadedStructure : null;
+  const storage = structure?.byProvider ?? null;
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
@@ -1191,12 +1233,12 @@ function AppMvp() {
       .then(async ([attentionResponse, structureResponse]) => {
         if (cancelled) return;
         setAttention(attentionResponse.ok ? ((await attentionResponse.json()) as AttentionItem[]) : null);
-        setStorage(structureResponse.ok ? ((await structureResponse.json()) as PortfolioStructure).byProvider ?? null : null);
+        setStructure(structureResponse.ok ? ((await structureResponse.json()) as PortfolioStructure) : null);
       })
       .catch(() => {
         if (cancelled) return;
         setAttention(null);
-        setStorage(null);
+        setStructure(null);
       });
     return () => {
       cancelled = true;
@@ -1784,6 +1826,7 @@ function AppMvp() {
                 brokerStatus={brokerStatus}
                 attention={attention}
                 storage={storage}
+                currencies={structure?.byCurrency ?? null}
                 onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
                 onMarkReinvested={withErrorToast(markPaymentsReinvested, "Не удалось отметить выплату реинвестированной")}
               />
@@ -1989,6 +2032,7 @@ function Dashboard({
   brokerStatus,
   attention,
   storage,
+  currencies,
   onMarkReceived,
   onMarkReinvested,
 }: {
@@ -2002,10 +2046,26 @@ function Dashboard({
   brokerStatus: BrokerStatus | null;
   attention: AttentionItem[] | null;
   storage: StructureBreakdown[] | null;
+  currencies: StructureBreakdown[] | null;
   onMarkReceived: (payment: Payment) => Promise<void>;
   onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const dataLoaded = useContext(DataLoadedContext);
+  // Разрез структуры (П31): «Категории» и «Где хранится» — один блок с переключателем.
+  // Выбор в адресе (?cut=), чтобы «назад» из списка инструментов возвращал тот же разрез.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const cutParam = searchParams.get("cut");
+  const cut: StructureCut =
+    cutParam === "bank" && storage?.length ? "bank" : cutParam === "currency" && currencies?.length ? "currency" : "type";
+  const availableCuts = (Object.keys(STRUCTURE_CUTS) as StructureCut[]).filter(
+    (key) => key === "type" || (key === "bank" ? storage?.length : currencies?.length),
+  );
+  function selectCut(next: StructureCut) {
+    const params = new URLSearchParams(searchParams);
+    if (next === "type") params.delete("cut");
+    else params.set("cut", next);
+    setSearchParams(params, { replace: true });
+  }
   const display = (value: number) => (hideAmounts ? "••••••" : money(value));
   const linePath = chartPath(history);
   const areaPath = chartPath(history, true);
@@ -2186,88 +2246,101 @@ function Dashboard({
       </article>
       <section className="section-heading">
         <div>
-          <h2>Категории</h2>
+          <h2>Структура</h2>
         </div>
         <Link className="outline-button" to="/products">
           Все инструменты <span>→</span>
         </Link>
       </section>
-      <div className="category-block">
-        <div className="donut-wrap">
-          <div className="donut" style={{ background: donutGradient(groups) }}>
-            <div>
-              <strong>{groups.length}</strong>
-              <small>{groups.length === 1 ? "категория" : groups.length < 5 ? "категории" : "категорий"}</small>
-            </div>
-          </div>
-        </div>
-        <div className="product-list category-list">
-          {groups.map((groupSummary) => {
-            const pnl = pnlDisplay(groupSummary.pnl, groupSummary.pnlPercent);
-            const isCash = groupSummary.group === "Деньги";
-            return (
-              <div className="list-row" key={groupSummary.group}>
-                <Link
-                  className="product-row-summary"
-                  to={isCash ? "/transactions" : `/products?group=${encodeURIComponent(groupSummary.group)}`}
-                >
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <i className={`legend type-dot ${typeColors[groupSummary.group as AssetType] ?? "slate"}`} />
-                      <strong>{groupSummary.group}</strong>
-                    </span>
-                    <span className="product-row-sum">{display(groupSummary.value)}</span>
-                  </span>
-                  <span className="product-row-line2">
-                    <span className="muted product-row-meta">
-                      {isCash
-                        ? `${Math.round(groupSummary.share ?? 0)}% портфеля`
-                        : `${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
-                    </span>
-                    {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
-                  </span>
-                  {rebalanceByGroup.has(groupSummary.group) && (
-                    <span className="product-row-line2">
-                      <span className={`product-row-meta ${Math.abs(rebalanceByGroup.get(groupSummary.group)!.deviation) >= 5 ? "warning-text" : "muted"}`}>
-                        {rebalanceText(rebalanceByGroup.get(groupSummary.group)!, display)}
-                      </span>
-                    </span>
-                  )}
-                </Link>
-              </div>
-            );
-          })}
-          {missingTargets.map((row) => (
-            <div className="list-row" key={row.group}>
-              <Link className="product-row-summary" to="/products/new">
-                <span className="product-row-line1">
-                  <span className="product-row-name">
-                    <i className={`legend type-dot ${typeColors[row.group as AssetType] ?? "slate"}`} />
-                    <strong>{row.group}</strong>
-                  </span>
-                  <span className="product-row-sum muted">нет в портфеле</span>
-                </span>
-                <span className="product-row-line2">
-                  <span className="product-row-meta warning-text">{rebalanceText(row, display)}</span>
-                </span>
-              </Link>
-            </div>
+      {availableCuts.length > 1 && (
+        <div className="view-mode-switch structure-cut" role="group" aria-label="Разрез структуры">
+          {availableCuts.map((key) => (
+            <button
+              key={key}
+              type="button"
+              className={cut === key ? "selected" : ""}
+              aria-pressed={cut === key}
+              onClick={() => selectCut(key)}
+            >
+              {STRUCTURE_CUTS[key]}
+            </button>
           ))}
         </div>
-      </div>
-      {apiOnline && rebalance.length === 0 && groups.length > 1 && (
-        <p className="muted target-hint">
-          <Link to="/settings#target">Задать целевую структуру</Link> — и приложение подскажет, что докупить.
-        </p>
       )}
-      {storage && storage.length > 0 && (
+      {cut === "bank" && storage ? (
+        <StorageList items={storage} display={display} />
+      ) : cut === "currency" && currencies ? (
+        <CurrencyList items={currencies} display={display} />
+      ) : (
         <>
-          <section className="section-heading">
-            <div>
-              <h2>Где хранится</h2>
+          <div className="category-block">
+            <div className="donut-wrap">
+              <div className="donut" style={{ background: donutGradient(groups) }}>
+                <div>
+                  <strong>{groups.length}</strong>
+                  <small>{groups.length === 1 ? "категория" : groups.length < 5 ? "категории" : "категорий"}</small>
+                </div>
+              </div>
             </div>
-          </section>
-          <StorageList items={storage} display={display} />
+            <div className="product-list category-list">
+              {groups.map((groupSummary) => {
+                const pnl = pnlDisplay(groupSummary.pnl, groupSummary.pnlPercent);
+                const isCash = groupSummary.group === "Деньги";
+                return (
+                  <div className="list-row" key={groupSummary.group}>
+                    <Link
+                      className="product-row-summary"
+                      to={isCash ? "/transactions" : `/products?group=${encodeURIComponent(groupSummary.group)}`}
+                    >
+                      <span className="product-row-line1">
+                        <span className="product-row-name">
+                          <i className={`legend type-dot ${typeColors[groupSummary.group as AssetType] ?? "slate"}`} />
+                          <strong>{groupSummary.group}</strong>
+                        </span>
+                        <span className="product-row-sum">{display(groupSummary.value)}</span>
+                      </span>
+                      <span className="product-row-line2">
+                        <span className="muted product-row-meta">
+                          {isCash
+                            ? `${Math.round(groupSummary.share ?? 0)}% портфеля`
+                            : `${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
+                        </span>
+                        {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
+                      </span>
+                      {rebalanceByGroup.has(groupSummary.group) && (
+                        <span className="product-row-line2">
+                          <span className={`product-row-meta ${Math.abs(rebalanceByGroup.get(groupSummary.group)!.deviation) >= 5 ? "warning-text" : "muted"}`}>
+                            {rebalanceText(rebalanceByGroup.get(groupSummary.group)!, display)}
+                          </span>
+                        </span>
+                      )}
+                    </Link>
+                  </div>
+                );
+              })}
+              {missingTargets.map((row) => (
+                <div className="list-row" key={row.group}>
+                  <Link className="product-row-summary" to="/products/new">
+                    <span className="product-row-line1">
+                      <span className="product-row-name">
+                        <i className={`legend type-dot ${typeColors[row.group as AssetType] ?? "slate"}`} />
+                        <strong>{row.group}</strong>
+                      </span>
+                      <span className="product-row-sum muted">нет в портфеле</span>
+                    </span>
+                    <span className="product-row-line2">
+                      <span className="product-row-meta warning-text">{rebalanceText(row, display)}</span>
+                    </span>
+                  </Link>
+                </div>
+              ))}
+            </div>
+          </div>
+          {apiOnline && rebalance.length === 0 && groups.length > 1 && (
+            <p className="muted target-hint">
+              <Link to="/settings#target">Задать целевую структуру</Link> — и приложение подскажет, что докупить.
+            </p>
+          )}
         </>
       )}
       <section className="section-heading">
