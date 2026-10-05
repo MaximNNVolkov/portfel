@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import {
   Link,
   NavLink,
@@ -745,6 +745,68 @@ function ListPagination({
         </select>
       </label>
     </div>
+  );
+}
+// Строки блока со своей пагинацией (20 + «Загрузить ещё», §40.3): у каждого блока
+// свой счёт, свёрнутый сосед не съедает первые строки этого (П29).
+function PagedRows<T>({ items, render }: { items: T[]; render: (item: T) => ReactNode }) {
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
+  return (
+    <>
+      <div className="product-list">{visible.map(render)}</div>
+      <ListPagination hasMore={hasMore} onLoadMore={loadMore} pageSize={pageSize} onPageSizeChange={setPageSize} />
+    </>
+  );
+}
+// Сворачиваемые блоки списков (П29): длинную категорию можно убрать, чтобы не листать.
+// Свёрнутые блоки живут в адресе (?fold=…) — «назад» из карточки возвращает список
+// в том же виде (§40.7).
+function useFolded() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const folded = new Set((searchParams.get("fold") ?? "").split(",").filter(Boolean));
+  function toggle(key: string) {
+    const next = new Set(folded);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    const params = new URLSearchParams(searchParams);
+    if (next.size > 0) params.set("fold", [...next].join(","));
+    else params.delete("fold");
+    setSearchParams(params, { replace: true });
+  }
+  return { isFolded: (key: string) => folded.has(key), toggle };
+}
+function FoldSection({
+  title,
+  dot,
+  count,
+  total,
+  folded,
+  onToggle,
+  className,
+  children,
+}: {
+  title: string;
+  dot?: string;
+  count?: number;
+  total?: ReactNode;
+  folded: boolean;
+  onToggle: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`fold-section${className ? ` ${className}` : ""}${folded ? " folded" : ""}`}>
+      <button type="button" className="fold-header" aria-expanded={!folded} onClick={onToggle}>
+        <span className="fold-chevron" aria-hidden="true" />
+        {dot && <i className={`legend type-dot ${dot}`} />}
+        <span className="fold-title">
+          {title}
+          {count !== undefined && <span className="fold-count">{count}</span>}
+        </span>
+        {total !== undefined && <span className="fold-total">{total}</span>}
+      </button>
+      {!folded && <div className="fold-body">{children}</div>}
+    </section>
   );
 }
 // «Требует внимания» (CLIENT_FLOW_PLAN §4.4) — лента собирается на бэкенде
@@ -2450,6 +2512,37 @@ function FreeCashRow({ cash }: { cash: number | null }) {
   );
 }
 
+// Строки одного блока «Инструментов» со своей пагинацией: свёрнутый соседний блок
+// не должен съедать первые 20 строк этого (П29).
+function ProductSectionList({
+  items,
+  nearestPayoutByInstrument,
+  showInstitution,
+  cash,
+}: {
+  items: Product[];
+  nearestPayoutByInstrument: Map<string, NearestPayout>;
+  showInstitution: boolean;
+  cash?: number | null;
+}) {
+  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
+  return (
+    <>
+      <div className="product-list">
+        {visible.map((product) => (
+          <ProductRow
+            key={product.id}
+            product={product}
+            nextPayout={product.instrumentId ? nearestPayoutByInstrument.get(product.instrumentId) : undefined}
+            showInstitution={showInstitution}
+          />
+        ))}
+        {cash !== undefined && <FreeCashRow cash={cash} />}
+      </div>
+      <ListPagination hasMore={hasMore} onLoadMore={loadMore} pageSize={pageSize} onPageSizeChange={setPageSize} />
+    </>
+  );
+}
 function ProductsPage({
   products,
   payments,
@@ -2506,11 +2599,12 @@ function ProductsPage({
   };
   const sorted = sortProducts(filtered, sortBy, nearestPayoutByInstrument);
   const ordered = group ? sorted : [...sorted].sort((left, right) => rank(left.type) - rank(right.type));
-  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(ordered);
+  const { isFolded, toggle } = useFolded();
+  // Один блок на категорию, даже пока сводка с порядком категорий ещё не пришла.
   const sections: { type: AssetType; items: Product[] }[] = [];
-  for (const product of visible) {
-    const last = sections.at(-1);
-    if (last && last.type === product.type) last.items.push(product);
+  for (const product of ordered) {
+    const section = sections.find((item) => item.type === product.type);
+    if (section) section.items.push(product);
     else sections.push({ type: product.type, items: [product] });
   }
   if (showCash && !sections.some((section) => section.type === "Деньги")) {
@@ -2526,6 +2620,19 @@ function ProductsPage({
       ? { value: bankTotals.value, invested: bankTotals.invested, pnl: bankTotals.pnl, pnlPercent: bankTotals.pnlPercent, share: bankTotals.share }
       : undefined;
   const totalsPnl = totals ? pnlDisplay(totals.pnl, totals.pnlPercent) : null;
+  // Сумма в заголовке блока: без фильтра по банку — итог категории из сводки Portfolio
+  // Engine (в «Деньгах» он уже со свободными деньгами); со срезом по банку сводки по
+  // категории внутри банка нет — складываем оценки строк, а бумаги без оценки называем.
+  function sectionTotal(type: AssetType, items: Product[]) {
+    const fromSummary = !bank ? summary?.groups.find((item) => item.group === type) : undefined;
+    if (fromSummary) return money(fromSummary.value);
+    const values = items.map((product) => product.valuation?.value ?? null);
+    const known = values.filter((value): value is number => value !== null);
+    const missing = values.length - known.length;
+    if (known.length === 0) return missing > 0 ? "Оценка недоступна" : undefined;
+    const sum = money(known.reduce((acc, value) => acc + value, 0));
+    return missing > 0 ? `${sum} · без оценки: ${missing}` : sum;
+  }
   const title = group ?? bank ?? "Инструменты";
   const subtitle = group
     ? bank ? `Категория портфеля · ${bank}` : "Категория портфеля"
@@ -2631,35 +2738,33 @@ function ProductsPage({
             : "Нет инструментов, подходящих под выбранный фильтр."}
         </p>
       ) : (
-        <>
-          {sections.map((section, index) => (
-            <section className="product-section" key={`${section.type}-${index}`}>
-              {!group && (
-                <h2 className="product-section-title">
-                  <i className={`legend type-dot ${typeColors[section.type]}`} />
-                  {section.type}
-                </h2>
-              )}
-              <div className="product-list">
-                {section.items.map((product) => (
-                  <ProductRow
-                    key={product.id}
-                    product={product}
-                    nextPayout={product.instrumentId ? nearestPayoutByInstrument.get(product.instrumentId) : undefined}
-                    showInstitution={!bank}
-                  />
-                ))}
-                {section.type === "Деньги" && showCash && <FreeCashRow cash={cash} />}
-              </div>
-            </section>
-          ))}
-          <ListPagination
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            pageSize={pageSize}
-            onPageSizeChange={setPageSize}
-          />
-        </>
+        sections.map((section) => {
+          const list = (
+            <ProductSectionList
+              items={section.items}
+              nearestPayoutByInstrument={nearestPayoutByInstrument}
+              showInstitution={!bank}
+              cash={section.type === "Деньги" && showCash ? cash : undefined}
+            />
+          );
+          // На странице категории заголовок блока повторил бы заголовок страницы.
+          if (group) return <div key={section.type}>{list}</div>;
+          const count = section.items.length + (section.type === "Деньги" && showCash ? 1 : 0);
+          return (
+            <FoldSection
+              key={section.type}
+              className="product-section"
+              title={section.type}
+              dot={typeColors[section.type]}
+              count={count}
+              total={sectionTotal(section.type, section.items)}
+              folded={isFolded(section.type)}
+              onToggle={() => toggle(section.type)}
+            >
+              {list}
+            </FoldSection>
+          );
+        })
       )}
     </Page>
   );
@@ -2684,7 +2789,94 @@ function TransactionsPage({
     .filter((transaction) => typeFilter === "all" || transaction.type === typeFilter)
     .filter((transaction) => bankFilter === "all" || institutionOf(transaction) === bankFilter)
     .sort((a, b) => b.date.localeCompare(a.date));
-  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(filtered);
+  // Операции идут блоками по месяцам (П29): прошлые месяцы сворачиваются, чтобы не листать.
+  const { isFolded, toggle } = useFolded();
+  const months: { key: string; items: Transaction[] }[] = [];
+  for (const transaction of filtered) {
+    const key = transaction.date.slice(0, 7);
+    const last = months.at(-1);
+    if (last && last.key === key) last.items.push(transaction);
+    else months.push({ key, items: [transaction] });
+  }
+  function renderTransaction(transaction: Transaction) {
+    const expanded = expandedId === transaction.id;
+    const position = transaction.positionId ? positionById.get(transaction.positionId) : undefined;
+    const typeLabel = transactionTypeLabels[transaction.type];
+    // Название строки — инструмент; для денежной операции — её описание, если оно
+    // говорит больше, чем тип (иначе «Покупка» и ниже снова «Покупка»).
+    const name = position?.name || (transaction.title && transaction.title !== typeLabel ? transaction.title : typeLabel);
+    const institution = institutionOf(transaction);
+    const showTitle = transaction.title && transaction.title !== typeLabel && transaction.title !== name;
+    const extras: [string, string][] = [];
+    // Раскрытая покупка или продажа показывает «10 шт × 300 ₽» (критик К11).
+    if (transaction.quantity) {
+      const qty = transaction.quantity.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+      extras.push(["Количество", transaction.price ? `${qty} шт × ${preciseMoney(transaction.price)}` : `${qty} шт`]);
+    }
+    if (showTitle) extras.push(["Описание", transaction.title]);
+    if (transaction.commission) extras.push(["Комиссия", money(transaction.commission)]);
+    if (transaction.tax) extras.push(["Налог", money(transaction.tax)]);
+    if (transaction.currency && transaction.currency !== "RUB") extras.push(["Валюта", transaction.currency]);
+    if (transaction.source && transaction.source !== "manual") {
+      extras.push(["Источник", sourceLabels[transaction.source] || transaction.source]);
+    }
+    return (
+      <div className="list-row" key={transaction.id}>
+        <button
+          type="button"
+          className="product-row-summary"
+          aria-expanded={expanded}
+          onClick={() => setExpandedId(expanded ? null : transaction.id)}
+        >
+          <span className="product-row-line1">
+            <span className="product-row-name">
+              <i
+                className={`legend type-dot ${transactionTypeColors[transaction.type]}`}
+                title={typeLabel}
+              />
+              <strong>{name}</strong>
+            </span>
+            <span className="product-row-sum">{signedTransactionAmount(transaction)}</span>
+          </span>
+          <span className="product-row-line2">
+            <span className="muted product-row-meta">
+              {name === typeLabel ? institution || typeLabel : [typeLabel, institution].filter(Boolean).join(" · ")}
+            </span>
+            <span className="muted">{dateLabel(transaction.date)}</span>
+          </span>
+        </button>
+        {expanded && (
+          <div className="list-row-details">
+            {extras.map(([label, value]) => (
+              <div className="detail-line" key={label}>
+                <span>{label}</span>
+                <span>{value}</span>
+              </div>
+            ))}
+            <div className="list-row-actions">
+              {position && (
+                <Link className="outline-button" to={`/products/${position.id}`}>
+                  Инструмент →
+                </Link>
+              )}
+              <Link
+                className="outline-button"
+                to={`/transactions/${transaction.id}/edit`}
+              >
+                Редактировать
+              </Link>
+              <Link
+                className="delete-button"
+                to={`/transactions/${transaction.id}/delete`}
+              >
+                Удалить
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
   return (
     <Page title="Операции" subtitle="Покупки, продажи и движение денег">
       <div className="toolbar">
@@ -2722,95 +2914,18 @@ function TransactionsPage({
       ) : filtered.length === 0 ? (
         <p className="muted">Нет операций, подходящих под выбранный фильтр.</p>
       ) : (
-        <>
-        <div className="product-list">
-          {visible.map((transaction) => {
-            const expanded = expandedId === transaction.id;
-            const position = transaction.positionId ? positionById.get(transaction.positionId) : undefined;
-            const typeLabel = transactionTypeLabels[transaction.type];
-            // Название строки — инструмент; для денежной операции — её описание, если оно
-            // говорит больше, чем тип (иначе «Покупка» и ниже снова «Покупка»).
-            const name = position?.name || (transaction.title && transaction.title !== typeLabel ? transaction.title : typeLabel);
-            const institution = institutionOf(transaction);
-            const showTitle = transaction.title && transaction.title !== typeLabel && transaction.title !== name;
-            const extras: [string, string][] = [];
-            // Раскрытая покупка или продажа показывает «10 шт × 300 ₽» (критик К11).
-            if (transaction.quantity) {
-              const qty = transaction.quantity.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
-              extras.push(["Количество", transaction.price ? `${qty} шт × ${preciseMoney(transaction.price)}` : `${qty} шт`]);
-            }
-            if (showTitle) extras.push(["Описание", transaction.title]);
-            if (transaction.commission) extras.push(["Комиссия", money(transaction.commission)]);
-            if (transaction.tax) extras.push(["Налог", money(transaction.tax)]);
-            if (transaction.currency && transaction.currency !== "RUB") extras.push(["Валюта", transaction.currency]);
-            if (transaction.source && transaction.source !== "manual") {
-              extras.push(["Источник", sourceLabels[transaction.source] || transaction.source]);
-            }
-            return (
-              <div className="list-row" key={transaction.id}>
-                <button
-                  type="button"
-                  className="product-row-summary"
-                  aria-expanded={expanded}
-                  onClick={() => setExpandedId(expanded ? null : transaction.id)}
-                >
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <i
-                        className={`legend type-dot ${transactionTypeColors[transaction.type]}`}
-                        title={typeLabel}
-                      />
-                      <strong>{name}</strong>
-                    </span>
-                    <span className="product-row-sum">{signedTransactionAmount(transaction)}</span>
-                  </span>
-                  <span className="product-row-line2">
-                    <span className="muted product-row-meta">
-                      {name === typeLabel ? institution || typeLabel : [typeLabel, institution].filter(Boolean).join(" · ")}
-                    </span>
-                    <span className="muted">{dateLabel(transaction.date)}</span>
-                  </span>
-                </button>
-                {expanded && (
-                  <div className="list-row-details">
-                    {extras.map(([label, value]) => (
-                      <div className="detail-line" key={label}>
-                        <span>{label}</span>
-                        <span>{value}</span>
-                      </div>
-                    ))}
-                    <div className="list-row-actions">
-                      {position && (
-                        <Link className="outline-button" to={`/products/${position.id}`}>
-                          Инструмент →
-                        </Link>
-                      )}
-                      <Link
-                        className="outline-button"
-                        to={`/transactions/${transaction.id}/edit`}
-                      >
-                        Редактировать
-                      </Link>
-                      <Link
-                        className="delete-button"
-                        to={`/transactions/${transaction.id}/delete`}
-                      >
-                        Удалить
-                      </Link>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <ListPagination
-          hasMore={hasMore}
-          onLoadMore={loadMore}
-          pageSize={pageSize}
-          onPageSizeChange={setPageSize}
-        />
-        </>
+        months.map((month) => (
+          <FoldSection
+            key={month.key}
+            className="product-section"
+            title={periodLabel(month.key, "month").replace(/ г\.$/, "")}
+            count={month.items.length}
+            folded={isFolded(month.key)}
+            onToggle={() => toggle(month.key)}
+          >
+            <PagedRows items={month.items} render={renderTransaction} />
+          </FoldSection>
+        ))
       )}
     </Page>
   );
@@ -3688,71 +3803,74 @@ function BreakdownList({
   // Разрез, у которого есть свой список (категория, банк), — строка ведёт в него.
   linkOf?: (item: StructureBreakdown) => string;
 }) {
-  const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
+  const { isFolded, toggle } = useFolded();
+  if (items.length === 0) {
+    return (
+      <section className="breakdown-section">
+        <div className="breakdown-heading">
+          <h2>{title}</h2>
+          <span className="muted">{emptyHint}</span>
+        </div>
+      </section>
+    );
+  }
   return (
-    <section className="breakdown-section">
-      <div className="breakdown-heading">
-        <h2>{title}</h2>
-        {items.length === 0 && <span className="muted">{emptyHint}</span>}
-      </div>
-      {items.length > 0 && (
-        <>
-          <div className="product-list">
-            {visible.map((item) => {
-              const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-              const content = (
-                <>
-                      <span className="product-row-line1">
-                        <span className="product-row-name">
-                          <strong>{item.key}</strong>
-                        </span>
-                        <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : money(item.value)}</span>
-                      </span>
-                      <span className="product-row-line2 product-row-line2-flush">
-                        <span className="muted product-row-meta">
-                          {unvalued(item) ? (
-                            <span className="danger-text">цена недоступна</span>
-                          ) : (
-                            <>
-                              {Math.round(item.share ?? 0)}% портфеля
-                              {item.priceUnavailable > 0 && (
-                                <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
-                              )}
-                            </>
+    <FoldSection
+      className="breakdown-section"
+      title={title}
+      count={items.length}
+      folded={isFolded(title)}
+      onToggle={() => toggle(title)}
+    >
+      <PagedRows
+        items={items}
+        render={(item) => {
+          const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+          const content = (
+            <>
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <strong>{item.key}</strong>
+                    </span>
+                    <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : money(item.value)}</span>
+                  </span>
+                  <span className="product-row-line2 product-row-line2-flush">
+                    <span className="muted product-row-meta">
+                      {unvalued(item) ? (
+                        <span className="danger-text">цена недоступна</span>
+                      ) : (
+                        <>
+                          {Math.round(item.share ?? 0)}% портфеля
+                          {item.priceUnavailable > 0 && (
+                            <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
                           )}
-                        </span>
-                        <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
-                          {pnl.percentText}
-                        </span>
-                      </span>
-                      <span className="share-bar" aria-hidden="true">
-                        <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
-                      </span>
-                </>
-              );
-              const href = linkOf?.(item);
-              return (
-                <div className="list-row" key={item.key}>
-                  {href ? (
-                    <Link className="product-row-summary" to={href}>
-                      {content}
-                    </Link>
-                  ) : (
-                    <div className="product-row-summary product-row-static">{content}</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <ListPagination
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            pageSize={pageSize}
-            onPageSizeChange={setPageSize}
-          />
-        </>
-      )}
-    </section>
+                        </>
+                      )}
+                    </span>
+                    <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
+                      {pnl.percentText}
+                    </span>
+                  </span>
+                  <span className="share-bar" aria-hidden="true">
+                    <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
+                  </span>
+            </>
+          );
+          const href = linkOf?.(item);
+          return (
+            <div className="list-row" key={item.key}>
+              {href ? (
+                <Link className="product-row-summary" to={href}>
+                  {content}
+                </Link>
+              ) : (
+                <div className="product-row-summary product-row-static">{content}</div>
+              )}
+            </div>
+          );
+        }}
+      />
+    </FoldSection>
   );
 }
 
@@ -4912,6 +5030,7 @@ function AttentionPage({
   onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const loaded = useContext(DataLoadedContext);
+  const { isFolded, toggle } = useFolded();
   const sections = ([1, 2, 3] as const)
     .map((severity) => ({ severity, items: (attention ?? []).filter((item) => item.severity === severity) }))
     .filter((section) => section.items.length > 0);
@@ -4925,13 +5044,17 @@ function AttentionPage({
         <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
       ) : (
         sections.map((section) => (
-          <section key={section.severity} className="attention-section">
-            <h2 className="product-section-title">
-              <i className={`legend type-dot ${attentionSeverityColors[section.severity]}`} />
-              {attentionSeverityLabels[section.severity]} · {section.items.length}
-            </h2>
+          <FoldSection
+            key={section.severity}
+            className="attention-section"
+            title={attentionSeverityLabels[section.severity]}
+            dot={attentionSeverityColors[section.severity]}
+            count={section.items.length}
+            folded={isFolded(String(section.severity))}
+            onToggle={() => toggle(String(section.severity))}
+          >
             <AttentionList items={section.items} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
-          </section>
+          </FoldSection>
         ))
       )}
     </Page>
