@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Карточка инструмента — варианты</title>
+<style>
+:root{
+  --bg:#0b1211; --page:#0e1615; --paper:#16211f; --subtle:#1b2624; --line:#2a3d3a;
+  --ink:#e8eef0; --muted:#8a9a96; --text2:#a9b8b3;
+  --mint:#4fd3b8; --mint-soft:rgba(79,211,184,.14);
+  --danger:#ef7a68; --danger-soft:rgba(239,122,104,.14);
+  --amber:#e2b55a; --amber-soft:rgba(226,181,90,.14);
+  --indigo:#7787ba; --coral:#e7a05b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,"Segoe UI",Roboto,"DM Sans",sans-serif}
+.doc{max-width:1180px;margin:0 auto;padding:40px 16px 80px}
+h1{font-size:28px;margin:0 0 6px;letter-spacing:-.5px}
+h2{font-size:22px;margin:56px 0 6px;letter-spacing:-.3px}
+h3{font-size:15px;margin:22px 0 8px;color:var(--text2)}
+p,li{color:var(--text2)}
+.lead{color:var(--muted);margin:0 0 24px}
+.problems{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:16px}
+.problem{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.problem b{color:var(--ink);display:block;margin-bottom:4px}
+.problem span{color:var(--muted);font-size:13.5px}
+.tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--mint);background:var(--mint-soft);border-radius:5px;padding:3px 8px}
+.variant{border-top:1px solid var(--line);margin-top:56px;padding-top:8px}
+.row{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start;margin-top:20px}
+.phones{display:flex;flex-wrap:wrap;gap:24px}
+.notes{flex:1 1 280px;min-width:0}
+.notes ul{padding-left:18px;margin:6px 0}
+.pro b{color:var(--mint)} .con b{color:var(--danger)}
+
+/* ---------- телефон ---------- */
+.phone{width:340px;max-width:100%;background:var(--page);border:1px solid var(--line);border-radius:26px;overflow:hidden;box-shadow:0 20px 40px rgba(0,0,0,.45)}
+.ph-cap{font-size:12px;color:var(--muted);text-align:center;margin:0 0 8px}
+.ph-top{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);font-weight:700}
+.ph-top .brand{color:#dcebe5}.ph-top .brand i{color:var(--amber);font-style:normal;margin-right:6px}
+.ph-body{padding:14px 16px 20px;font-size:13px}
+.back{color:var(--muted);font-size:12px;margin-bottom:10px}
+.title{font-size:21px;font-weight:800;letter-spacing:-.4px;margin:0}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.big{font-size:30px;font-weight:800;letter-spacing:-1px;margin-top:14px;line-height:1.1}
+.pos{color:var(--mint)} .neg{color:var(--danger)} .mut{color:var(--muted)} .amb{color:var(--amber)}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:12px}
+.lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;font-weight:700}
+.line{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line)}
+.line:first-child{border-top:0;padding-top:0}.line:last-child{padding-bottom:0}
+.line span:first-child{color:var(--muted)}
+.line strong{font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip{background:var(--subtle);border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--text2)}
+.chip b{color:var(--ink);font-weight:600}
+.bar{position:relative;height:6px;border-radius:3px;background:var(--subtle);margin:10px 0 6px;overflow:hidden}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--mint)}
+.bar-legend{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+.next{display:flex;align-items:center;gap:10px}
+.next .dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
+.next .grow{flex:1;min-width:0}
+.next .amt{font-weight:700}
+.btn{display:inline-block;border:1px solid var(--line);border-radius:7px;padding:7px 11px;font-size:12px;color:var(--text2);background:transparent}
+.btn.primary{color:#0e1615;background:var(--mint);border-color:var(--mint);font-weight:700}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;align-items:center}
+.more{color:var(--mint);font-size:12px;font-weight:600;margin-top:14px}
+.h{font-size:14px;font-weight:700;margin:20px 0 0}
+.hist .line span:first-child{color:var(--ink)}
+.hist small{display:block;color:var(--muted);font-size:11px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.fact{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:9px 11px}
+.fact small{display:block;color:var(--muted);font-size:11px}
+.fact b{font-size:14px;font-weight:700}
+.fact em{display:block;font-style:normal;font-size:11px;color:var(--muted);margin-top:1px}
+.split{display:flex;height:8px;border-radius:4px;overflow:hidden;margin:10px 0 8px;gap:2px}
+.split i{display:block}
+.legend-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0}
+.legend-row span:first-child::before{content:"";display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:7px;background:var(--c)}
+/* таймлайн */
+.tl{position:relative;margin-top:14px;padding-left:20px}
+.tl::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:2px;background:var(--line)}
+.tl-item{position:relative;padding:6px 0 10px}
+.tl-item::before{content:"";position:absolute;left:-19px;top:11px;width:10px;height:10px;border-radius:50%;background:var(--page);border:2px solid var(--c,var(--muted))}
+.tl-item.done::before{background:var(--c,var(--muted))}
+.tl-item.now{padding:10px 12px;margin:4px 0 10px -6px;background:var(--paper);border:1px solid var(--line);border-radius:10px}
+.tl-item.now::before{left:-13px;top:16px;background:var(--mint);border-color:var(--mint);box-shadow:0 0 0 4px var(--mint-soft)}
+.tl-head{display:flex;justify-content:space-between;gap:8px}
+.tl-head b{font-weight:600}
+.tl-item small{color:var(--muted);font-size:11px}
+.tl-sep{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;font-weight:700;margin:6px 0 2px -20px}
+.warn{background:var(--amber-soft);border:1px solid rgba(226,181,90,.35);color:var(--amber);border-radius:10px;padding:9px 12px;font-size:12px;margin-top:12px}
+/* десктоп-эскиз */
+.desk{width:100%;max-width:820px;background:var(--page);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;grid-template-columns:1.4fr 1fr;gap:18px;font-size:13px}
+.desk .card{margin-top:0}
+@media (max-width:640px){.desk{grid-template-columns:1fr}}
+.cmp{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}
+.cmp th,.cmp td{border-bottom:1px solid var(--line);padding:9px 8px;text-align:left;vertical-align:top}
+.cmp th{color:var(--muted);font-weight:600}
+.cmp-wrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<div class="doc">
+<span class="tag">Предложение · не реализовано</span>
+<h1 style="margin-top:12px">Карточка инструмента: три варианта</h1>
+<p class="lead">Экран <code>/products/:id</code> (<code>ProductDetailPage</code>). Цифры в макетах условные: облигация ОФЗ 26241 в Т-Инвестициях и вклад в Сбере.</p>
+
+<h2>Что не так сейчас</h2>
+<div class="problems">
+  <div class="problem"><b>Не отвечает на главный вопрос</b><span>Клиенту важно, сколько он ещё заработает и когда вернутся деньги. Карточка показывает только «стоимость сейчас», а про будущее у облигации нет ничего.</span></div>
+  <div class="problem"><b>Пустой блок «Параметры»</b><span>У облигации из брокера в нём одна строка «Текущая цена: недоступна». Купон, погашение и количество не выводятся, если они не пришли.</span></div>
+  <div class="problem"><b>Нули выглядят как данные</b><span>«Получено выплат ₽ 0» занимает треть шапки и ничего не сообщает.</span></div>
+  <div class="problem"><b>Противоречие в цифрах</b><span>Рядом стоят «Актуальная цена недоступна» и точные ₽ 540 200 · +7,6% без оговорки.</span></div>
+  <div class="problem"><b>Шапка дублирует сама себя</b><span>Крупное название, подпись и отдельная большая плашка «СТОИМОСТЬ» вместе занимают полэкрана.</span></div>
+  <div class="problem"><b>Кнопки одного веса</b><span>«+ Выплата», «+ Операция», «Редактировать» и «Удалить» стоят одним рядом, причём «Удалить» выбивается из ряда. Служебные действия выглядят так же, как основные.</span></div>
+  <div class="problem"><b>Доход не разложен</b><span>Непонятно, откуда +38 200: рост цены, купоны или проценты. Для облигаций и вкладов это главное (§10.6).</span></div>
+  <div class="problem"><b>Десктоп растянут</b><span>На 1280 px всё вытянуто в одну колонку шириной 1400 px, а «Параметры» висят в половине ширины.</span></div>
+</div>
+
+<h3>Общие правила для любого варианта</h3>
+<ul>
+  <li>Нулевые и пустые значения не показываем. «Получено ₽ 0» превращается в «Выплат пока не было» внутри прогноза или исчезает.</li>
+  <li>Подпись «≈ по цене покупки» стоит прямо у стоимости, а не в отдельном блоке (§7.3).</li>
+  <li>Одно основное действие по ситуации: «Отметить полученной», «Реинвестировать» или «Заполнить купон». Остальные спрятаны в «Ещё действия» (раскрытие на месте, не модалка).</li>
+  <li>Состав фактов зависит от типа: вклад, облигация, акция или фонд. Расчёты (прогноз дохода, доходность к погашению) делает только бэкенд, Portfolio Engine.</li>
+</ul>
+
+<!-- ===================== ВАРИАНТ A ===================== -->
+<section class="variant">
+<h2>Вариант A. «Итог и прогноз»</h2>
+<p class="lead">Минимум экрана, акцент на будущем: сколько ещё заработаю и когда вернутся деньги. Подходит, если карточку открывают, чтобы быстро что-то проверить.</p>
+<div class="row">
+ <div class="phones">
+  <div>
+   <p class="ph-cap">Облигация</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">ОФЗ 26241</p>
+     <div class="sub">Облигация · Т-Инвестиции</div>
+     <div class="big">₽ 540 200</div>
+     <div style="margin-top:4px"><span class="pos">+₽ 38 200 · +7,6%</span> <span class="mut">за всё время</span></div>
+     <div class="chips">
+       <span class="chip">Купон <b>9,5%</b></span>
+       <span class="chip">Доходность к погаш. <b>14,2%</b></span>
+       <span class="chip"><b>600</b> шт.</span>
+     </div>
+     <div class="card">
+       <div class="lbl">До погашения · 6 лет 1 мес</div>
+       <div class="bar"><i style="width:9%"></i></div>
+       <div class="bar-legend"><span>куплена 12 фев 2026</span><span>17 ноя 2032</span></div>
+       <div class="line" style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px"><span>Ещё придёт купонами</span><strong class="pos">≈ +₽ 341 000</strong></div>
+       <div class="line"><span>Вернётся номинал</span><strong>₽ 600 000</strong></div>
+     </div>
+     <div class="card next">
+       <i class="dot" style="background:var(--mint)"></i>
+       <div class="grow"><b>Купон 25 ноя</b><div class="mut" style="font-size:11px">через 49 дней · первый по этой бумаге</div></div>
+       <span class="amt pos">+₽ 28 400</span>
+     </div>
+     <div class="h">История</div>
+     <div class="card hist"><div class="line"><span>Покупка 600 шт.<small>12 фев · ₽ 836,67 за шт.</small></span><strong>−₽ 502 000</strong></div></div>
+     <div class="more">▸ Ещё действия и детали</div>
+   </div></div>
+  </div>
+  <div>
+   <p class="ph-cap">Вклад</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">Вклад «Надёжный»</p>
+     <div class="sub">Вклад · Сбербанк</div>
+     <div class="big">₽ 1 000 000</div>
+     <div style="margin-top:4px"><span class="pos">+₽ 90 000</span> <span class="mut">процентами получено</span></div>
+     <div class="chips">
+       <span class="chip">Ставка <b>18%</b></span>
+       <span class="chip">Проценты <b>ежемесячно</b></span>
+       <span class="chip">без капитализации</span>
+     </div>
+     <div class="card">
+       <div class="lbl">До окончания · 159 дней</div>
+       <div class="bar"><i style="width:56%"></i></div>
+       <div class="bar-legend"><span>15 мар 2026</span><span>15 мар 2027</span></div>
+       <div class="line" style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px"><span>Ещё придёт процентами</span><strong class="pos">≈ +₽ 75 000</strong></div>
+       <div class="line"><span>Итого за весь срок</span><strong class="pos">₽ 165 000</strong></div>
+     </div>
+     <div class="card next">
+       <i class="dot" style="background:var(--danger)"></i>
+       <div class="grow"><b>Проценты 15 сен</b><div class="danger" style="font-size:11px;color:var(--danger)">не отмечены полученными</div></div>
+       <span class="btn primary">Получены</span>
+     </div>
+     <div class="h">История</div>
+     <div class="card hist">
+       <div class="line"><span>Проценты<small>15 авг</small></span><strong class="pos">+₽ 15 000</strong></div>
+       <div class="line"><span>Проценты<small>15 июл</small></span><strong class="pos">+₽ 15 000</strong></div>
+       <div class="line"><span class="mut">ещё 5 записей →</span><span></span></div>
+     </div>
+     <div class="more">▸ Ещё действия и детали</div>
+   </div></div>
+  </div>
+ </div>
+ <div class="notes">
+  <h3>Что меняется</h3>
+  <ul>
+   <li>Вместо большой плашки «СТОИМОСТЬ»: сумма и результат двумя строками под названием.</li>
+   <li>Главные 2–3 параметра даны одной строкой-чипами вместо отдельного блока «Параметры».</li>
+   <li>Новый блок «До погашения / окончания»: полоса срока плюс прогноз, сколько ещё придёт и сколько вернётся.</li>
+   <li>Ближайшее событие свёрнуто в одну строку с действием, если оно нужно.</li>
+   <li>История показывает 3 последние записи и ссылку «ещё N».</li>
+   <li>ISIN, тикер, источник, «+ Операция», «+ Выплата», «Редактировать» и «Удалить» спрятаны под «Ещё действия и детали».</li>
+  </ul>
+  <p class="pro"><b>Плюсы:</b> самый короткий экран, всё главное видно без прокрутки на 390 px. Отвечает на вопрос «что будет дальше».</p>
+  <p class="con"><b>Минусы:</b> нужен прогноз «ещё придёт» с бэкенда (для вкладов уже есть, для облигаций нужны купоны). Редактирование уходит на второй тап.</p>
+ </div>
+</div>
+</section>
+
+<!-- ===================== ВАРИАНТ B ===================== -->
+<section class="variant">
+<h2>Вариант B. «Паспорт инструмента»</h2>
+<p class="lead">Сетка ключевых фактов, своя для каждого типа, и прозрачный расклад дохода. Подходит, если пользователь сравнивает инструменты и хочет видеть, из чего сложился результат.</p>
+<div class="row">
+ <div class="phones">
+  <div>
+   <p class="ph-cap">Облигация · цена недоступна</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">ОФЗ 26241</p>
+     <div class="sub">Облигация · Т-Инвестиции · 23% портфеля</div>
+     <div class="big">≈ ₽ 502 000</div>
+     <div class="mut" style="font-size:12px;margin-top:2px">по цене покупки: биржа не дала котировку · <span style="color:var(--mint)">обновить</span></div>
+     <div class="grid2">
+       <div class="fact"><small>Купон</small><b>9,5%</b><em>₽ 47,37 раз в полгода</em></div>
+       <div class="fact"><small>Погашение</small><b>17 ноя 2032</b><em>через 6 лет</em></div>
+       <div class="fact"><small>Количество</small><b>600 шт.</b><em>по ₽ 836,67</em></div>
+       <div class="fact"><small>НКД</small><b>₽ 7 420</b><em>войдёт в купон 25 ноя</em></div>
+     </div>
+     <div class="card">
+       <div class="lbl">Из чего доход</div>
+       <div class="split"><i style="flex:1;background:var(--subtle)"></i></div>
+       <div class="legend-row" style="--c:var(--muted)"><span>Рост цены</span><span class="mut">нет котировки</span></div>
+       <div class="legend-row" style="--c:var(--mint)"><span>Купоны</span><span class="mut">ещё не было</span></div>
+       <div class="legend-row" style="--c:var(--danger)"><span>Комиссии</span><span>−₽ 150</span></div>
+     </div>
+     <div class="card next">
+       <i class="dot" style="background:var(--mint)"></i>
+       <div class="grow"><b>Купон 25 ноя</b><div class="mut" style="font-size:11px">прогноз</div></div>
+       <span class="amt pos">+₽ 28 400</span>
+     </div>
+     <div class="h">История</div>
+     <div class="card hist"><div class="line"><span>Покупка 600 шт.<small>12 фев</small></span><strong>−₽ 502 000</strong></div></div>
+     <div class="card" style="font-size:12px">
+       <div class="line"><span>ISIN</span><span>RU000A1069P3</span></div>
+       <div class="line"><span>Источник</span><span>Т-Инвестиции, синхр. 7 окт 09:42</span></div>
+     </div>
+     <div class="actions"><span class="btn">＋ Операция</span><span class="btn">＋ Выплата</span></div>
+   </div></div>
+  </div>
+  <div>
+   <p class="ph-cap">Вклад</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">Вклад «Надёжный»</p>
+     <div class="sub">Вклад · Сбербанк · 41% портфеля</div>
+     <div class="big">₽ 1 000 000</div>
+     <div style="margin-top:2px"><span class="pos">+₽ 90 000 · +9,0%</span> <span class="mut">за 7 мес</span></div>
+     <div class="grid2">
+       <div class="fact"><small>Ставка</small><b>18%</b><em>эфф. 19,6%</em></div>
+       <div class="fact"><small>Окончание</small><b>15 мар 2027</b><em>через 159 дней</em></div>
+       <div class="fact"><small>Проценты</small><b>ежемесячно</b><em>на карту, без капитализации</em></div>
+       <div class="fact"><small>Начислено</small><b>≈ ₽ 11 300</b><em>придёт 15 окт</em></div>
+     </div>
+     <div class="card">
+       <div class="lbl">Из чего доход</div>
+       <div class="split"><i style="flex:90;background:var(--mint)"></i><i style="flex:75;background:var(--mint-soft)"></i></div>
+       <div class="legend-row" style="--c:var(--mint)"><span>Получено процентами</span><span class="pos">+₽ 90 000</span></div>
+       <div class="legend-row" style="--c:var(--mint-soft)"><span>Ещё придёт до конца срока</span><span>≈ +₽ 75 000</span></div>
+     </div>
+     <div class="warn">Проценты 15 сен не отмечены полученными · <b>Отметить</b></div>
+     <div class="h">История</div>
+     <div class="card hist">
+       <div class="line"><span>Проценты<small>15 авг</small></span><strong class="pos">+₽ 15 000</strong></div>
+       <div class="line"><span>Открытие вклада<small>15 мар</small></span><strong>−₽ 1 000 000</strong></div>
+     </div>
+     <div class="actions"><span class="btn">Редактировать</span><span class="btn">＋ Выплата</span><span class="mut" style="margin-left:auto;font-size:12px">Удалить</span></div>
+   </div></div>
+  </div>
+ </div>
+ <div class="notes">
+  <h3>Что меняется</h3>
+  <ul>
+   <li>Сетка 2×2 фактов: у каждой цифры есть пояснение («через 159 дней», «₽ 47,37 раз в полгода»). Если факта нет, плитка не рисуется, а не показывается с «—».</li>
+   <li>Блок «Из чего доход»: рост цены, купоны или проценты, комиссии. Это видимая формула §10.6.</li>
+   <li>Доля в портфеле прямо в подзаголовке.</li>
+   <li>Цена недоступна: «≈» и пояснение стоят прямо у суммы, а доход в процентах не показывается вовсе (сейчас показывается +7,6%).</li>
+   <li>ISIN и источник с датой синхронизации видны сразу, мелко внизу: для бумаг от брокера это важно.</li>
+   <li>Действия разделены по весу: «Удалить» — текст-ссылка справа, а не кнопка в ряду.</li>
+  </ul>
+  <p class="pro"><b>Плюсы:</b> самый информативный. Хорошо ложится на десктоп в две колонки (эскиз ниже). Расклад дохода снимает вопрос «почему такая доходность».</p>
+  <p class="con"><b>Минусы:</b> экран длиннее, чем в A. Нужен расклад дохода по составляющим с бэкенда (частично уже есть в Portfolio Engine).</p>
+ </div>
+</div>
+<h3>Тот же вариант на десктопе (1280 px)</h3>
+<div class="desk">
+  <div>
+    <p class="title">Вклад «Надёжный»</p>
+    <div class="sub">Вклад · Сбербанк · 41% портфеля</div>
+    <div class="big">₽ 1 000 000 <span class="pos" style="font-size:15px;font-weight:600;letter-spacing:0">+₽ 90 000 · +9,0%</span></div>
+    <div class="grid2" style="grid-template-columns:repeat(4,1fr)">
+       <div class="fact"><small>Ставка</small><b>18%</b></div>
+       <div class="fact"><small>Окончание</small><b>15 мар 2027</b></div>
+       <div class="fact"><small>Проценты</small><b>ежемес.</b></div>
+       <div class="fact"><small>Начислено</small><b>≈ ₽ 11 300</b></div>
+    </div>
+    <div class="h">История</div>
+    <div class="card hist">
+       <div class="line"><span>Проценты<small>15 авг</small></span><strong class="pos">+₽ 15 000</strong></div>
+       <div class="line"><span>Проценты<small>15 июл</small></span><strong class="pos">+₽ 15 000</strong></div>
+       <div class="line"><span>Открытие вклада<small>15 мар</small></span><strong>−₽ 1 000 000</strong></div>
+    </div>
+  </div>
+  <div>
+    <div class="warn" style="margin-top:0">Проценты 15 сен не отмечены полученными · <b>Отметить</b></div>
+    <div class="card">
+       <div class="lbl">Из чего доход</div>
+       <div class="split"><i style="flex:90;background:var(--mint)"></i><i style="flex:75;background:var(--mint-soft)"></i></div>
+       <div class="legend-row" style="--c:var(--mint)"><span>Получено</span><span class="pos">+₽ 90 000</span></div>
+       <div class="legend-row" style="--c:var(--mint-soft)"><span>Ещё придёт</span><span>≈ +₽ 75 000</span></div>
+    </div>
+    <div class="card" style="font-size:12px">
+       <div class="line"><span>Открыт</span><span>15 мар 2026</span></div>
+       <div class="line"><span>Источник</span><span>Ручной ввод</span></div>
+    </div>
+    <div class="actions"><span class="btn">Редактировать</span><span class="btn">＋ Выплата</span><span class="btn">＋ Операция</span></div>
+  </div>
+</div>
+</section>
+
+<!-- ===================== ВАРИАНТ C ===================== -->
+<section class="variant">
+<h2>Вариант C. «Жизнь инструмента» (лента времени)</h2>
+<p class="lead">«Что дальше» и «История» сливаются в одну вертикальную ленту: прошлое, точка «сегодня» с текущей стоимостью и будущие выплаты до погашения. Подходит для вкладов и облигаций, где важен график денег.</p>
+<div class="row">
+ <div class="phones">
+  <div>
+   <p class="ph-cap">Облигация</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">ОФЗ 26241</p>
+     <div class="sub">Облигация · Т-Инвестиции · купон 9,5% · 600 шт.</div>
+     <div class="tl">
+       <div class="tl-sep">Было</div>
+       <div class="tl-item done" style="--c:var(--indigo)"><div class="tl-head"><b>Покупка 600 шт.</b><span>−₽ 502 000</span></div><small>12 фев 2026 · ₽ 836,67 за шт.</small></div>
+       <div class="tl-item now"><div class="tl-head"><b>Сегодня</b><b>₽ 540 200</b></div><small><span class="pos">+₽ 38 200 · +7,6%</span> · цена ₽ 900,33 на 7 окт</small></div>
+       <div class="tl-sep">Будет</div>
+       <div class="tl-item" style="--c:var(--mint)"><div class="tl-head"><b>Купон</b><span class="pos">+₽ 28 400</span></div><small>25 ноя · через 49 дней</small></div>
+       <div class="tl-item" style="--c:var(--mint)"><div class="tl-head"><b>Купон</b><span class="pos">+₽ 28 400</span></div><small>26 мая 2027</small></div>
+       <div class="tl-item" style="--c:var(--muted)"><div class="tl-head"><span class="mut">ещё 10 купонов</span><span class="mut">+₽ 284 000</span></div></div>
+       <div class="tl-item" style="--c:var(--coral)"><div class="tl-head"><b>Погашение</b><span>+₽ 600 000</span></div><small>17 ноя 2032</small></div>
+     </div>
+     <div class="card" style="margin-top:4px"><div class="line"><span>Итого получите до погашения</span><strong class="pos">₽ 941 000</strong></div><div class="line"><span>Это к вложенному</span><strong class="pos">+87%</strong></div></div>
+     <div class="more">▸ Параметры, ISIN, действия</div>
+   </div></div>
+  </div>
+  <div>
+   <p class="ph-cap">Вклад</p>
+   <div class="phone"><div class="ph-top"><span class="brand"><i>✳</i>Капитал</span><span class="mut">☰</span></div>
+   <div class="ph-body">
+     <div class="back">← Инструменты</div>
+     <p class="title">Вклад «Надёжный»</p>
+     <div class="sub">Вклад · Сбербанк · 18% · проценты ежемесячно</div>
+     <div class="tl">
+       <div class="tl-sep">Было</div>
+       <div class="tl-item done" style="--c:var(--indigo)"><div class="tl-head"><b>Открытие</b><span>−₽ 1 000 000</span></div><small>15 мар 2026</small></div>
+       <div class="tl-item done" style="--c:var(--mint)"><div class="tl-head"><b>Проценты × 5</b><span class="pos">+₽ 75 000</span></div><small>апр – авг · <span style="color:var(--mint)">показать</span></small></div>
+       <div class="tl-item" style="--c:var(--danger)"><div class="tl-head"><b>Проценты</b><span class="pos">+₽ 15 000</span></div><small class="danger" style="color:var(--danger)">15 сен · не отмечены</small><div class="actions" style="margin-top:6px"><span class="btn primary">Отметить полученными</span></div></div>
+       <div class="tl-item now"><div class="tl-head"><b>Сегодня</b><b>₽ 1 000 000</b></div><small>начислено ≈ ₽ 11 300 · <span class="pos">получено +₽ 90 000</span></small></div>
+       <div class="tl-sep">Будет</div>
+       <div class="tl-item" style="--c:var(--mint)"><div class="tl-head"><b>Проценты</b><span class="pos">+₽ 15 000</span></div><small>15 окт · через 8 дней</small></div>
+       <div class="tl-item" style="--c:var(--muted)"><div class="tl-head"><span class="mut">ещё 4 выплаты</span><span class="mut">+₽ 60 000</span></div></div>
+       <div class="tl-item" style="--c:var(--coral)"><div class="tl-head"><b>Возврат вклада</b><span>+₽ 1 000 000</span></div><small>15 мар 2027 · <span style="color:var(--mint)">напомнить реинвестировать</span></small></div>
+     </div>
+     <div class="more">▸ Параметры, источник, действия</div>
+   </div></div>
+  </div>
+ </div>
+ <div class="notes">
+  <h3>Что меняется</h3>
+  <ul>
+   <li>Один сквозной сценарий вместо четырёх блоков (шапка, «Что дальше», «Параметры», «История»).</li>
+   <li>Текущая стоимость — это точка «Сегодня» на ленте, а не отдельная плашка.</li>
+   <li>Повторяющиеся события сворачиваются («Проценты × 5», «ещё 10 купонов»), раскрываются по тапу.</li>
+   <li>Просроченная выплата стоит на своём месте в хронологии, с действием прямо в ленте.</li>
+   <li>Внизу итог: «получите до погашения» — понятная клиенту цифра.</li>
+  </ul>
+  <p class="pro"><b>Плюсы:</b> самый наглядный для вкладов и облигаций, сразу виден весь денежный поток. Хорошо продолжает раздел «Выплаты».</p>
+  <p class="con"><b>Минусы:</b> для акций и фондов будущих событий почти нет (только дивиденды), и лента вырождается в историю. Им понадобится упрощённая версия, ближе к A. Сложнее в вёрстке.</p>
+ </div>
+</div>
+</section>
+
+<h2>Сравнение</h2>
+<div class="cmp-wrap">
+<table class="cmp">
+<tr><th></th><th>A. Итог и прогноз</th><th>B. Паспорт</th><th>C. Лента времени</th></tr>
+<tr><td>Информативность</td><td>средняя</td><td>высокая</td><td>высокая для вкладов и облигаций</td></tr>
+<tr><td>Длина экрана (390 px)</td><td>1 экран</td><td>1,5–2 экрана</td><td>1,5 экрана</td></tr>
+<tr><td>Акции и фонды</td><td>хорошо</td><td>хорошо</td><td>слабо, нужен запасной вид</td></tr>
+<tr><td>Десктоп</td><td>узкая колонка</td><td>две колонки</td><td>лента и боковая панель</td></tr>
+<tr><td>Что нужно с бэкенда</td><td>прогноз «ещё придёт», доходность к погашению</td><td>расклад дохода, доля в портфеле</td><td>полный график будущих выплат (уже есть в прогнозе)</td></tr>
+<tr><td>Объём работ</td><td>небольшой</td><td>средний</td><td>средний+</td></tr>
+</table>
+</div>
+<p style="margin-top:18px"><b style="color:var(--ink)">Рекомендация:</b> взять за основу <b style="color:var(--ink)">B</b> (сетка фактов по типу и «Из чего доход»), а из A добавить полосу срока с прогнозом «ещё придёт». Ленту из C можно сделать позже как вид для раздела «История», когда прогноз купонов будет надёжным для всех облигаций.</p>
+</div>
+</body>
+</html>
