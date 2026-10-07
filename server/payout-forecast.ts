@@ -254,8 +254,12 @@ function forecastBond(position: PositionRecord, instrument: Instrument, today: s
     : null
   if (schedule) {
     const amount = round2((faceValue * (instrument.couponRate! / 100)) / COUPONS_PER_YEAR)
+    // Прошедшие купоны с даты покупки остаются в графике у ручных бумаг: купон с прошедшей
+    // датой считается полученным (settleDuePayouts) и заводит деньги. Брокерские купоны
+    // приносит синхронизация, у них в прогнозе только будущие.
+    const ownedSince = position.source !== 'broker' && position.openedOn ? position.openedOn : null
     for (const date of schedule.dates) {
-      if (daysBetween(today, date) > 0) {
+      if (daysBetween(today, date) > 0 || (ownedSince && daysBetween(ownedSince, date) > 0)) {
         payouts.push({
           date,
           type: 'COUPON',

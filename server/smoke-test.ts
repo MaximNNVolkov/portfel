@@ -62,6 +62,11 @@ function uniqueEmail(label: string): string {
   return `smoke-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.local`
 }
 
+// «Сегодня» по местным часам — как localToday() сервера: граница прошедших выплат.
+function localToday() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
 async function api(path: string, options: { method?: string; token?: string; body?: unknown } = {}) {
   // Без Bearer изменяющие запросы (регистрация, вход) проходят CSRF-проверку только с этим заголовком.
   const headers: Record<string, string> = { 'X-Requested-With': 'portfel' }
@@ -341,9 +346,12 @@ async function run() {
     await test('выплата «получена» зачисляет деньги, реинвестирование их списывает', async () => {
       const cashOf = async () => (await api('/api/portfolio/summary', { token: tokenA })).json
       const start = await cashOf()
+      // Дата — сегодня: прошедший купон считается полученным сразу (тест ниже), а сегодняшний
+      // ещё ждёт и позволяет проверить ручную отметку и её снятие.
+      const today = localToday()
       const payout = await api('/api/payouts', {
         method: 'POST', token: tokenA,
-        body: { title: 'Смоук-тест купон', amount: 5000, date: '2026-03-02', type: 'COUPON', positionId: sharePositionId },
+        body: { title: 'Смоук-тест купон', amount: 5000, date: today, type: 'COUPON', positionId: sharePositionId },
       })
       assert.equal((await cashOf()).cash, start.cash, 'ожидаемая выплата денег не приносит')
       await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })
@@ -355,13 +363,13 @@ async function run() {
 
       const tooMuch = await api('/api/positions', {
         method: 'POST', token: tokenA,
-        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: received.cash + 100000, date: '2026-03-03', fromCash: true },
+        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: received.cash + 100000, date: today, fromCash: true },
       })
       assert.equal(tooMuch.status, 400)
       assert.match(tooMuch.json.error, /не хватает/)
       const reinvested = await api('/api/positions', {
         method: 'POST', token: tokenA,
-        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: 6000, date: '2026-03-03', fromCash: true },
+        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: 6000, date: today, fromCash: true },
       })
       assert.equal(reinvested.status, 201)
       const after = await cashOf()
@@ -376,6 +384,18 @@ async function run() {
       await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
       assert.equal((await cashOf()).cash, start.cash, 'снятая отметка возвращает деньги назад')
       assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+
+      // Купон с прошедшей датой считается полученным сразу: отмечать его не нужно.
+      const past = await api('/api/payouts', {
+        method: 'POST', token: tokenA,
+        body: { title: 'Смоук-тест прошлый купон', amount: 5000, date: '2026-03-02', type: 'COUPON', positionId: sharePositionId },
+      })
+      assert.equal(past.json.status, 'received')
+      assert.equal((await cashOf()).cash, start.cash + 5000)
+      const unmarked = await api(`/api/payouts/${past.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      assert.equal(unmarked.json.status, 'received', 'прошедший доход не возвращается в «ожидается»')
+      assert.equal((await api(`/api/payouts/${past.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await cashOf()).cash, start.cash)
     })
 
     // Пришедшие деньги уже вложены — «Уже реинвестировано» снимает напоминание в ленте.
@@ -520,7 +540,7 @@ async function run() {
 
     // Замечание 20 (FIX_PLAN 2.8): вклад с истёкшим сроком даёт проценты и возврат тела,
     // и они приходят просроченными, а не пропадают.
-    await test('вклад с истёкшим сроком попадает в календарь просроченными выплатами', async () => {
+    await test('вклад с истёкшим сроком: проценты получены, возврат тела ждёт отметки', async () => {
       const deposit = await api('/api/positions', {
         method: 'POST', token: tokenA,
         body: { name: 'Смоук-тест старый вклад', type: 'Вклад', amount: 500000, date: '2020-01-01', rate: 16, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
@@ -529,7 +549,15 @@ async function run() {
       const payouts = await api('/api/payouts', { token: tokenA })
       const own = payouts.json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
       assert.deepEqual(own.map((payout: { type: string }) => payout.type).sort(), ['DEPOSIT_PRINCIPAL', 'INTEREST'])
-      assert.ok(own.every((payout: { overdue: boolean; status: string }) => payout.overdue && payout.status === 'expected'))
+      const byType = Object.fromEntries(own.map((payout: { type: string }) => [payout.type, payout]))
+      assert.equal(byType.INTEREST.status, 'received')
+      assert.equal(byType.INTEREST.overdue, false)
+      assert.equal(byType.DEPOSIT_PRINCIPAL.status, 'expected')
+      assert.equal(byType.DEPOSIT_PRINCIPAL.overdue, true)
+      const card = await api(`/api/positions/${deposit.json.id}`, { token: tokenA })
+      assert.equal(card.json.outlook.receivedIncome, byType.INTEREST.amount)
+      assert.equal(card.json.outlook.overduePrincipal, 500000)
+      assert.equal(card.json.outlook.expectedIncome, 0)
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
@@ -544,7 +572,10 @@ async function run() {
       assert.equal(deposit.status, 201)
       const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
       const open = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(open.json.total, before.json.total + 200000)
+      // Проценты за прошедший срок уже пришли деньгами (купоны и проценты с прошедшей датой
+      // считаются полученными), тело ждёт отметки.
+      const accrued = own.find((payout: { type: string }) => payout.type === 'INTEREST').amount
+      assert.equal(Math.round(open.json.total), Math.round(before.json.total + 200000 + accrued))
       for (const payout of own) {
         assert.equal((await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })).status, 200)
       }
@@ -658,7 +689,8 @@ async function run() {
     // в «Ожидается» не входит.
     await test('просроченная выплата отделена от ожидаемых', async () => {
       const before = await api('/api/portfolio/summary', { token: tokenA })
-      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест прошлый купон', amount: 1234, date: '2020-04-05', type: 'COUPON' } })
+      // Просроченным бывает только возврат вложенного: доход с прошедшей датой уже получен.
+      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест прошлое погашение', amount: 1234, date: '2020-04-05', type: 'REDEMPTION' } })
       assert.equal(past.status, 201)
       assert.equal(past.json.overdue, true)
       const future = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест будущий купон', amount: 777, date: '2099-01-01', type: 'COUPON' } })
@@ -675,7 +707,7 @@ async function run() {
 
     // CLIENT_FLOW_PLAN §4.4: лента «Требует внимания» и банк у выплат и в структуре.
     await test('просроченная выплата попадает в «Требует внимания», у выплаты есть банк', async () => {
-      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест внимание', amount: 4321, date: '2020-05-06', type: 'COUPON' } })
+      const past = await api('/api/payouts', { method: 'POST', token: tokenA, body: { title: 'Смоук-тест внимание', amount: 4321, date: '2020-05-06', type: 'REDEMPTION' } })
       assert.equal(past.status, 201)
       const attention = await api('/api/attention', { token: tokenA })
       assert.equal(attention.status, 200)

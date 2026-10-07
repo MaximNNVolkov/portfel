@@ -33,8 +33,10 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate, portfolioResult,
+  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, localDate, portfolioResult,
+  isAutoReceived, settleDuePayouts, syncTransactionForPayout,
 } from './daily-tasks.ts'
+import { outlookKey, payoutOutlook } from './payout-outlook.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
 import { parseCsv, parseMapping, statementRows, type StatementRow } from './statement-import.ts'
@@ -525,13 +527,17 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, service
 // evaluatePosition, по которому считаются сводка и структура. Иначе список и карточка
 // показывали бы сохранённое при вводе значение, а сводка — quantity × currentPrice (BUG-17).
 async function valuedPositions(userId: string, positions: Position[]) {
-  const context = await engineContext(await resolveBaseCurrency(db, userId))
+  const [context, payouts] = await Promise.all([engineContext(await resolveBaseCurrency(db, userId)), listPayouts(db, userId)])
+  // Прогноз поступлений по инструменту (payout-outlook.ts): что пришло, что ещё придёт,
+  // что вернётся телом — в базовой валюте, одним расчётом для карточки и списков.
+  const outlooks = payoutOutlook(payouts, localToday(), (amount, currency) => convertCurrency(amount, currency, context.baseCurrency, context.rates))
   return positions.map((position) => {
+    const outlook = outlooks.get(outlookKey(position.instrumentId, position.accountId)) ?? null
     const valuation = evaluatePosition(toEngineInput(position), context)
-    if (!position.closedOn) return positionToWire(position, valuation)
+    if (!position.closedOn) return { ...positionToWire(position, valuation), outlook }
     // Закрытая позиция стоит ноль — деньги уже вернулись; результат по ней реализованный.
     const result = closedPositionResult(position, context)
-    return positionToWire(position, {
+    return { outlook, ...positionToWire(position, {
       ...valuation,
       valueBase: 0,
       fullValue: 0,
@@ -542,12 +548,19 @@ async function valuedPositions(userId: string, positions: Position[]) {
       priceUnavailable: false,
       priceUnavailableReason: null,
       estimated: false,
-    })
+    }) }
   })
+}
+// Наступившие купоны, проценты и дивиденды переводятся в «получено» до любого чтения,
+// где они видны (выплаты, сводка, позиции, внимание): планировщик делает это раз в сутки,
+// а между его запусками дата успевает пройти.
+async function settlePayouts(userId: string) {
+  await withTransaction(db, (client) => settleDuePayouts(client, userId, localToday()))
 }
 
 app.get('/api/positions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
   const positions = await listPositions(db, userId, listOptions(request))
   response.json(await valuedPositions(userId, positions))
 })
@@ -744,6 +757,7 @@ app.get('/api/ocr/documents/:id', async (request, response) => {
 
 app.get('/api/portfolio/summary', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
   const positions = await listPositions(db, userId)
   const baseCurrency = await resolveBaseCurrency(db, userId)
   const context = await engineContext(baseCurrency)
@@ -1051,6 +1065,7 @@ app.get('/api/recommendations', async (request, response) => {
 // выплаты, деньги к реинвестированию, окончание вкладов, нет цены, ошибка брокера, правила §24.
 app.get('/api/attention', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
   const [positions, payouts, tinkoff] = await Promise.all([
     listPositions(db, userId), listPayouts(db, userId), findBrokerConnection(db, userId, 'tinkoff'),
   ])
@@ -1119,6 +1134,7 @@ async function defaultAccountId(client: Db, userId: string, currency = 'RUB'): P
 
 app.get('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
   const payouts = await listPayouts(db, userId, listOptions(request))
   const context = await engineContext(await resolveBaseCurrency(db, userId))
   response.json(payouts.map((payout) => payoutToWire(payout, context)))
@@ -1160,6 +1176,7 @@ app.post('/api/payouts', async (request, response) => {
         description: title,
         institution: position?.account.provider,
       }
+      if (isAutoReceived(record, localToday())) record.status = 'received'
       await syncTransactionForPayout(client, userId, record, false)
       await insertPayout(client, record)
       return record
@@ -1198,6 +1215,8 @@ app.patch('/api/payouts/:id', async (request, response) => {
       // повторно не создаётся благодаря дедупликации по (инструмент, дата, тип).
       source: existing.source === 'forecast' ? 'manual' : existing.source,
     }
+    // Доход с прошедшей датой не бывает «ожидается»: он уже получен (settleDuePayouts).
+    if (isAutoReceived(updated, localToday())) updated.status = 'received'
     await withTransaction(db, async (client) => {
       await syncTransactionForPayout(client, userId, updated)
       await updatePayout(client, userId, updated)
@@ -1205,49 +1224,6 @@ app.patch('/api/payouts/:id', async (request, response) => {
     response.json(payoutToWire(updated, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить выплату') }) }
 })
-// Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
-// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
-// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
-// операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
-// их деньги приходят синхронизацией.
-const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
-  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION', DEPOSIT_PRINCIPAL: 'REDEMPTION',
-}
-async function syncTransactionForPayout(client: Db, userId: string, payout: Payout, stored = true) {
-  if (payout.source === 'broker' || payout.institution === TINKOFF_PROVIDER) return
-  const type = TRANSACTION_BY_PAYOUT[payout.type]
-  if (payout.status !== 'received' || !type) {
-    if (!payout.transactionId) return
-    const linked = payout.transactionId
-    payout.transactionId = undefined
-    if (stored) await updatePayout(client, userId, payout)
-    await deleteTransaction(client, userId, linked)
-    return
-  }
-  const transaction: Transaction = {
-    id: payout.transactionId ?? randomUUID(),
-    accountId: payout.accountId,
-    instrumentId: payout.instrumentId,
-    type,
-    date: payout.date,
-    amount: payout.amount,
-    currency: payout.currency,
-    commission: 0,
-    tax: 0,
-    source: 'manual',
-    description: payout.description,
-  }
-  if (payout.transactionId) {
-    const existing = await findTransaction(client, userId, payout.transactionId)
-    if (existing) {
-      await updateTransaction(client, userId, { ...existing, date: payout.date, amount: payout.amount, currency: payout.currency })
-      return
-    }
-  }
-  await insertTransaction(client, transaction)
-  payout.transactionId = transaction.id
-}
-
 app.delete('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const existing = await findPayout(db, userId, request.params.id)
@@ -1421,6 +1397,7 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
 
 app.get('/api/transactions', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
   const transactions = await listTransactions(db, userId, listOptions(request))
   response.json(transactions.map(transactionToWire))
 })

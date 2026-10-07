@@ -214,10 +214,21 @@ test('облигация с прошедшим погашением получа
   const bond = instrument({ groupType: 'bond', name: 'Старая', nominal: 1000, couponRate: 7, maturityDate: '2026-03-01' })
   const owed = forecastPayouts(position({ quantity: 5, openedOn: '2025-01-10' }), bond, TODAY)
   // Последний купон приходит вместе с номиналом (К40).
-  assert.deepEqual(owed.map((payout) => [payout.type, payout.date, payout.amount]), [['COUPON', '2026-03-01', 175], ['REDEMPTION', '2026-03-01', 5000]])
+  // Купоны с даты покупки тоже в графике: прошедшие считаются полученными (settleDuePayouts).
+  assert.deepEqual(owed.map((payout) => [payout.type, payout.date, payout.amount]), [
+    ['COUPON', '2025-03-01', 175], ['COUPON', '2025-09-01', 175], ['COUPON', '2026-03-01', 175], ['REDEMPTION', '2026-03-01', 5000],
+  ])
   // Брокерское погашение приходит синхронизацией, покупка после погашения — ошибка ввода.
   assert.deepEqual(forecastPayouts(position({ quantity: 5, source: 'broker' }), bond, TODAY), [])
   assert.deepEqual(forecastPayouts(position({ quantity: 5, openedOn: '2026-04-01' }), bond, TODAY), [])
+})
+
+test('прошедшие купоны с даты покупки — у ручной бумаги, не раньше покупки и не у брокерской', () => {
+  const bond = instrument({ groupType: 'bond', nominal: 1000, couponRate: 10, maturityDate: '2028-05-01' })
+  const manual = forecastPayouts(position({ quantity: 10, openedOn: '2025-12-01' }), bond, TODAY)
+  assert.deepEqual(manual.filter((payout) => payout.type === 'COUPON').map((payout) => payout.date).slice(0, 2), ['2026-05-01', '2026-11-01'])
+  const broker = forecastPayouts(position({ quantity: 10, openedOn: '2025-12-01', source: 'broker' }), bond, TODAY)
+  assert.equal(broker.filter((payout) => payout.type === 'COUPON')[0].date, '2026-11-01')
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')

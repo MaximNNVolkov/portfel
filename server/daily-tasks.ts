@@ -13,7 +13,8 @@ import {
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
   recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
-  type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
+  deleteTransaction, findPayout, findTransaction, updatePayout, updateTransaction,
+  type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
 
 // Базовая валюта — настраиваемое поле портфеля (§13, §6.10), RUB — только дефолт для
@@ -197,11 +198,19 @@ export async function regenerateForecastPayouts(
   await deleteForecastPayouts(client, userId)
   const [positions, existing] = await Promise.all([listPositions(client, userId), listPayouts(client, userId)])
   const taken = new Set(existing.map((payout) => `${payout.instrumentId ?? ''}|${payout.date}|${payout.type}`))
+  // Прошедшая выплата по графику станет «полученной» с деньгами (settleDuePayouts), поэтому
+  // она не заводится, если пользователь уже внёс такую выплату сам, пусть и другим числом:
+  // купон, записанный на день позже графика, — те же деньги, а не второй купон.
+  const recorded = existing.filter((payout) => payout.status === 'received')
+  const alreadyRecorded = (instrumentId: string, date: string, type: PayoutType) =>
+    recorded.some((payout) => payout.instrumentId === instrumentId && payout.type === type
+      && Math.abs(Date.parse(payout.date) - Date.parse(date)) <= RECORDED_PAYOUT_WINDOW_MS)
   let created = 0
   for (const position of positions) {
     for (const forecast of forecastPayouts(position, position.instrument, today)) {
       const key = `${position.instrumentId}|${forecast.date}|${forecast.type}`
       if (taken.has(key)) continue
+      if (forecast.date < today && alreadyRecorded(position.instrumentId, forecast.date, forecast.type)) continue
       taken.add(key)
       await insertPayout(client, {
         id: randomUUID(),
@@ -218,7 +227,90 @@ export async function regenerateForecastPayouts(
       created += 1
     }
   }
+  await settleDuePayouts(client, userId)
   return created
+}
+// Окно совпадения прошедшей выплаты по графику с уже внесённой пользователем.
+const RECORDED_PAYOUT_WINDOW_MS = 20 * 86_400_000
+
+// Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
+// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
+// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
+// операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
+// их деньги приходят синхронизацией.
+const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
+  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION', DEPOSIT_PRINCIPAL: 'REDEMPTION',
+}
+export async function syncTransactionForPayout(client: Db, userId: string, payout: Payout, stored = true) {
+  if (payout.source === 'broker' || payout.institution === TINKOFF_PROVIDER) return
+  const type = TRANSACTION_BY_PAYOUT[payout.type]
+  if (payout.status !== 'received' || !type) {
+    if (!payout.transactionId) return
+    const linked = payout.transactionId
+    payout.transactionId = undefined
+    if (stored) await updatePayout(client, userId, payout)
+    await deleteTransaction(client, userId, linked)
+    return
+  }
+  const transaction: Transaction = {
+    id: payout.transactionId ?? randomUUID(),
+    accountId: payout.accountId,
+    instrumentId: payout.instrumentId,
+    type,
+    date: payout.date,
+    amount: payout.amount,
+    currency: payout.currency,
+    commission: 0,
+    tax: 0,
+    source: 'manual',
+    description: payout.description,
+  }
+  if (payout.transactionId) {
+    const existing = await findTransaction(client, userId, payout.transactionId)
+    if (existing) {
+      await updateTransaction(client, userId, { ...existing, date: payout.date, amount: payout.amount, currency: payout.currency })
+      return
+    }
+  }
+  await insertTransaction(client, transaction)
+  payout.transactionId = transaction.id
+}
+
+
+// Купоны, проценты и дивиденды с прошедшей датой считаются полученными (решение владельца,
+// docs/UI_UNIFICATION_PLAN.md): отмечать каждую выплату руками не нужно, кнопки «Получена»
+// для дохода нет. Возврат тела вклада и погашение номинала по-прежнему ждут отметки —
+// они закрывают позицию, и дату фактического возврата знает только пользователь.
+// Брокерские выплаты не трогаем: их деньги и даты приходят синхронизацией (§19).
+export const AUTO_RECEIVED_TYPES: PayoutType[] = ['COUPON', 'DIVIDEND', 'INTEREST']
+
+export function isAutoReceived(payout: Pick<Payout, 'type' | 'date' | 'source' | 'institution'>, today = localDate()): boolean {
+  return AUTO_RECEIVED_TYPES.includes(payout.type) && payout.date < today
+    && payout.source !== 'broker' && payout.institution !== TINKOFF_PROVIDER
+}
+
+// Перевод наступивших выплат дохода в «получено» с заведением операции — как при ручной
+// отметке: деньги попадают в свободные (критик К3). Прогнозная строка становится ручной,
+// иначе следующий пересчёт прогноза удалил бы уже пришедшие деньги. UPDATE ... RETURNING
+// с условием на статус делает шаг идемпотентным: параллельные запросы одну и ту же
+// выплату дважды не проведут.
+export async function settleDuePayouts(client: Db, userId: string, today = localDate()): Promise<number> {
+  const result = await client.query(
+    `UPDATE portfolio.payouts o
+        SET status = 'received', source = CASE WHEN o.source = 'forecast' THEN 'manual' ELSE o.source END
+       FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id
+      WHERE a.id = o.account_id AND f.user_id = $1 AND o.status = 'expected' AND o.payout_date < $2::date
+        AND o.type = ANY($3::text[]) AND o.source <> 'broker' AND a.provider IS DISTINCT FROM $4
+      RETURNING o.id`,
+    [userId, today, AUTO_RECEIVED_TYPES, TINKOFF_PROVIDER],
+  )
+  for (const row of result.rows) {
+    const payout = await findPayout(client, userId, row.id)
+    if (!payout) continue
+    await syncTransactionForPayout(client, userId, payout)
+    await updatePayout(client, userId, payout)
+  }
+  return result.rows.length
 }
 
 // Синхронизация (§19): позиции ставятся из ответа брокера целиком (количество/цены/стоимость

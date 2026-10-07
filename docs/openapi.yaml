@@ -883,6 +883,23 @@ components:
         closedOn: { type: [string, 'null'], format: date }
         forecastNote: { type: string, description: 'Почему по бумаге нет прогноза купонов' }
         valuation: { $ref: '#/components/schemas/Valuation' }
+        outlook:
+          type: [object, 'null']
+          description: 'Прогноз поступлений по инструменту в базовой валюте (server/payout-outlook.ts); null — выплат нет. Суммы null — нет курса ЦБ для части выплат'
+          properties:
+            receivedIncome: { type: [number, 'null'], description: 'Полученные купоны, проценты, дивиденды' }
+            expectedIncome: { type: [number, 'null'], description: 'Ожидаемый доход с сегодняшнего дня до конца графика' }
+            expectedPrincipal: { type: [number, 'null'], description: 'Ожидаемый возврат тела вклада или номинала' }
+            overduePrincipal: { type: [number, 'null'], description: 'Возврат вложенного с прошедшей датой, не отмеченный полученным' }
+            next:
+              type: [object, 'null']
+              properties:
+                date: { type: string, format: date }
+                types: { type: array, items: { type: string } }
+                amount: { type: [number, 'null'] }
+                forecast: { type: boolean }
+            lastDate: { type: [string, 'null'], format: date }
+            expectedCount: { type: integer }
       additionalProperties: true
 
     Payout:
@@ -896,8 +913,8 @@ components:
         baseCurrency: { type: [string, 'null'] }
         date: { type: string, format: date }
         type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
-        status: { type: string, enum: [expected, received] }
-        overdue: { type: boolean, description: 'Ожидалась, но дата прошла' }
+        status: { type: string, enum: [expected, received], description: 'Купон, проценты и дивиденды с прошедшей датой всегда received — сервер переводит их сам и заводит операцию' }
+        overdue: { type: boolean, description: 'Ожидалась, но дата прошла (только возврат тела вклада и погашение)' }
         reinvested: { type: boolean, description: 'Пришедшие деньги отмечены вложенными — напоминание «Реинвестировать» снято' }
         source: { type: string }
         instrumentId: { type: [string, 'null'] }
