@@ -313,13 +313,13 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     profit,
     profitPercent: invested > 0 ? (profit / invested) * 100 : null,
     expected: payments
-      .filter(isUpcoming)
+      .filter((payment) => isUpcoming(payment) && !isPrincipalPayout(payment))
       .reduce((sum, payment) => sum + payment.amount, 0),
     overdue: payments
       .filter(isOverdue)
       .reduce((sum, payment) => sum + payment.amount, 0),
     paid: payments
-      .filter((item) => item.status === "received")
+      .filter((item) => item.status === "received" && !isPrincipalPayout(item))
       .reduce((sum, item) => sum + item.amount, 0),
     cash: products
       .filter((product) => product.type === "Деньги")
@@ -606,9 +606,6 @@ const payoutMoney = (payment: Payment) =>
   payment.currency && payment.currency !== "RUB"
     ? `${payment.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${payment.currency}`
     : money(payment.amount);
-// Главная цифра группы в календаре выплат (BUG-21): раздел — «Календарь ожидаемых
-// доходов», поэтому крупно идёт ожидаемое; полученное — подписью и только если оно есть.
-// Иначе у нового пользователя весь календарь состоял из строк «+₽ 0».
 function pluralPayouts(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -616,18 +613,10 @@ function pluralPayouts(count: number) {
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "выплаты";
   return "выплат";
 }
-function payoutGroupValue(expected: number, received: number, overdue: number) {
-  if (expected > 0)
-    return {
-      amount: `+${money(expected)}`,
-      note: received > 0 ? `ожидается · получено ${money(received)}` : "ожидается",
-    };
-  if (received > 0)
-    return {
-      amount: `+${money(received)}`,
-      note: overdue > 0 ? `получено · не отмечено ${money(overdue)}` : "получено",
-    };
-  return { amount: money(overdue), note: "не отмечено полученным" };
+// Подпись выбранного периода в календаре: крупно — ожидаемое, полученное — подписью.
+function payoutPeriodNote(expected: number, received: number) {
+  if (expected > 0) return received > 0 ? `ожидается · получено ${money(received)}` : "ожидается";
+  return received > 0 ? "получено" : "выплат нет";
 }
 const fullDate = (date: string) => {
   const parsed = parseIsoDate(date);
@@ -1918,6 +1907,7 @@ function AppMvp() {
               <PaymentsPage
                 payments={payments}
                 products={products}
+                apiOnline={apiOnline}
                 onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
               />
             }
@@ -2079,7 +2069,7 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, profit, paid, overdue, cash, groups, valuation, rebalance = [] } =
+  const { total, profit, paid, expected, overdue, cash, groups, valuation, rebalance = [] } =
     summary ?? localSummary(products, payments);
   const rebalanceByGroup = new Map(rebalance.map((row) => [row.group, row]));
   const result = portfolioResult(summary ?? localSummary(products, payments));
@@ -2196,8 +2186,13 @@ function Dashboard({
           </div>
           <div>
             <span>Получено выплат</span>
-            <strong>{display(paid)}</strong>
+            <strong>{paid > 0 ? display(paid) : "пока нет"}</strong>
           </div>
+          {/* Доход, который ещё придёт по графикам выплат, — тот же прогноз, что в «Выплатах» и карточке. */}
+          <Link to="/payments">
+            <span>Ещё придёт</span>
+            <strong>{expected > 0 ? display(expected) : "не ожидается"}</strong>
+          </Link>
           <Link to="/transactions">
             <span>Свободные деньги</span>
             <strong>{cash === null ? "Оценка недоступна" : display(cash)}</strong>
@@ -2247,7 +2242,7 @@ function Dashboard({
         )}
         {!attention && overdue > 0 && (
           <div className="demo-note warn">
-            ⚠ Не отмечено полученными {display(overdue)}. <Link to="/payments">Отметить</Link>
+            ⚠ Ждут отметки {display(overdue)}: дата возврата прошла. <Link to="/attention">Отметить</Link>
           </div>
         )}
       </article>
@@ -3122,23 +3117,60 @@ function shiftIso(date: string, months: number, days = 0) {
 const monthStart = (date: string) => `${date.slice(0, 7)}-01`;
 const monthEnd = (date: string) => shiftIso(monthStart(date), 1, -1);
 const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-// Деньги, которые придут: доход отдельно от возврата вложений (критик К7) —
-// «придёт 517 000» без оговорки обещало бы доход, которого нет.
-function payoutTotals(list: Payment[]) {
+// Суммы календаря по периодам считает бэкенд (GET /api/payouts/outlook, §10): доход
+// отдельно от возврата вложений (критик К7) — «придёт 517 000» без оговорки обещало бы
+// доход, которого нет. unconverted — валюты без курса ЦБ, их строки в суммы не вошли.
+type PeriodTotals = { income: number; principal: number; total: number; count: number; unconverted: string[] };
+type PayoutPeriods = {
+  level: PaymentViewMode;
+  start: string;
+  current: string;
+  summary: { key: string; from: string; to: string; totals: PeriodTotals }[];
+  cells: { key: string; from: string; to: string; expected: PeriodTotals; received: PeriodTotals; all: PeriodTotals }[];
+  window: PeriodTotals;
+};
+// Офлайн-фолбэк без бэкенда — как localSummary: единственный случай, когда календарь
+// складывает суммы сам.
+function localPeriodTotals(list: Payment[]): PeriodTotals {
   const income = sumPayoutsBase(list.filter((item) => !isPrincipalPayout(item)));
   const principal = sumPayoutsBase(list.filter(isPrincipalPayout));
   return {
     total: income.total + principal.total,
     income: income.total,
     principal: principal.total,
-    partial: income.partial || principal.partial,
     count: list.length,
+    unconverted: income.partial || principal.partial ? ["?"] : [],
   };
 }
-function totalsNote(totals: ReturnType<typeof payoutTotals>) {
+function localPayoutPeriods(list: Payment[], today: string, level: PaymentViewMode, start: string, keys: string[]): PayoutPeriods {
+  const calendar = list.filter((payment) => payment.date >= today);
+  const upcoming = calendar.filter((payment) => payment.status === "expected");
+  const within = (rows: Payment[], from: string, to: string) => rows.filter((row) => row.date >= from && row.date <= to);
+  const rangeOf = (key: string) =>
+    level === "day" ? { from: key, to: key } : level === "year" ? { from: `${key}-01-01`, to: `${key}-12-31` } : { from: `${key}-01`, to: monthEnd(`${key}-01`) };
+  const thisMonth = cellKeyOf(today, "month");
+  const summary = [0, 1, 2]
+    .map((offset) => shiftCell(thisMonth, "month", offset))
+    .map((key) => ({ key, from: `${key}-01`, to: monthEnd(`${key}-01`) }))
+    .concat({ key: "12m", from: `${thisMonth}-01`, to: monthEnd(`${shiftCell(thisMonth, "month", 11)}-01`) })
+    .map((period) => ({ ...period, totals: localPeriodTotals(within(upcoming, period.from, period.to)) }));
+  const cells = keys.map((key) => {
+    const range = rangeOf(key);
+    const items = within(calendar, range.from, range.to);
+    return {
+      key,
+      ...range,
+      expected: localPeriodTotals(items.filter((item) => item.status === "expected")),
+      received: localPeriodTotals(items.filter((item) => item.status === "received")),
+      all: localPeriodTotals(items),
+    };
+  });
+  return { level, start, current: cellKeyOf(today, level), summary, cells, window: localPeriodTotals(within(calendar, cells[0].from, cells[cells.length - 1].to)) };
+}
+function totalsNote(totals: PeriodTotals) {
   return [
     totals.principal > 0 ? `доход ${money(totals.income)} · возврат вложений ${money(totals.principal)}` : null,
-    totals.partial ? "без выплат в валюте без курса ЦБ" : null,
+    totals.unconverted.length > 0 ? "без выплат в валюте без курса ЦБ" : null,
   ].filter(Boolean).join(" · ");
 }
 // Сетка из 12 периодов (П26): переключатель «дни / месяцы / годы» задаёт шаг, а сетка
@@ -3183,10 +3215,12 @@ const LEVEL_LABELS: Record<PaymentViewMode, [string, string]> = {
 function PaymentsPage({
   payments,
   products,
+  apiOnline,
   onMarkReceived,
 }: {
   payments: Payment[];
   products: Product[];
+  apiOnline: boolean;
   onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
   const [innerId, setInnerId] = useState<string | null>(null);
@@ -3249,11 +3283,32 @@ function PaymentsPage({
     return true;
   });
   // Прошедшие выплаты на экране не показываются (П27): он отвечает на вопрос «сколько
-  // придёт». Неотмеченные прошедшие отмечаются в «Требует внимания» и карточке продукта.
+  // придёт». Неотмеченный возврат вложенного — в «Требует внимания» и карточке продукта.
+  // Список нужен только для строк выбранного периода; суммы — с бэкенда.
   const calendar = matching
-    .filter((payment) => payment.date >= today && !isOverdue(payment))
+    .filter((payment) => payment.date >= today)
     .sort((a, b) => a.date.localeCompare(b.date));
-  const upcoming = calendar.filter(isUpcoming);
+
+  // Суммы по периодам с тем же окном и фильтрами, что на экране. Пока идёт новый запрос,
+  // остаются прежние цифры — без мигания «—».
+  const [remote, setRemote] = useState<PayoutPeriods | null>(null);
+  useEffect(() => {
+    if (!apiOnline) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ by: level, start });
+    if (typeFilter !== "all") params.set("type", typeFilter);
+    if (instrumentFilter !== "all") params.set("instrument", instrumentFilter);
+    if (bankFilter !== "all") params.set("institution", bankFilter);
+    apiFetch(`${apiUrl}/payouts/outlook?${params}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (response.ok) setRemote((await response.json()) as PayoutPeriods);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [apiOnline, level, start, typeFilter, instrumentFilter, bankFilter, payments]);
+  const periods: PayoutPeriods | null = apiOnline
+    ? remote && remote.level === level && remote.start === start ? remote : null
+    : localPayoutPeriods(matching, today, level, start, keys);
 
   const [markingId, setMarkingId] = useState<string | null>(null);
   async function markReceived(payment: Payment) {
@@ -3269,32 +3324,24 @@ function PaymentsPage({
   // месяцы, а не «этот / следующий»: так не нужно соображать, о каком месяце речь.
   // Прошедшие дни текущего месяца не входят — как и во всём экране (П27).
   const thisMonth = cellKeyOf(today, "month");
-  const monthCards = [0, 1, 2].map((offset) => {
-    const key = shiftCell(thisMonth, "month", offset);
-    return { id: key, label: periodLabel(key, "month").replace(/ г\.$/, ""), from: `${key}-01`, to: monthEnd(`${key}-01`), sel: key };
-  });
   const lastMonth = shiftCell(thisMonth, "month", 11);
   const shortMonth = (key: string) => `${periodLabel(key, "month").split(" ")[0]} ${key.slice(2, 4)}`;
-  const summaryCards = [
-    ...monthCards,
-    { id: "12m", label: `${shortMonth(thisMonth)} — ${shortMonth(lastMonth)}`, from: `${thisMonth}-01`, to: monthEnd(`${lastMonth}-01`), sel: null },
-  ].map((card) => ({
-    ...card,
-    target: { by: "month" as const, start: thisMonth, sel: card.sel },
-    totals: payoutTotals(upcoming.filter((payment) => payment.date >= card.from && payment.date <= card.to)),
+  const summaryCards = (periods?.summary ?? []).map((card) => ({
+    id: card.key,
+    label: card.key === "12m" ? `${shortMonth(thisMonth)} — ${shortMonth(lastMonth)}` : periodLabel(card.key, "month").replace(/ г\.$/, ""),
+    target: { by: "month" as const, start: thisMonth, sel: card.key === "12m" ? null : card.key },
+    totals: card.totals,
   }));
 
   // Ячейки сетки. Пустые тоже показываются: «в марте ничего не придёт» — такой же ответ
-  // для планирования, как сумма. В прошедших ячейках — полученное.
+  // для планирования, как сумма.
   const cells = keys.map((key) => {
-    const items = calendar.filter((payment) => cellKeyOf(payment.date, level) === key);
-    const expected = payoutTotals(items.filter(isUpcoming));
-    const received = payoutTotals(items.filter((item) => item.status === "received"));
-    return { key, items, expected, received, amount: expected.total + received.total };
+    const totals = periods?.cells.find((cell) => cell.key === key);
+    const items = calendar.filter((payment) => totals && payment.date >= totals.from && payment.date <= totals.to);
+    return { key, items, totals, amount: totals?.all.total ?? 0 };
   });
   const maxAmount = Math.max(...cells.map((cell) => cell.amount), 0);
-  const windowItems = cells.flatMap((cell) => cell.items);
-  const windowTotals = payoutTotals(windowItems);
+  const windowTotals = periods?.window;
   const selectedCell = cells.find((cell) => cell.key === selected);
 
   function cellLabel(key: string): [string, string] {
@@ -3314,7 +3361,14 @@ function PaymentsPage({
 
   return (
     <Page title="Выплаты" subtitle="Сколько денег придёт и когда">
-      <div className="payout-summary">
+      <div className="payout-summary" aria-busy={!periods || undefined}>
+        {!periods && [0, 1, 2, 3].map((index) => (
+          <div key={index} className="payout-summary-card loading">
+            <span>&nbsp;</span>
+            <strong>…</strong>
+            <small>считаем</small>
+          </div>
+        ))}
         {summaryCards.map((card) => (
           <button
             type="button"
@@ -3408,12 +3462,14 @@ function PaymentsPage({
             </button>
             <div className="payout-window-title">
               <span className="muted">{windowTitle}</span>
-              <strong>{windowTotals.total > 0 ? `+${money(windowTotals.total)}` : "—"}</strong>
+              <strong>{!windowTotals ? "…" : windowTotals.total > 0 ? `+${money(windowTotals.total)}` : "—"}</strong>
               <small className="muted">
-                {[
-                  windowTotals.count > 0 ? `${windowTotals.count} ${pluralPayouts(windowTotals.count)}` : "выплат нет",
-                  totalsNote(windowTotals) || null,
-                ].filter(Boolean).join(" · ")}
+                {windowTotals
+                  ? [
+                      windowTotals.count > 0 ? `${windowTotals.count} ${pluralPayouts(windowTotals.count)}` : "выплат нет",
+                      totalsNote(windowTotals) || null,
+                    ].filter(Boolean).join(" · ")
+                  : "считаем"}
               </small>
             </div>
             <button
@@ -3433,7 +3489,8 @@ function PaymentsPage({
           <div className="payout-grid">
             {cells.map((cell) => {
               const [label, sub] = cellLabel(cell.key);
-              const principal = cell.expected.principal + cell.received.principal;
+              const count = cell.totals?.all.count ?? 0;
+              const principal = cell.totals?.all.principal ?? 0;
               return (
                 <button
                   type="button"
@@ -3452,16 +3509,18 @@ function PaymentsPage({
                     {label}
                     {sub && <small>{sub}</small>}
                   </span>
-                  <strong>{cell.amount > 0 ? `+${compactMoney(cell.amount)}` : "—"}</strong>
+                  <strong>{!cell.totals ? "…" : cell.amount > 0 ? `+${compactMoney(cell.amount)}` : "—"}</strong>
                   <span className="payout-bar" aria-hidden="true">
                     <i style={{ width: `${maxAmount > 0 ? Math.max((cell.amount / maxAmount) * 100, cell.amount > 0 ? 4 : 0) : 0}%` }} />
                   </span>
                   <small className="payout-cell-note">
-                    {cell.items.length === 0
-                      ? "нет выплат"
-                      : principal > 0
-                        ? `${cell.items.length} · в т.ч. возврат`
-                        : `${cell.items.length} ${pluralPayouts(cell.items.length)}`}
+                    {!cell.totals
+                      ? "\u00a0"
+                      : count === 0
+                        ? "нет выплат"
+                        : principal > 0
+                          ? `${count} · в т.ч. возврат`
+                          : `${count} ${pluralPayouts(count)}`}
                   </small>
                 </button>
               );
@@ -3475,12 +3534,12 @@ function PaymentsPage({
                   <span className="muted">{cellTitle(selectedCell.key, level)}</span>
                   <strong>{selectedCell.amount > 0 ? `+${money(selectedCell.amount)}` : "—"}</strong>
                   <small className="muted">
-                    {[
-                      selectedCell.items.length > 0
-                        ? payoutGroupValue(selectedCell.expected.total, selectedCell.received.total, 0).note
-                        : "выплат нет",
-                      totalsNote(payoutTotals(selectedCell.items)) || null,
-                    ].filter(Boolean).join(" · ")}
+                    {selectedCell.totals
+                      ? [
+                          payoutPeriodNote(selectedCell.totals.expected.total, selectedCell.totals.received.total),
+                          totalsNote(selectedCell.totals.all) || null,
+                        ].filter(Boolean).join(" · ")
+                      : "считаем"}
                   </small>
                 </div>
                 {level !== "day" && (
@@ -6938,6 +6997,15 @@ function DeleteOcrItemsPage({
     </Page>
   );
 }
+// Купон, проценты и дивиденды с прошедшей датой сервер сохраняет полученными (isAutoReceived
+// в server/daily-tasks.ts): выбор статуса в форме им не нужен. Брокерские выплаты приносит
+// синхронизация — у них статус прежний.
+const AUTO_RECEIVED_TYPES: PayoutType[] = ["COUPON", "DIVIDEND", "INTEREST"];
+const autoReceivedPayout = (type: PayoutType, date: string, institution?: string, source?: string) =>
+  AUTO_RECEIVED_TYPES.includes(type) && Boolean(date) && date < todayIsoDate() && source !== "broker" && institution !== "Т-Инвестиции";
+function AutoReceivedNote() {
+  return <small className="muted">Дата прошла — выплата сохранится полученной, деньги попадут в свободные.</small>;
+}
 function EditPaymentPage({
   payments,
   products,
@@ -6970,6 +7038,7 @@ function EditPaymentPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, Boolean(payment)]);
   if (!payment) return <MissingRecord to="/payments" />;
+  const autoReceived = autoReceivedPayout(type, date, payoutInstitution(payment, products) ?? payment.institution, payment.source);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     // Привязку отправляем, только если её поменяли: у выплаты по уже удалённой позиции
@@ -6981,7 +7050,7 @@ function EditPaymentPage({
       amount: Number(amount),
       date,
       type,
-      status,
+      status: autoReceived ? "received" : status,
       ...(linkChanged ? payoutLinkFields(positionId, products) : {}),
     });
   };
@@ -7029,19 +7098,23 @@ function EditPaymentPage({
             ))}
           </select>
         </label>
-        <label>
-          Статус
-          <select
-            value={status}
-            onChange={(event) => setStatus(event.target.value as PayoutStatus)}
-          >
-            {Object.entries(payoutStatusLabels).map(([value, label]) => (
-              <option value={value} key={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {autoReceived ? (
+          <AutoReceivedNote />
+        ) : (
+          <label>
+            Статус
+            <select
+              value={status}
+              onChange={(event) => setStatus(event.target.value as PayoutStatus)}
+            >
+              {Object.entries(payoutStatusLabels).map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <button className="primary-button" type="submit">
           Сохранить изменения
         </button>
@@ -7143,8 +7216,9 @@ function PaymentFormPage({
     const requested = searchParams.get("position") ?? "";
     return products.some((product) => product.id === requested) ? requested : "";
   });
+  const autoReceived = autoReceivedPayout(type, date, products.find((product) => product.id === positionId)?.institution);
   // Задним числом вводить выплаты законно — предупреждаем, но не запрещаем (BUG-22).
-  const pastExpected = Boolean(date) && date < todayIsoDate() && status === "expected";
+  const pastExpected = Boolean(date) && date < todayIsoDate() && status === "expected" && !autoReceived;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -7153,7 +7227,7 @@ function PaymentFormPage({
       amount: Number(amount),
       date,
       type,
-      status,
+      status: autoReceived ? "received" : status,
       currency: "RUB",
       ...payoutLinkFields(positionId, products),
     });
@@ -7203,23 +7277,27 @@ function PaymentFormPage({
             ))}
           </select>
         </label>
-        <label>
-          Статус
-          <select
-            value={status}
-            onChange={(event) => setStatus(event.target.value as PayoutStatus)}
-          >
-            {Object.entries(payoutStatusLabels).map(([value, label]) => (
-              <option value={value} key={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {autoReceived ? (
+          <AutoReceivedNote />
+        ) : (
+          <label>
+            Статус
+            <select
+              value={status}
+              onChange={(event) => setStatus(event.target.value as PayoutStatus)}
+            >
+              {Object.entries(payoutStatusLabels).map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {pastExpected && (
           <small className="danger-text">
-            ⚠ Дата уже прошла. Выплата со статусом «Ожидается» попадёт в группу
-            «Просрочено» и не войдёт в ожидаемые суммы. Если деньги уже пришли —
+            ⚠ Дата уже прошла. Выплата со статусом «Ожидается» будет ждать отметки
+            в «Требует внимания» и не войдёт в ожидаемые суммы. Если деньги уже пришли —
             выберите статус «Получено».
           </small>
         )}

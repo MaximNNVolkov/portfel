@@ -8,11 +8,12 @@ import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexQuote } from './market-data.ts'
 import { aggregateByGroup, calculateReturns, convertCurrency, sumInBase, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
 import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
+import { payoutSums } from './payout-outlook.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
-  recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
+  recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumRealizedSales, sumTransactionCosts,
   deleteTransaction, findPayout, findTransaction, updatePayout, updateTransaction,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
@@ -114,7 +115,8 @@ export function closedPositionResult(position: Position, context: EngineContext)
 export async function portfolioResult(
   client: Db, userId: string, positions: Position[], aggregate: ReturnType<typeof aggregateByGroup>, context: EngineContext,
 ) {
-  const [payouts, costs, sales] = await Promise.all([sumPayouts(client, userId, localDate()), sumTransactionCosts(client, userId), sumRealizedSales(client, userId)])
+  const [payoutRows, costs, sales] = await Promise.all([listPayouts(client, userId), sumTransactionCosts(client, userId), sumRealizedSales(client, userId)])
+  const payouts = payoutSums(payoutRows, localDate())
   // Реализованный результат (§10.2): закрытые вклады и погашенные бумаги плюс продажи.
   const realized = positions.reduce((sum, position) => sum + (closedPositionResult(position, context) ?? 0), 0)
     + sumInBase(sales, context).total

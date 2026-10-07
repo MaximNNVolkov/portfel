@@ -36,7 +36,7 @@ import {
   performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, localDate, portfolioResult,
   isAutoReceived, settleDuePayouts, syncTransactionForPayout,
 } from './daily-tasks.ts'
-import { outlookKey, payoutOutlook } from './payout-outlook.ts'
+import { outlookKey, payoutOutlook, payoutPeriods, type PeriodLevel } from './payout-outlook.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
 import { parseCsv, parseMapping, statementRows, type StatementRow } from './statement-import.ts'
@@ -1132,6 +1132,27 @@ async function defaultAccountId(client: Db, userId: string, currency = 'RUB'): P
   return account.id
 }
 
+// Суммы календаря выплат по периодам (§22): плитки ближайших месяцев и сетка из 12 шагов.
+// Фильтры экрана (тип, инструмент, банк) применяются здесь же — клиент ничего не складывает (§10).
+app.get('/api/payouts/outlook', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  await settlePayouts(userId)
+  const by = optionalText(request.query.by)
+  const level: PeriodLevel = by === 'day' || by === 'year' ? by : 'month'
+  const type = optionalText(request.query.type)
+  const instrument = optionalText(request.query.instrument)
+  const institution = optionalText(request.query.institution)
+  const [payouts, positions] = await Promise.all([listPayouts(db, userId), institution ? listPositions(db, userId) : Promise.resolve([])])
+  // Банк выплаты — её счёт; у выплаты на ручном счёте — банк позиции того же инструмента.
+  const positionBank = new Map(positions.filter((item) => item.account.provider !== MANUAL_PROVIDER).map((item) => [item.instrumentId, item.account.provider]))
+  const bankOf = (payout: Payout) =>
+    payout.institution && payout.institution !== MANUAL_PROVIDER ? payout.institution : (payout.instrumentId ? positionBank.get(payout.instrumentId) : undefined)
+  const matching = payouts.filter((payout) =>
+    (!type || payout.type === type) && (!instrument || payout.instrumentId === instrument) && (!institution || bankOf(payout) === institution))
+  const context = await engineContext(await resolveBaseCurrency(db, userId))
+  response.json(payoutPeriods(matching, { today: localToday(), level, start: optionalText(request.query.start) }, (amount, currency) =>
+    convertCurrency(amount, currency, context.baseCurrency, context.rates)))
+})
 app.get('/api/payouts', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   await settlePayouts(userId)

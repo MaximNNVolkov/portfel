@@ -721,13 +721,32 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/payouts/outlook:
+    get:
+      tags: [payouts]
+      summary: Суммы календаря выплат по периодам (§22)
+      description: 'Плитки текущего и двух следующих месяцев и 12 месяцев вперёд (только ожидаемое), сетка из 12 периодов с начала окна и итог окна. Выплаты с прошедшей датой не входят. Суммы в базовой валюте; строки в валюте без курса ЦБ не входят в суммы и перечислены в unconverted'
+      parameters:
+        - { name: by, in: query, schema: { type: string, enum: [day, month, year], default: month } }
+        - { name: start, in: query, description: 'Начало окна: YYYY-MM-DD, YYYY-MM или YYYY по шагу; раньше текущего периода не бывает', schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: instrument, in: query, description: 'id инструмента', schema: { type: string } }
+        - { name: institution, in: query, description: 'Банк или брокер', schema: { type: string } }
+      responses:
+        '200':
+          description: Суммы по периодам
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutPeriods' }
+        '401': { $ref: '#/components/responses/Error' }
+
   /api/payouts/{id}:
     parameters:
       - $ref: '#/components/parameters/id'
     patch:
+      tags: [payouts]
       summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
       description: 'Статус received заводит связанную операцию (деньги попадают в свободные), expected — удаляет её; у брокерских выплат операции приходят синхронизацией'
-      summary: 'Изменить выплату; positionId = null отвязывает от инструмента'
       requestBody: { $ref: '#/components/requestBodies/PayoutUpdate' }
       responses:
         '200': { $ref: '#/components/responses/Payout' }
@@ -902,6 +921,41 @@ components:
             expectedCount: { type: integer }
       additionalProperties: true
 
+    PeriodTotals:
+      type: object
+      properties:
+        income: { type: number, description: 'Доход: купоны, проценты, дивиденды' }
+        principal: { type: number, description: 'Возврат вложенного: тело вклада, номинал' }
+        total: { type: number }
+        count: { type: integer }
+        unconverted: { type: array, items: { type: string }, description: 'Валюты без курса ЦБ — не вошли в суммы' }
+    PayoutPeriods:
+      type: object
+      properties:
+        level: { type: string, enum: [day, month, year] }
+        start: { type: string }
+        current: { type: string, description: 'Текущий период' }
+        summary:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string, description: 'YYYY-MM или 12m' }
+              from: { type: string, format: date }
+              to: { type: string, format: date }
+              totals: { $ref: '#/components/schemas/PeriodTotals' }
+        cells:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              from: { type: string, format: date }
+              to: { type: string, format: date }
+              expected: { $ref: '#/components/schemas/PeriodTotals' }
+              received: { $ref: '#/components/schemas/PeriodTotals' }
+              all: { $ref: '#/components/schemas/PeriodTotals' }
+        window: { $ref: '#/components/schemas/PeriodTotals' }
     Payout:
       type: object
       properties:

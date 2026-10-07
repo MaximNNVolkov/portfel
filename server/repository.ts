@@ -986,23 +986,7 @@ export async function deleteForecastPayouts(db: Db, userId: string): Promise<voi
 // валюту делает Portfolio Engine (sumInBase, §13).
 // expected — ожидаемый доход (купоны, проценты, дивиденды); возврат тела вклада и
 // погашение номинала — отдельно (expectedPrincipal): это возврат вложенного, а не доход.
-export type PayoutTotals = { expected: MoneyRow[]; expectedPrincipal: MoneyRow[]; overdue: MoneyRow[]; received: MoneyRow[] }
 export type MoneyRow = { amount: number; currency: string }
-
-export async function sumPayouts(db: Db, userId: string, today: string): Promise<PayoutTotals> {
-  const result = await db.query(
-    `SELECT o.currency,
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date >= $2::date AND o.type NOT IN (${PRINCIPAL_PAYOUT_SQL})), 0) AS expected,
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date >= $2::date AND o.type IN (${PRINCIPAL_PAYOUT_SQL})), 0) AS expected_principal,
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'expected' AND o.payout_date < $2::date), 0) AS overdue,
-       COALESCE(SUM(o.amount) FILTER (WHERE o.status = 'received' AND o.type NOT IN (${PRINCIPAL_PAYOUT_SQL})), 0) AS received
-     ${PAYOUT_FROM} WHERE f.user_id = $1 GROUP BY o.currency`,
-    [userId, today],
-  )
-  const column = (name: 'expected' | 'expected_principal' | 'overdue' | 'received'): MoneyRow[] =>
-    result.rows.map((row) => ({ currency: row.currency, amount: Number(row[name] ?? 0) }))
-  return { expected: column('expected'), expectedPrincipal: column('expected_principal'), overdue: column('overdue'), received: column('received') }
-}
 
 // ---------------------------------------------------------------------------
 // История портфеля (§21) и подключения брокеров (§11 BrokerConnection)
