@@ -167,3 +167,47 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 
 /* П31: переключатель разреза «Структура» на главном экране. */
 .structure-cut { margin: 0 0 12px; }
+
+/* Карточка инструмента (docs/UI_UNIFICATION_PLAN.md §2): сумма и результат как на главной,
+   строка ключевых фактов, срок с прогнозом, ближайшее событие, вкладки «Выплаты» / «История». */
+.instrument-page { max-width: 760px; }
+.instrument-facts { margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.instrument-term { max-width: none; margin-top: 14px; padding: 16px 18px; }
+.instrument-term .detail-line:first-of-type { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.instrument-term .card-label:only-child { margin: 0; }
+.instrument-term > .detail-line:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.term-bar { position: relative; height: 6px; margin: 12px 0 6px; overflow: hidden; border-radius: 3px; background: var(--bg-subtle); }
+.term-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--mint); }
+.term-legend { display: flex; justify-content: space-between; font-size: 11px; }
+.instrument-next { margin-top: 12px; }
+.instrument-tabs { margin: 28px 0 14px; }
+.view-mode-switch a { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px; color: var(--muted); background: var(--paper); font-size: 12px; text-decoration: none; }
+.view-mode-switch a.selected { color: var(--mint); border-color: var(--mint); background: var(--mint-soft); }
+.detail-delete { margin-left: auto; padding: 9px 4px; border: 0; background: transparent; font-size: 11px; }
+
+/* Лента выплат: линия слева, точка цвета типа выплаты. Прошедшее бледнее (решение владельца:
+   «было» и «будет» различаются цветом, а не заголовками), «Сегодня» — плашка с текущей суммой. */
+.timeline { position: relative; margin: 0; padding: 0 0 0 22px; list-style: none; }
+.timeline::before { content: ''; position: absolute; top: 10px; bottom: 10px; left: 6px; width: 2px; background: var(--line); }
+.timeline-item { position: relative; padding: 7px 0; }
+.timeline-item::before { content: ''; position: absolute; top: 13px; left: -21px; width: 8px; height: 8px; border: 2px solid var(--muted); border-radius: 50%; background: var(--bg-page); }
+.timeline-item.teal::before { border-color: #65c4b1; background: #65c4b1; }
+.timeline-item.coral::before { border-color: #e7a05b; background: #e7a05b; }
+.timeline-item.amber::before { border-color: #ebc677; background: #ebc677; }
+.timeline-item.indigo::before { border-color: #7787ba; background: #7787ba; }
+.timeline-item.slate::before { border-color: #93a1a6; background: #93a1a6; }
+.timeline-item.pink::before { border-color: #d98bbd; background: #d98bbd; }
+.timeline-item.past { opacity: .5; }
+.timeline-item.past:hover, .timeline-item.past:focus-within { opacity: .85; }
+.timeline-item > a, .timeline-item > div { display: block; padding: 4px 8px; border-radius: 7px; color: inherit; text-decoration: none; }
+.timeline-item > a:hover { background: var(--bg-subtle); }
+.timeline-head { display: flex; justify-content: space-between; gap: 10px; color: var(--ink); font-size: 13px; }
+.timeline-head strong { font-weight: 600; }
+.timeline-head > span { flex: 0 0 auto; white-space: nowrap; }
+.timeline-item small { display: block; margin-top: 2px; font-size: 11px; }
+.timeline-more { padding: 2px 0 2px 8px; font-size: 12px; }
+.timeline-more::before { width: 4px; height: 4px; top: 10px; left: -19px; border-width: 1px; }
+.timeline-today { margin: 6px 0; }
+.timeline-today::before { left: -23px; width: 10px; height: 10px; border-color: var(--mint); background: var(--mint); box-shadow: 0 0 0 4px var(--mint-soft); }
+.timeline-today > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.timeline-all { display: inline-block; margin-top: 12px; }

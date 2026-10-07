@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Link,
@@ -53,8 +53,20 @@ type Product = {
   forecastNote?: string;
   // Тело вклада вернулось / бумага погашена: позиция закрыта и в стоимость не входит.
   closedOn?: string;
+  // Прогноз поступлений с бэкенда (server/payout-outlook.ts): суммы в базовой валюте,
+  // null — нет курса ЦБ для части выплат (§7.3). Нет поля — офлайн-режим без бэкенда.
+  outlook?: ProductOutlook | null;
   // Только при создании: купить на свободные деньги (реинвестирование, критик К4).
   fromCash?: boolean;
+};
+type ProductOutlook = {
+  receivedIncome: number | null;
+  expectedIncome: number | null;
+  expectedPrincipal: number | null;
+  overduePrincipal: number | null;
+  next: { date: string; types: PayoutType[]; amount: number | null; forecast: boolean } | null;
+  lastDate: string | null;
+  expectedCount: number;
 };
 type ProductValuation = {
   value: number | null;
@@ -1839,12 +1851,7 @@ function AppMvp() {
           <Route
             path="/products/:id"
             element={
-              <ProductDetailPage
-                products={products}
-                transactions={transactions}
-                payments={payments}
-                onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
-              />
+              <ProductDetailPage products={products} transactions={transactions} payments={payments} />
             }
           />
           <Route
@@ -3512,93 +3519,228 @@ const frequencyLabels: Record<string, string> = { monthly: "Ежемесячно
 const frequencyLabel = (value: string | undefined) => (value ? frequencyLabels[value.trim().toLowerCase()] ?? value : undefined);
 const percentText = (value: number | undefined) =>
   value === undefined ? undefined : `${value.toLocaleString("ru-RU", { maximumFractionDigits: 3 })}%`;
-// Главные параметры инструмента по его типу (CLIENT_FLOW_PLAN §4.3): у вклада — ставка и
-// срок, у облигации — купон и погашение, у акции — количество и цены. Пустые не выводятся.
-function instrumentParams(product: Product): [string, React.ReactNode][] {
-  const date = (value: string | undefined) => (value && parseIsoDate(value) ? fullDate(value) : undefined);
-  const price = (value: number | undefined) => (value === undefined ? undefined : preciseMoney(value));
-  const currentPrice = quotedTypes.has(product.type)
-    ? product.currentPrice !== undefined
-      ? `${preciseMoney(product.currentPrice)}${product.priceUpdatedAt ? ` · ${formatDateTime(product.priceUpdatedAt)}` : ""}`
-      : "Актуальная цена недоступна"
-    : undefined;
-  // Цена покупки и текущая цена — за одну бумагу: стоимость и вложено уже в шапке карточки.
-  const rows: [string, React.ReactNode | undefined][] =
+// Ключевые параметры одной строкой под суммой (UI_UNIFICATION_PLAN §2): у вклада — ставка
+// и выплата процентов, у облигации — купон, количество и цена, у акции и фонда — количество
+// и цены. Тот же формат «факт · факт», что у строки списка. Пустые факты не выводятся.
+function instrumentFacts(product: Product): string[] {
+  const quote = product.currentPrice !== undefined
+    ? `цена ${preciseMoney(product.currentPrice)}${product.priceUpdatedAt && parseIsoDate(product.priceUpdatedAt.slice(0, 10)) ? ` на ${dateLabel(product.priceUpdatedAt.slice(0, 10))}` : ""}`
+    : "актуальная цена недоступна";
+  const quantity = product.quantity !== undefined ? `${product.quantity.toLocaleString("ru-RU")} шт.` : undefined;
+  const facts: (string | undefined)[] =
     product.type === "Вклады"
       ? [
-          ["Ставка", percentText(product.rate)],
-          ["Открыт", date(product.date)],
-          ["Окончание", date(product.termEndDate)],
-          ["Выплата процентов", frequencyLabel(product.interestPayoutFrequency)],
-          ["Капитализация", product.capitalization ? "да" : undefined],
-          [
-            "Начислено, не выплачено",
-            product.valuation?.accruedInterest ? `≈ ${preciseMoney(product.valuation.accruedInterest)} · оценка по ставке` : undefined,
-          ],
+          product.rate !== undefined ? `ставка ${percentText(product.rate)}` : undefined,
+          product.interestPayoutFrequency ? `проценты: ${frequencyLabel(product.interestPayoutFrequency)?.toLowerCase()}` : undefined,
+          product.capitalization ? "с капитализацией" : undefined,
         ]
-      : quotedTypes.has(product.type)
-        ? [
-            ["Количество", product.quantity !== undefined ? `${product.quantity.toLocaleString("ru-RU")} шт.` : undefined],
-            ["Цена покупки", price(product.averagePrice)],
-            ["Текущая цена", currentPrice],
-            ["Купон", percentText(product.couponRate)],
-            ["Погашение", date(product.maturityDate)],
-            ["Оферта", date(product.ofertaDate)],
-            ["НКД", product.type === "Облигации" && product.accruedInterest ? price(product.accruedInterest) : undefined],
-          ]
-        : [["Дата", date(product.date)]];
-  return rows.filter((row): row is [string, React.ReactNode] => row[1] !== undefined && row[1] !== "");
+      : product.type === "Облигации"
+        ? [product.couponRate !== undefined ? `купон ${percentText(product.couponRate)}` : undefined, quantity, quote]
+        : quotedTypes.has(product.type)
+          ? [quantity, product.averagePrice !== undefined ? `средняя ${preciseMoney(product.averagePrice)}` : undefined, quote]
+          : [parseIsoDate(product.date) ? `с ${dateLabel(product.date)}` : undefined];
+  return facts.filter((fact): fact is string => Boolean(fact));
 }
+function pluralRu(count: number, one: string, few: string, many: string) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+const DAY_MS = 86_400_000;
+const daysUntil = (from: string, to: string) =>
+  Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS);
+// Сколько осталось до даты: до двух месяцев — днями, дальше — годами и месяцами.
+function termLeftText(today: string, end: string) {
+  const days = daysUntil(today, end);
+  if (days <= 60) return `${days} ${pluralRu(days, "день", "дня", "дней")}`;
+  const months = Math.round(days / 30.44);
+  const years = Math.floor(months / 12);
+  const rest = months % 12;
+  return [
+    years ? `${years} ${pluralRu(years, "год", "года", "лет")}` : "",
+    rest ? `${rest} мес` : "",
+  ].filter(Boolean).join(" ");
+}
+// Чем приходит доход инструмента — для подписей «получено купонами», «ещё придёт процентами».
+const incomeWord = (type: AssetType) =>
+  type === "Облигации" ? "купонами" : type === "Вклады" ? "процентами" : "дивидендами";
+const payoutLabel = (type: PayoutType) => (type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[type]);
+
 // Направление денег операции для знака суммы в ленте: покупка и расходы уменьшают деньги.
 const OUTGOING_TRANSACTION_TYPES: TransactionType[] = ["BUY", "WITHDRAW", "FEE", "TAX"];
 function signedTransactionAmount(transaction: Transaction) {
   return `${OUTGOING_TRANSACTION_TYPES.includes(transaction.type) ? "−" : "+"}${money(transaction.amount)}`;
 }
 
+type TimelineEntry = {
+  id: string;
+  date: string;
+  label: string;
+  amount: string;
+  color: string;
+  note?: string;
+  to?: string;
+  past: boolean;
+  danger?: boolean;
+};
+// Сколько строк ленты видно по краям свёрнутого участка: прошлое — последние, будущее —
+// ближайшие; середина раскрывается на месте по нажатию.
+const TIMELINE_EDGE = 3;
+// Лента выплат инструмента (вариант C макета, docs/redesign/instrument-card-variants.html):
+// открытие, выплаты по дате и отметка «Сегодня» с текущей стоимостью. Прошедшее — бледнее,
+// будущее — в полный цвет; деление «было/будет» передаётся цветом, а не заголовками.
+function PayoutTimeline({ entries, today, todayValue }: { entries: TimelineEntry[]; today: string; todayValue: string }) {
+  const [showPast, setShowPast] = useState(false);
+  const [showFuture, setShowFuture] = useState(false);
+  const past = entries.filter((entry) => entry.past);
+  const future = entries.filter((entry) => !entry.past);
+  // Первая строка прошлого — открытие или покупка: она остаётся видна всегда.
+  const hiddenPast = showPast || past.length <= TIMELINE_EDGE + 2 ? [] : past.slice(1, past.length - TIMELINE_EDGE);
+  // Последняя дата будущего — обычно погашение или возврат тела вместе с последним купоном:
+  // все её строки всегда видны.
+  const tailStart = future.findIndex((entry) => entry.date === future[future.length - 1]?.date);
+  const hiddenFuture = showFuture || tailStart - TIMELINE_EDGE < 2 ? [] : future.slice(TIMELINE_EDGE, tailStart);
+  const row = (entry: TimelineEntry) => {
+    const body = (
+      <>
+        <span className="timeline-head">
+          <strong>{entry.label}</strong>
+          <span className={entry.danger ? "danger-text" : undefined}>{entry.amount}</span>
+        </span>
+        <small className={entry.danger ? "danger-text" : "muted"}>
+          {dateLabel(entry.date)}
+          {entry.note ? ` · ${entry.note}` : ""}
+        </small>
+      </>
+    );
+    return (
+      <li key={entry.id} className={`timeline-item ${entry.past ? "past" : ""} ${entry.color}`}>
+        {entry.to ? <Link to={entry.to}>{body}</Link> : <div>{body}</div>}
+      </li>
+    );
+  };
+  const more = (count: number, onClick: () => void, past: boolean) => (
+    <li className={`timeline-item timeline-more ${past ? "past" : ""}`}>
+      <button type="button" className="inline-link-button" onClick={onClick}>
+        ещё {count} {pluralPayouts(count)}
+      </button>
+    </li>
+  );
+  return (
+    <ol className="timeline">
+      {past.filter((entry) => !hiddenPast.includes(entry)).map((entry, index) => (
+        <Fragment key={entry.id}>
+          {row(entry)}
+          {index === 0 && hiddenPast.length > 0 && more(hiddenPast.length, () => setShowPast(true), true)}
+        </Fragment>
+      ))}
+      <li className="timeline-item timeline-today">
+        <div>
+          <span className="timeline-head">
+            <strong>Сегодня</strong>
+            <strong>{todayValue}</strong>
+          </span>
+          <small className="muted">{dateLabel(today)}</small>
+        </div>
+      </li>
+      {future.filter((entry) => !hiddenFuture.includes(entry)).map((entry, index) => (
+        <Fragment key={entry.id}>
+          {index === TIMELINE_EDGE && hiddenFuture.length > 0 && more(hiddenFuture.length, () => setShowFuture(true), false)}
+          {row(entry)}
+        </Fragment>
+      ))}
+    </ol>
+  );
+}
+
+type ProductTab = "payouts" | "history";
 function ProductDetailPage({
   products,
   transactions,
   payments,
-  onMarkReceived,
 }: {
   products: Product[];
   transactions: Transaction[];
   payments: Payment[];
-  onMarkReceived: (payment: Payment) => Promise<void>;
 }) {
-  const [markingId, setMarkingId] = useState<string | null>(null);
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const product = products.find((item) => item.id === id);
   if (!product) return <MissingRecord to="/products" />;
-  const relatedTransactions = transactions.filter(
-    (transaction) => transaction.positionId === product.id,
-  );
+  const today = todayIsoDate();
+  const relatedTransactions = transactions.filter((transaction) => transaction.positionId === product.id);
   const relatedPayments = product.instrumentId
     ? payments.filter((payment) => payment.instrumentId === product.instrumentId)
     : [];
-  // Возврат тела и погашение — возврат вложенного, а не доход (§10.3): в «получено» не идут.
-  const received = sumPayoutsBase(
-    relatedPayments.filter((payment) => payment.status === "received" && !isPrincipalPayout(payment)),
-  ).total;
-  // Просроченные не складываются с будущими (§22, BUG-22) — как в разделе «Выплаты».
-  const expected = sumPayoutsBase(
-    relatedPayments.filter((payment) => isUpcoming(payment) && !isPrincipalPayout(payment)),
-  ).total;
-  const overduePayments = relatedPayments.filter(isOverdue).sort((a, b) => a.date.localeCompare(b.date));
-  const nextPayout = nearestPayoutMap(relatedPayments).get(product.instrumentId ?? "");
-  const end = product.termEndDate || product.maturityDate;
-  async function markReceived(payment: Payment) {
-    setMarkingId(payment.id);
-    try {
-      await onMarkReceived(payment);
-    } finally {
-      setMarkingId(null);
-    }
-  }
+  const outlook = product.outlook;
   const valuation = valuationOf(product);
   const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
-  const params = instrumentParams(product);
-  // История — одна лента событий по инструменту: операции и полученные выплаты.
+  const facts = instrumentFacts(product);
+  const end = product.termEndDate || product.maturityDate;
+  const hasTerm = Boolean(!product.closedOn && end && parseIsoDate(end) && end >= today);
+  const start = parseIsoDate(product.date) ? product.date : undefined;
+  const progress = hasTerm && start && end && end > start
+    ? Math.min(100, Math.max(0, (daysUntil(start, today) / daysUntil(start, end)) * 100))
+    : null;
+  const income = incomeWord(product.type);
+  const outlookLines: [string, string, string?][] = outlook
+    ? ([
+        outlook.receivedIncome ? [`Получено ${income}`, `+${money(outlook.receivedIncome)}`, "teal-text"] : null,
+        outlook.expectedIncome ? [`Ещё придёт ${income}`, `≈ +${money(outlook.expectedIncome)}`, "teal-text"] : null,
+        outlook.expectedPrincipal
+          ? [product.type === "Вклады" ? "Вернётся вклад" : "Вернётся номинал", money(outlook.expectedPrincipal)]
+          : null,
+      ].filter(Boolean) as [string, string, string?][])
+    : [];
+  const next = !product.closedOn ? outlook?.next ?? null : null;
+  const nextLabel = next
+    ? next.types.some((type) => type === "DEPOSIT_PRINCIPAL" || type === "REDEMPTION")
+      ? product.type === "Вклады" ? "Возврат вклада" : "Погашение"
+      : payoutLabel(next.types[0])
+    : "";
+
+  // Вкладка из адреса (?tab=) — «назад» из правки операции возвращает на ту же вкладку (§40.7).
+  const requestedTab = searchParams.get("tab");
+  const tab: ProductTab = requestedTab === "history" || requestedTab === "payouts"
+    ? requestedTab
+    : relatedPayments.length > 0 ? "payouts" : "history";
+
+  const timeline: TimelineEntry[] = [
+    ...(start
+      ? [{
+          id: "open",
+          date: start,
+          label: product.type === "Вклады" ? "Открытие вклада" : "Покупка",
+          amount: money(product.invested),
+          color: "slate",
+          past: true,
+        }]
+      : []),
+    ...relatedPayments
+      .slice()
+      // В одну дату доход идёт раньше возврата вложенного: «купон, затем погашение».
+      .sort((a, b) => a.date.localeCompare(b.date) || Number(isPrincipalPayout(a)) - Number(isPrincipalPayout(b)))
+      .map((payment) => {
+        const overdue = isOverdue(payment);
+        return {
+          id: payment.id,
+          date: payment.date,
+          label: payoutLabel(payment.type),
+          amount: `+${payoutMoney(payment)}`,
+          color: payoutTypeColors[payment.type],
+          note: overdue
+            ? "дата прошла — отметьте возврат в «Выплатах»"
+            : payment.status === "received"
+              ? "получено"
+              : payment.source === "forecast" ? "прогноз" : undefined,
+          to: `/payments/${payment.id}/edit`,
+          past: payment.status === "received" || payment.date < today,
+          danger: overdue,
+        };
+      }),
+  ];
   const history = [
     ...relatedTransactions.map((transaction) => ({
       id: `t-${transaction.id}`,
@@ -3616,7 +3758,7 @@ function ProductDetailPage({
       .map((payment) => ({
         id: `p-${payment.id}`,
         date: payment.date,
-        label: payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type],
+        label: payoutLabel(payment.type),
         color: payoutTypeColors[payment.type],
         amount: `+${payoutMoney(payment)}`,
         to: `/payments/${payment.id}/edit`,
@@ -3626,220 +3768,216 @@ function ProductDetailPage({
     ["Тикер", product.ticker || undefined],
     ["ISIN", product.isin],
     ["Валюта", product.currency],
+    ["Открыт / куплен", start ? fullDate(start) : undefined],
+    ["Погашение", product.maturityDate && parseIsoDate(product.maturityDate) ? fullDate(product.maturityDate) : undefined],
+    ["Оферта", product.ofertaDate && parseIsoDate(product.ofertaDate) ? fullDate(product.ofertaDate) : undefined],
+    ["Окончание вклада", product.termEndDate && parseIsoDate(product.termEndDate) ? fullDate(product.termEndDate) : undefined],
+    ["НКД", product.type === "Облигации" && product.accruedInterest ? preciseMoney(product.accruedInterest) : undefined],
+    [
+      "Начислено, не выплачено",
+      product.type === "Вклады" && valuation.accruedInterest ? `≈ ${preciseMoney(valuation.accruedInterest)}` : undefined,
+    ],
     ["Источник данных", sourceLabels[product.source] || product.source],
-    ["Дата покупки / открытия", parseIsoDate(product.date) ? fullDate(product.date) : undefined],
   ];
-  const nextIsPrincipal = nextPayout?.parts.some(isPrincipalPayout) ?? false;
-  return (
-    <Page
-      title={product.name}
-      subtitle={[product.type, product.institution].filter(Boolean).join(" · ")}
-      back
+  const tabLink = (value: ProductTab, label: string) => (
+    <Link
+      className={tab === value ? "selected" : undefined}
+      to={`?tab=${value}`}
+      replace
+      aria-current={tab === value ? "page" : undefined}
     >
-      {product.closedOn && (
-        <div className="demo-note">
-          {product.type === "Вклады" ? "Вклад закрыт" : "Позиция погашена"}{" "}
-          {fullDate(product.closedOn)}: деньги вернулись, в стоимость портфеля позиция больше не входит.
-        </div>
-      )}
-      <article className="total-card instrument-hero">
-        <div className="card-label">{product.closedOn ? "ИТОГ" : "СТОИМОСТЬ"}</div>
-        <div className="total-value">{valueText(valuation.value)}</div>
-        {estimateNote(valuation) && <p className="muted">{estimateNote(valuation)}</p>}
-        <div className="total-stats">
-          <div>
-            <span>Вложено</span>
-            <strong>{money(product.invested)}</strong>
+      {label}
+    </Link>
+  );
+  return (
+    <Page title={product.name} subtitle={[product.type, product.institution].filter(Boolean).join(" · ")} back>
+      <div className="instrument-page">
+        {product.closedOn && (
+          <div className="demo-note">
+            {product.type === "Вклады" ? "Вклад закрыт" : "Позиция погашена"}{" "}
+            {fullDate(product.closedOn)}: деньги вернулись, в стоимость портфеля позиция больше не входит.
           </div>
-          <div>
-            <span>{product.closedOn ? "Результат" : "Доход сейчас"}</span>
-            <strong className={pnl.className}>
-              {valuation.pnl === null ? "—" : `${pnl.amountText} · ${pnl.percentText}`}
-            </strong>
-          </div>
-          <div>
-            <span>Получено выплат</span>
-            <strong>{money(received)}</strong>
-          </div>
-          {expected > 0 && (
-            <div>
-              <span>Ожидается выплат</span>
-              <strong className="teal-text">{money(expected)}</strong>
+        )}
+        <article className="total-card instrument-hero">
+          <div className="card-label">{product.closedOn ? "ИТОГ" : "СТОИМОСТЬ"}</div>
+          <div className="total-value">{valueText(valuation.value)}</div>
+          {estimateNote(valuation) ? (
+            <p className="muted">≈ {estimateNote(valuation)}</p>
+          ) : valuation.pnl !== null ? (
+            <div className="profit-line">
+              <span className={pnl.className === "teal-text" ? "positive-pill" : pnl.className === "danger-text" ? "negative-pill" : "neutral-pill"}>
+                {pnl.amountText}
+              </span>
+              <strong className={pnl.className}>{pnl.percentText}</strong>
+              <span className="muted">{product.closedOn ? "итог" : "доход сейчас"}</span>
             </div>
-          )}
-        </div>
-      </article>
-      {!product.closedOn && (overduePayments.length > 0 || nextPayout || product.forecastNote || (end && parseIsoDate(end))) && (
-        <>
-          <section className="section-heading">
-            <div>
-              <h2>Что дальше</h2>
-            </div>
-          </section>
-          <div className="product-list">
-            {overduePayments.map((payment) => (
-              <div className="list-row" key={payment.id}>
-                <div className="product-row-summary product-row-static">
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <i className={`legend type-dot ${payoutTypeColors[payment.type]}`} />
-                      <strong>{payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : payoutTypeLabels[payment.type]}</strong>
-                    </span>
-                    <span className="product-row-sum">+{payoutMoney(payment)}</span>
-                  </span>
-                  <span className="product-row-line2">
-                    <span className="danger-text product-row-meta">{dateLabel(payment.date)} · не отмечена полученной</span>
-                  </span>
+          ) : null}
+          {facts.length > 0 && <p className="instrument-facts">{facts.join(" · ")}</p>}
+        </article>
+
+        {(hasTerm || outlookLines.length > 0) && (
+          <section className="confirm-card instrument-term">
+            {hasTerm && end && (
+              <>
+                <div className="card-label">
+                  {product.type === "Вклады" ? "До окончания" : "До погашения"} · {termLeftText(today, end)}
                 </div>
-                <div className="attention-actions">
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={markingId !== null}
-                    onClick={() => void markReceived(payment)}
-                  >
-                    {markingId === payment.id ? "Сохраняем..." : "Отметить полученной"}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {nextPayout && (
-              <div className="list-row">
-                <div className="product-row-summary product-row-static">
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <i className={`legend type-dot ${payoutTypeColors[nextPayout.parts[0].type]}`} />
-                      <strong>
-                        {nextIsPrincipal
-                          ? product.type === "Вклады" ? "Возврат вклада" : "Погашение"
-                          : `Ближайшая выплата: ${payoutTypeLabels[nextPayout.parts[0].type].toLowerCase()}`}
-                      </strong>
-                    </span>
-                    <span className="product-row-sum">+{money(nextPayout.total)}</span>
-                  </span>
-                  <span className="product-row-line2">
-                    <span className="muted product-row-meta">
-                      {dateLabel(nextPayout.date)}
-                      {nextPayout.parts.length > 1 &&
-                        ` · ${nextPayout.parts
-                          .map((part) => `${part.type === "DEPOSIT_PRINCIPAL" ? "тело вклада" : payoutTypeLabels[part.type].toLowerCase()} ${payoutMoney(part)}`)
-                          .join(" + ")}`}
-                      {nextPayout.parts.some((part) => part.source === "forecast") && " · прогноз"}
-                    </span>
-                  </span>
-                </div>
-              </div>
-            )}
-            {!nextIsPrincipal && end && parseIsoDate(end) && (
-              <div className="list-row">
-                <div className="product-row-summary product-row-static">
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <strong>{product.type === "Вклады" ? "Окончание вклада" : "Погашение"}</strong>
-                    </span>
-                    <span className="product-row-sum muted">{dateLabel(end)}</span>
-                  </span>
-                </div>
-              </div>
-            )}
-            {product.forecastNote && (
-              <div className="list-row">
-                <div className="product-row-summary product-row-static">
-                  <span className="attention-text">⚠ {product.forecastNote}.</span>
-                </div>
-                {product.source !== "broker" && (
-                  <div className="attention-actions">
-                    <Link className="outline-button" to={`/products/${product.id}/edit`}>
-                      Заполнить
-                    </Link>
+                {progress !== null && (
+                  <div className="term-bar" aria-hidden="true">
+                    <i style={{ width: `${progress}%` }} />
                   </div>
                 )}
+                <div className="term-legend muted">
+                  <span>{start ? dateLabel(start) : ""}</span>
+                  <span>{dateLabel(end)}</span>
+                </div>
+              </>
+            )}
+            {outlookLines.map(([label, value, className]) => (
+              <div className="detail-line" key={label}>
+                <span>{label}</span>
+                <span className={className}>{value}</span>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {next && (
+          <div className="product-list instrument-next">
+            <Link className="product-row-summary" to={`?tab=payouts`} replace>
+              <span className="product-row-line1">
+                <span className="product-row-name">
+                  <i className={`legend type-dot ${payoutTypeColors[next.types[0]]}`} />
+                  <strong>{nextLabel} {dateLabel(next.date)}</strong>
+                </span>
+                <span className="product-row-sum teal-text">{next.amount === null ? "сумма неизвестна" : `+${money(next.amount)}`}</span>
+              </span>
+              <span className="product-row-line2">
+                <span className="muted product-row-meta">
+                  {daysUntil(today, next.date) === 0 ? "сегодня" : `через ${termLeftText(today, next.date)}`}
+                  {next.forecast ? " · прогноз" : ""}
+                </span>
+              </span>
+            </Link>
+          </div>
+        )}
+        {!product.closedOn && outlook?.overduePrincipal ? (
+          <div className="product-list instrument-next">
+            <Link className="product-row-summary" to="/payments">
+              <span className="product-row-line1">
+                <span className="product-row-name">
+                  <strong>{product.type === "Вклады" ? "Возврат вклада" : "Погашение"}</strong>
+                </span>
+                <span className="product-row-sum">{money(outlook.overduePrincipal)}</span>
+              </span>
+              <span className="product-row-line2">
+                <span className="danger-text product-row-meta">дата прошла — отметьте возврат в «Выплатах»</span>
+              </span>
+            </Link>
+          </div>
+        ) : null}
+        {!product.closedOn && product.forecastNote && (
+          <div className="product-list instrument-next">
+            <div className="list-row">
+              <div className="product-row-summary product-row-static">
+                <span className="attention-text">⚠ {product.forecastNote}.</span>
+              </div>
+              {product.source !== "broker" && (
+                <div className="attention-actions">
+                  <Link className="outline-button" to={`/products/${product.id}/edit`}>
+                    Заполнить
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <nav className="view-mode-switch instrument-tabs" aria-label="Разделы инструмента">
+          {tabLink("payouts", "Выплаты")}
+          {tabLink("history", "История")}
+        </nav>
+        {tab === "payouts" ? (
+          relatedPayments.length === 0 && !start ? (
+            <p className="muted">Выплат по этому инструменту нет.</p>
+          ) : (
+            <>
+              <PayoutTimeline
+                entries={timeline}
+                today={today}
+                todayValue={`${estimateNote(valuation) ? "≈ " : ""}${valueText(valuation.value)}`}
+              />
+              {relatedPayments.length === 0 && (
+                <p className="muted">
+                  {product.type === "Акции" || product.type === "Фонды"
+                    ? "Дивиденды появятся, когда придут или когда вы добавите их сами."
+                    : "Выплат по этому инструменту пока нет."}
+                </p>
+              )}
+              {relatedPayments.length > 0 && product.instrumentId && (
+                <Link className="outline-button timeline-all" to={`/payments?instrument=${encodeURIComponent(product.instrumentId)}`}>
+                  Все выплаты в календаре <span>→</span>
+                </Link>
+              )}
+            </>
+          )
+        ) : history.length === 0 ? (
+          <p className="muted">Операций по этому инструменту пока нет.</p>
+        ) : (
+          <PagedRows
+            items={history}
+            render={(entry) => (
+              <div className="list-row" key={entry.id}>
+                <Link className="product-row-summary" to={entry.to}>
+                  <span className="product-row-line1">
+                    <span className="product-row-name">
+                      <i className={`legend type-dot ${entry.color}`} />
+                      <strong>{entry.label}</strong>
+                    </span>
+                    <span className="product-row-sum">{entry.amount}</span>
+                  </span>
+                  <span className="product-row-line2">
+                    <span className="muted product-row-meta">{dateLabel(entry.date)}</span>
+                  </span>
+                </Link>
               </div>
             )}
-          </div>
-        </>
-      )}
-      {params.length > 0 && (
-        <>
-          <section className="section-heading">
-            <div>
-              <h2>Параметры</h2>
-            </div>
-          </section>
+          />
+        )}
+
+        <details className="more-details">
+          <summary>Ещё действия и детали</summary>
           <div className="confirm-card">
-            {params.map(([label, value]) => (
-              <div className="detail-line" key={label}>
-                <span>{label}</span>
-                <span>{value}</span>
-              </div>
-            ))}
+            {details
+              .filter((row): row is [string, string] => Boolean(row[1]))
+              .map(([label, value]) => (
+                <div className="detail-line" key={label}>
+                  <span>{label}</span>
+                  <span>{value}</span>
+                </div>
+              ))}
           </div>
-        </>
-      )}
-      <section className="section-heading">
-        <div>
-          <h2>История</h2>
-        </div>
-        {relatedPayments.length > 0 && product.instrumentId && (
-          <Link className="outline-button" to={`/payments?instrument=${encodeURIComponent(product.instrumentId)}`}>
-            Все выплаты <span>→</span>
-          </Link>
-        )}
-      </section>
-      {history.length === 0 ? (
-        <p className="muted">Операций и полученных выплат по этому инструменту пока нет.</p>
-      ) : (
-        <div className="product-list">
-          {history.map((entry) => (
-            <div className="list-row" key={entry.id}>
-              <Link className="product-row-summary" to={entry.to}>
-                <span className="product-row-line1">
-                  <span className="product-row-name">
-                    <i className={`legend type-dot ${entry.color}`} />
-                    <strong>{entry.label}</strong>
-                  </span>
-                  <span className="product-row-sum">{entry.amount}</span>
-                </span>
-                <span className="product-row-line2">
-                  <span className="muted product-row-meta">{dateLabel(entry.date)}</span>
-                </span>
+          <div className="list-row-actions detail-actions">
+            {product.type !== "Деньги" && !product.closedOn && (
+              <Link className="outline-button" to={`/payments/new?position=${encodeURIComponent(product.id)}`}>
+                ＋ Выплата
               </Link>
-            </div>
-          ))}
-        </div>
-      )}
-      <details className="more-details">
-        <summary>Подробности</summary>
-        <div className="confirm-card">
-          {details
-            .filter((row): row is [string, string] => Boolean(row[1]))
-            .map(([label, value]) => (
-              <div className="detail-line" key={label}>
-                <span>{label}</span>
-                <span>{value}</span>
-              </div>
-            ))}
-        </div>
-      </details>
-      <div className="list-row-actions detail-actions">
-        {product.type !== "Деньги" && !product.closedOn && (
-          <Link className="outline-button" to={`/payments/new?position=${encodeURIComponent(product.id)}`}>
-            ＋ Выплата
-          </Link>
-        )}
-        <Link className="outline-button" to={`/transactions/new?position=${encodeURIComponent(product.id)}`}>
-          ＋ Операция
-        </Link>
-        {product.source !== "broker" && (
-          <>
-            <Link className="outline-button" to={`/products/${product.id}/edit`}>
-              Редактировать
+            )}
+            <Link className="outline-button" to={`/transactions/new?position=${encodeURIComponent(product.id)}`}>
+              ＋ Операция
             </Link>
-            <Link className="delete-button" to={`/products/${product.id}/delete`}>
-              Удалить
-            </Link>
-          </>
-        )}
+            {product.source !== "broker" && (
+              <>
+                <Link className="outline-button" to={`/products/${product.id}/edit`}>
+                  Редактировать
+                </Link>
+                <Link className="delete-button detail-delete" to={`/products/${product.id}/delete`}>
+                  Удалить
+                </Link>
+              </>
+            )}
+          </div>
+        </details>
       </div>
     </Page>
   );
