@@ -4126,9 +4126,12 @@ function BreakdownList({
                         </>
                       )}
                     </span>
-                    <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
-                      {pnl.percentText}
-                    </span>
+                    {/* Нулевой прирост (деньги, рубли) не выводится — правило §2 «нули не показываются». */}
+                    {(item.pnl === null || Math.round(item.pnl) !== 0) && (
+                      <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
+                        {pnl.percentText}
+                      </span>
+                    )}
                   </span>
                   <span className="share-bar" aria-hidden="true">
                     <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
@@ -4212,27 +4215,22 @@ function AnalyticsPage({
         </div>
       ) : (
       <>
-      <div className="stat-strip">
-        <article className="stat-card">
-          <span>Доходность</span>
-          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
-            {signedPercent(result.percent)}
-          </strong>
-          <small>простая, за всё время</small>
-        </article>
-        <article className="stat-card">
-          <span>Результат</span>
-          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
-            {signedMoney(result.result, money)}
-          </strong>
-          <small>цена + выплаты − комиссии</small>
-        </article>
-        <article className="stat-card">
-          <span>Крупнейшая позиция</span>
-          <strong>{topInstrument ? `${Math.round(topInstrument.share ?? 0)}%` : "—"}</strong>
-          <small className="ellipsis-text">{topInstrument?.key ?? "нет данных"}</small>
-        </article>
-      </div>
+      {/* Шапка как у «Портфеля» и карточки (UI_UNIFICATION_PLAN §2): главная цифра,
+          строка результата, остальное — строкой фактов вместо отдельных плиток. */}
+      <article className="total-card instrument-hero analytics-hero">
+        <div className="card-label">РЕЗУЛЬТАТ ЗА ВСЁ ВРЕМЯ</div>
+        <div className="total-value">{signedMoney(result.result, money)}</div>
+        <div className="profit-line">
+          <span className={`${result.tone}-pill`}>{signedPercent(result.percent)}</span>
+          <span className="muted">простая доходность</span>
+        </div>
+        <p className="instrument-facts">
+          {[
+            "цена + выплаты − комиссии",
+            topInstrument ? `крупнейшая позиция — ${topInstrument.key}, ${Math.round(topInstrument.share ?? 0)}%` : null,
+          ].filter(Boolean).join(" · ")}
+        </p>
+      </article>
       <PeriodReturns rows={returns} />
       <p className="target-hint muted">
         <Link to="/analytics/taxes">Оценка НДФЛ и доходы для 3-НДФЛ</Link> — сколько налога набегает за год.

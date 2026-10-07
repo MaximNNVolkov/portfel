@@ -207,3 +207,14 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .timeline-today::before { left: -23px; width: 10px; height: 10px; border-color: var(--mint); background: var(--mint); box-shadow: 0 0 0 4px var(--mint-soft); }
 .timeline-today > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
 .timeline-all { display: inline-block; margin-top: 12px; }
+
+/* Волна 4 UI_UNIFICATION_PLAN: формы и страницы подтверждения. Поля на всю ширину
+   десктопа (850+ px) читались хуже, чем карточки рядом, — форма держит ширину
+   карточки подтверждения. */
+.inner-page .modal-form,
+.inner-page > .mode-switch,
+.inner-page > .wizard-steps,
+.inner-page > .type-grid,
+.inner-page > .upload-box { max-width: 600px; }
+.confirm-actions > .outline-button,
+.confirm-actions > .delete-button { display: inline-flex; align-items: center; justify-content: center; }
