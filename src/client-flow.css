@@ -13,6 +13,7 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .total-stats strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .total-stats a:hover span { color: var(--mint); }
 .instrument-hero { margin-top: 24px; }
+.slice-hero { margin-bottom: 18px; }
 .instrument-hero .muted { margin: 6px 0 0; font-size: 12px; }
 
 /* «Требует внимания»: название + банк/дата, ниже — что случилось и одно действие. */
@@ -48,10 +49,6 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .fold-count { color: var(--muted); font: 600 12px 'DM Sans', sans-serif; }
 .fold-total { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .breakdown-section.fold-section .fold-header { font-size: 16px; letter-spacing: -.3px; }
-.slice-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 18px; margin: 24px 0 18px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
-.slice-totals > div { display: grid; gap: 4px; min-width: 0; }
-.slice-totals span { color: var(--muted); font-size: 11px; }
-.slice-totals strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Карточка инструмента: подробности свёрнуты, действия внизу. */
 .more-details { margin-top: 26px; }
@@ -72,7 +69,6 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .total-stats { grid-template-columns: 1fr 1fr; }
   .category-block { grid-template-columns: 1fr; gap: 16px; }
   .category-block .donut-wrap { display: none; }
-  .slice-totals { grid-template-columns: 1fr 1fr; padding: 14px; }
   .attention-row { flex-direction: column; align-items: stretch; gap: 0; }
   .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
   .page-heading .primary-button .label-short { display: inline; }

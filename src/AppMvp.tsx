@@ -1835,7 +1835,7 @@ function AppMvp() {
           />
           <Route
             path="/products"
-            element={<ProductsPage products={products} payments={payments} summary={summary} storage={storage} lastRefresh={priceRefresh} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
+            element={<ProductsPage products={products} summary={summary} storage={storage} lastRefresh={priceRefresh} onRefreshPrices={withErrorToast(refreshMarketPrices, "Не удалось обновить цены")} />}
           />
           <Route
             path="/products/:id"
@@ -2441,7 +2441,6 @@ type ProductSortKey = keyof typeof PRODUCT_SORT_OPTIONS;
 function sortProducts(
   products: Product[],
   sortBy: ProductSortKey,
-  nearestPayoutByInstrument: Map<string, NearestPayout>,
 ): Product[] {
   const withIndex = products.map((product, index) => ({ product, index }));
   // Позиции без оценки (null) уходят в конец списка, а не сортируются как нулевые (§7.3).
@@ -2459,8 +2458,8 @@ function sortProducts(
     if (sortBy === "pnl") return byNumber(left.pnl, right.pnl, a.index, b.index);
     if (sortBy === "nearestPayout") {
       // Без ближайшей выплаты — в конец, как и у остальных сортировок с "нет данных" (§7.3).
-      const leftDate = a.product.instrumentId ? nearestPayoutByInstrument.get(a.product.instrumentId)?.date ?? null : null;
-      const rightDate = b.product.instrumentId ? nearestPayoutByInstrument.get(b.product.instrumentId)?.date ?? null : null;
+      const leftDate = a.product.outlook?.next?.date ?? null;
+      const rightDate = b.product.outlook?.next?.date ?? null;
       if (leftDate === null && rightDate === null) return a.index - b.index;
       if (leftDate === null) return 1;
       if (rightDate === null) return -1;
@@ -2474,30 +2473,6 @@ function sortProducts(
   });
   return withIndex.map((entry) => entry.product);
 }
-// Ближайшая будущая выплата по инструменту (тот же источник, что и календарь выплат,
-// §22 — прогноз уже посчитан бэкендом в payments, см. server/payout-forecast.ts).
-// На одну дату бывает несколько строк: в конце срока вклада — тело (DEPOSIT_PRINCIPAL)
-// и проценты (INTEREST), у облигации — последний купон и погашение. Показываем их
-// суммой, а в деталях — по частям; раньше бралась одна случайная строка из нескольких.
-type NearestPayout = { date: string; total: number; parts: Payment[] };
-const payoutPartOrder: PayoutType[] = ["DEPOSIT_PRINCIPAL", "REDEMPTION", "INTEREST", "COUPON", "DIVIDEND", "OTHER"];
-function nearestPayoutMap(payments: Payment[]): Map<string, NearestPayout> {
-  const map = new Map<string, NearestPayout>();
-  for (const payment of payments) {
-    if (!payment.instrumentId || payment.status !== "expected" || isOverdue(payment)) continue;
-    const current = map.get(payment.instrumentId);
-    if (!current || payment.date < current.date) {
-      map.set(payment.instrumentId, { date: payment.date, total: payoutBase(payment) ?? 0, parts: [payment] });
-    } else if (payment.date === current.date) {
-      current.total += payoutBase(payment) ?? 0;
-      current.parts.push(payment);
-    }
-  }
-  for (const entry of map.values()) {
-    entry.parts.sort((left, right) => payoutPartOrder.indexOf(left.type) - payoutPartOrder.indexOf(right.type));
-  }
-  return map;
-}
 // Цена с копейками — количество × цена должно давать ровно показанную сумму покупки
 // (иначе на маленьких суммах видно расхождение из-за округления money() до рублей).
 function preciseMoney(value: number): string {
@@ -2505,19 +2480,27 @@ function preciseMoney(value: number): string {
 }
 
 // Ближайшее событие инструмента для строки списка: закрыт / ближайшая выплата / окончание.
-function productEvent(product: Product, nextPayout: NearestPayout | undefined): React.ReactNode {
+// Ближайшая выплата — из прогноза бэкенда (outlook.next): все строки одной даты одной
+// суммой — в конце срока вклада это тело и проценты, у облигации последний купон и погашение.
+function productEvent(product: Product): React.ReactNode {
   if (product.closedOn) {
     return parseIsoDate(product.closedOn) ? `закрыт ${dateLabel(product.closedOn)}` : "закрыт";
   }
-  if (nextPayout) {
-    const principal = nextPayout.parts.some(isPrincipalPayout);
+  const next = product.outlook?.next;
+  if (next) {
+    const principal = next.types.some((type) => type === "DEPOSIT_PRINCIPAL" || type === "REDEMPTION");
     const label = principal
       ? product.type === "Вклады" ? "возврат" : "погашение"
-      : payoutTypeLabels[nextPayout.parts[0].type].toLowerCase();
+      : payoutTypeLabels[next.types[0]].toLowerCase();
     return (
       <>
-        {label} {dateLabel(nextPayout.date)} ·{" "}
-        <span className="product-row-meta-amount">{money(nextPayout.total)}</span>
+        {label} {dateLabel(next.date)}
+        {next.amount !== null && (
+          <>
+            {" · "}
+            <span className="product-row-meta-amount">{money(next.amount)}</span>
+          </>
+        )}
       </>
     );
   }
@@ -2529,16 +2512,14 @@ function productEvent(product: Product, nextPayout: NearestPayout | undefined): 
 // дублировало бы её. Снизу — где хранится и ближайшее событие.
 function ProductRow({
   product,
-  nextPayout,
   showInstitution,
 }: {
   product: Product;
-  nextPayout: NearestPayout | undefined;
   showInstitution: boolean;
 }) {
   const valuation = valuationOf(product);
   const pnl = pnlDisplay(valuation.pnl, valuation.pnlPercent);
-  const event = productEvent(product, nextPayout);
+  const event = productEvent(product);
   const institution = showInstitution && product.institution ? product.institution : null;
   return (
     <div className="list-row">
@@ -2592,12 +2573,10 @@ function FreeCashRow({ cash }: { cash: number | null }) {
 // не должен съедать первые 20 строк этого (П29).
 function ProductSectionList({
   items,
-  nearestPayoutByInstrument,
   showInstitution,
   cash,
 }: {
   items: Product[];
-  nearestPayoutByInstrument: Map<string, NearestPayout>;
   showInstitution: boolean;
   cash?: number | null;
 }) {
@@ -2609,7 +2588,6 @@ function ProductSectionList({
           <ProductRow
             key={product.id}
             product={product}
-            nextPayout={product.instrumentId ? nearestPayoutByInstrument.get(product.instrumentId) : undefined}
             showInstitution={showInstitution}
           />
         ))}
@@ -2621,14 +2599,12 @@ function ProductSectionList({
 }
 function ProductsPage({
   products,
-  payments,
   summary,
   storage,
   lastRefresh,
   onRefreshPrices,
 }: {
   products: Product[];
-  payments: Payment[];
   summary: PortfolioSummary | null;
   storage: StructureBreakdown[] | null;
   lastRefresh: PriceRefreshResult | null;
@@ -2656,7 +2632,6 @@ function ProductsPage({
     setSearchParams(next, { replace: true });
   }
   const [sortBy, setSortBy] = useState<ProductSortKey>("value");
-  const nearestPayoutByInstrument = useMemo(() => nearestPayoutMap(payments), [payments]);
   // Свободные деньги — не инструмент, но входят в категорию «Деньги» на главной и в
   // «Аналитике»: без этой строки категория здесь не сходилась с итогом (П8). К банку их
   // не привязать (пополнение вводится без счёта), поэтому при фильтре по банку строки нет.
@@ -2673,7 +2648,7 @@ function ProductsPage({
     const index = groupOrder.indexOf(type);
     return index === -1 ? groupOrder.length : index;
   };
-  const sorted = sortProducts(filtered, sortBy, nearestPayoutByInstrument);
+  const sorted = sortProducts(filtered, sortBy);
   const ordered = group ? sorted : [...sorted].sort((left, right) => rank(left.type) - rank(right.type));
   const { isFolded, toggle } = useFolded();
   // Один блок на категорию, даже пока сводка с порядком категорий ещё не пришла.
@@ -2715,27 +2690,28 @@ function ProductsPage({
     : bank ? "Что хранится в этом банке" : "Все инструменты портфеля по категориям";
   return (
     <Page title={title} subtitle={subtitle} back={Boolean(group || bank)}>
+      {/* Шапка среза — как у «Портфеля» и карточки инструмента (UI_UNIFICATION_PLAN §2):
+          крупная сумма, строка результата, остальное — строкой фактов. Нулевой доход
+          (у денег, у вклада в первый день) не выводится. */}
       {totals && totalsPnl && (
-        <div className="slice-totals">
-          <div>
-            <span>Стоимость</span>
-            <strong>{money(totals.value)}</strong>
-          </div>
-          <div>
-            <span>Вложено</span>
-            <strong>{money(totals.invested)}</strong>
-          </div>
-          <div>
-            <span>Доход</span>
-            <strong className={totalsPnl.className}>
-              {totals.pnlPercent === null ? totalsPnl.amountText : `${totalsPnl.amountText} · ${totalsPnl.percentText}`}
-            </strong>
-          </div>
-          <div>
-            <span>Доля портфеля</span>
-            <strong>{Math.round(totals.share ?? 0)}%</strong>
-          </div>
-        </div>
+        <article className="total-card instrument-hero slice-hero">
+          <div className="card-label">{group ? "СТОИМОСТЬ КАТЕГОРИИ" : "ХРАНИТСЯ В БАНКЕ"}</div>
+          <div className="total-value">{money(totals.value)}</div>
+          {totals.pnl !== null && Math.round(totals.pnl) !== 0 && (
+            <div className="profit-line">
+              <span className={totals.pnl > 0 ? "positive-pill" : "negative-pill"}>{totalsPnl.amountText}</span>
+              <strong className={totalsPnl.className}>{totalsPnl.percentText}</strong>
+              <span className="muted">доход сейчас</span>
+            </div>
+          )}
+          <p className="instrument-facts">
+            {[
+              totals.invested > 0 && Math.round(totals.invested) !== Math.round(totals.value) ? `вложено ${money(totals.invested)}` : null,
+              totals.share !== null && totals.share !== undefined ? `${Math.round(totals.share)}% портфеля` : null,
+              filtered.length > 0 ? `${filtered.length} ${pluralInstruments(filtered.length)}` : null,
+            ].filter(Boolean).join(" · ")}
+          </p>
+        </article>
       )}
       <div className="toolbar">
         <Link className="primary-button" to="/products/new">
@@ -2818,7 +2794,6 @@ function ProductsPage({
           const list = (
             <ProductSectionList
               items={section.items}
-              nearestPayoutByInstrument={nearestPayoutByInstrument}
               showInstitution={!bank}
               cash={section.type === "Деньги" && showCash ? cash : undefined}
             />
@@ -2856,12 +2831,25 @@ function TransactionsPage({
   const [typeFilter, setTypeFilter] = useState<TransactionType | "all">("all");
   const [bankFilter, setBankFilter] = useState("all");
   const positionById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+  // Инструмент — в адресе (?position=): на него ведёт вкладка «История» карточки, и «назад»
+  // возвращает в карточку (§40.7).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const positionFilter = searchParams.get("position") || "all";
+  const filterPosition = positionFilter !== "all" ? positionById.get(positionFilter) : undefined;
+  function setPositionFilter(value: string) {
+    const next = new URLSearchParams(searchParams);
+    if (value === "all") next.delete("position");
+    else next.set("position", value);
+    setSearchParams(next, { replace: true });
+  }
+  const positionOptions = products.filter((product) => transactions.some((transaction) => transaction.positionId === product.id));
   const institutionOf = (transaction: Transaction) =>
     transaction.institution ?? (transaction.positionId ? positionById.get(transaction.positionId)?.institution : undefined);
   const banks = Array.from(new Set(transactions.map(institutionOf).filter((name): name is string => Boolean(name)))).sort();
   const types = Array.from(new Set(transactions.map((transaction) => transaction.type)));
   // Свежие сверху: клиент открывает операции, чтобы найти недавнее, а не первую покупку.
   const filtered = transactions
+    .filter((transaction) => positionFilter === "all" || transaction.positionId === positionFilter)
     .filter((transaction) => typeFilter === "all" || transaction.type === typeFilter)
     .filter((transaction) => bankFilter === "all" || institutionOf(transaction) === bankFilter)
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -2954,7 +2942,11 @@ function TransactionsPage({
     );
   }
   return (
-    <Page title="Операции" subtitle="Покупки, продажи и движение денег">
+    <Page
+      title="Операции"
+      subtitle={filterPosition ? filterPosition.name : "Покупки, продажи и движение денег"}
+      back={Boolean(filterPosition)}
+    >
       <div className="toolbar">
         <Link className="primary-button" to="/transactions/new">
           <span className="label-full">＋ Новая операция</span>
@@ -2972,6 +2964,17 @@ function TransactionsPage({
               ))}
             </select>
           </label>
+          {positionOptions.length > 0 && (
+            <label className="inline-select">
+              <span>Инструмент</span>
+              <select value={positionFilter} onChange={(event) => setPositionFilter(event.target.value)}>
+                <option value="all">Все инструменты</option>
+                {positionOptions.map((product) => (
+                  <option key={product.id} value={product.id}>{product.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           {banks.length > 1 && (
             <label className="inline-select">
               <span>Банк / брокер</span>
@@ -4002,6 +4005,11 @@ function ProductDetailPage({
               </div>
             )}
           />
+        )}
+        {tab === "history" && relatedTransactions.length > 0 && (
+          <Link className="outline-button timeline-all" to={`/transactions?position=${encodeURIComponent(product.id)}`}>
+            Все операции по инструменту <span>→</span>
+          </Link>
         )}
 
         <details className="more-details">

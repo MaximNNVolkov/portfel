@@ -207,7 +207,7 @@ export function buildAttention(
       severity: payouts.some((payout) => PRINCIPAL_TYPES.has(payout.type)) ? 1 : 2,
       title: position?.name ?? (first.title || 'Выплата'),
       text: dates.size > 1
-        ? `${dates.size} ${paymentsWord(dates.size)} на ${formatMoney(amount, first.currency)} не отмечены полученными — отметьте, если деньги пришли`
+        ? `${dates.size} ${paymentsWord(dates.size)} на ${formatMoney(amount, first.currency)} ждут отметки — отметьте, если деньги пришли`
         : `${overdueLabel(payouts)[0]} ${formatMoney(amount, first.currency)} ${overdueLabel(payouts)[1]} ${inDaysAgo(daysBetween(first.date, today))} — отметьте, если деньги пришли`,
       action: 'mark_received',
       date: first.date,
