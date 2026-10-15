@@ -581,24 +581,35 @@ async function run() {
       assert.equal((await api(`/api/positions/${prolonged.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
-    // Т8: облигация с прошедшим погашением получает строку погашения, и отметка
-    // «Деньги пришли» закрывает её, а номинал возвращается в свободные деньги.
-    await test('погашенная облигация закрывается отметкой погашения', async () => {
+    // П33 (решение владельца 15.10): облигация с прошедшим погашением закрывается сама —
+    // погашение отмечается полученным, номинал возвращается в свободные деньги. Без номинала
+    // погашение заводится на сумму вложения.
+    await test('погашенная облигация закрывается сама', async () => {
       const before = await api('/api/portfolio/summary', { token: tokenA })
       const bond = await api('/api/positions', {
         method: 'POST', token: tokenA,
         body: { name: 'Смоук-тест погашенная ОФЗ', type: 'Облигация', amount: 9800, date: '2024-01-10', quantity: 10, nominal: 1000, maturityDate: '2025-06-01' },
       })
+      const bare = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест облигация без номинала', type: 'Облигация', amount: 5000, date: '2024-01-10', maturityDate: '2025-06-01' },
+      })
       assert.equal(bond.status, 201)
-      const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === bond.json.instrumentId)
-      assert.deepEqual(own.map((payout: { type: string; amount: number; overdue: boolean }) => [payout.type, payout.amount, payout.overdue]), [['REDEMPTION', 10000, true]])
-      assert.equal((await api(`/api/payouts/${own[0].id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })).status, 200)
-      const closed = await api(`/api/positions/${bond.json.id}`, { token: tokenA })
-      assert.equal(closed.json.closedOn, '2025-06-01')
+      assert.equal(bare.status, 201)
+      const payouts = (await api('/api/payouts', { token: tokenA })).json
+      const own = payouts.filter((payout: { instrumentId: string }) => payout.instrumentId === bond.json.instrumentId)
+      assert.deepEqual(own.map((payout: { type: string; amount: number; status: string }) => [payout.type, payout.amount, payout.status]), [['REDEMPTION', 10000, 'received']])
+      const bareOwn = payouts.filter((payout: { instrumentId: string }) => payout.instrumentId === bare.json.instrumentId)
+      assert.deepEqual(bareOwn.map((payout: { type: string; amount: number; status: string }) => [payout.type, payout.amount, payout.status]), [['REDEMPTION', 5000, 'received']])
+      assert.equal((await api(`/api/positions/${bond.json.id}`, { token: tokenA })).json.closedOn, '2025-06-01')
+      assert.equal((await api(`/api/positions/${bare.json.id}`, { token: tokenA })).json.closedOn, '2025-06-01')
       const summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 10000))
-      await api(`/api/payouts/${own[0].id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 15000))
+      for (const payout of [...own, ...bareOwn]) {
+        await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      }
       assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await api(`/api/positions/${bare.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
     await test('оценка НДФЛ учитывает купон года, выгрузка — CSV', async () => {

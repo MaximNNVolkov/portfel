@@ -227,22 +227,36 @@ export async function syncTransactionForPayout(client: Db, userId: string, payou
   payout.transactionId = transaction.id
 }
 
-// Вклад закрывается сам в дату окончания (П32, решение владельца 15.10): банк возвращает
-// тело и проценты без участия пользователя, поэтому прошедшие ожидаемые выплаты по вкладу
-// с истёкшим сроком отмечаются полученными — деньги уходят в свободные (через ту же
-// связанную операцию, что и ручная отметка), позиция закрывается (closed_on) и пропадает
-// из списка инструментов. Вклад без прогноза (нет ставки) получает возврат тела на сумму
-// вложения. Автопролонгация продлевает срок — такой вклад не закрываем. Брокерские вклады
-// не трогаем: их деньги приходят синхронизацией.
-export async function autoCloseMaturedDeposits(client: Db, userId: string, today = localDate()): Promise<number> {
+// Вклад и облигация закрываются сами в дату окончания/погашения (П32, П33 — решения
+// владельца 15.10): банк и эмитент возвращают деньги без участия пользователя, поэтому
+// прошедшие ожидаемые выплаты по такой позиции (проценты, купоны, тело, номинал)
+// отмечаются полученными — деньги уходят в свободные (через ту же связанную операцию, что
+// и ручная отметка), позиция закрывается (closed_on) и пропадает из списка инструментов.
+// Без прогноза (у вклада нет ставки, у облигации номинала или количества) возврат
+// заводится на сумму номинала, а если он неизвестен — на сумму вложения. Автопролонгация
+// продлевает вклад — такой не закрываем; облигацию, купленную уже после даты погашения,
+// считаем ошибкой ввода (как и прогноз). Брокерские позиции не трогаем: их деньги
+// приходят синхронизацией.
+function maturityOf(position: Position): string | undefined {
+  const instrument = position.instrument
+  if (instrument.groupType === 'deposit') return instrument.autoProlongation ? undefined : instrument.termEndDate ?? instrument.maturityDate
+  if (instrument.groupType === 'bond') {
+    const end = instrument.maturityDate
+    return end && (!position.openedOn || position.openedOn < end) ? end : undefined
+  }
+  return undefined
+}
+
+export async function autoCloseMaturedPositions(client: Db, userId: string, today = localDate()): Promise<number> {
   const positions = (await listPositions(client, userId)).filter((position) => {
-    const end = position.instrument.termEndDate ?? position.instrument.maturityDate
-    return position.instrument.groupType === 'deposit' && !position.closedOn && position.source !== 'broker'
-      && !position.instrument.autoProlongation && Boolean(end) && end! <= today
+    const end = maturityOf(position)
+    return !position.closedOn && position.source !== 'broker' && Boolean(end) && end! <= today
   })
   if (positions.length === 0) return 0
   const payouts = await listPayouts(client, userId)
   for (const position of positions) {
+    const end = maturityOf(position)!
+    const isBond = position.instrument.groupType === 'bond'
     const own = payouts.filter((payout) => payout.instrumentId === position.instrumentId && payout.accountId === position.accountId)
     for (const payout of own) {
       if (payout.status !== 'expected' || payout.date > today || payout.source === 'broker') continue
@@ -250,18 +264,23 @@ export async function autoCloseMaturedDeposits(client: Db, userId: string, today
       await syncTransactionForPayout(client, userId, received)
       await updatePayout(client, userId, received)
     }
-    if (!own.some((payout) => payout.type === 'DEPOSIT_PRINCIPAL') && position.invested > 0) {
+    // Закрывает позицию только возврат тела вклада или погашение не раньше даты погашения
+    // (CLOSING_PAYOUT_SQL в repository.ts) — без такой строки заводим её сами.
+    const closing = own.some((payout) => isBond ? payout.type === 'REDEMPTION' && payout.date >= end : payout.type === 'DEPOSIT_PRINCIPAL')
+    const faceValue = isBond && position.instrument.nominal && position.quantity ? position.instrument.nominal * position.quantity : null
+    const amount = faceValue ?? position.invested
+    if (!closing && amount > 0) {
       const principal: Payout = {
         id: randomUUID(),
         accountId: position.accountId,
         instrumentId: position.instrumentId,
-        date: (position.instrument.termEndDate ?? position.instrument.maturityDate)!,
-        type: 'DEPOSIT_PRINCIPAL',
-        amount: position.invested,
+        date: end,
+        type: isBond ? 'REDEMPTION' : 'DEPOSIT_PRINCIPAL',
+        amount: Math.round(amount * 100) / 100,
         currency: position.instrument.currency,
         status: 'received',
         source: 'manual',
-        description: `Возврат вклада «${position.instrument.name}»`,
+        description: isBond ? `Погашение номинала «${position.instrument.name}»` : `Возврат вклада «${position.instrument.name}»`,
       }
       await syncTransactionForPayout(client, userId, principal, false)
       await insertPayout(client, principal)
@@ -304,8 +323,8 @@ export async function regenerateForecastPayouts(
       created += 1
     }
   }
-  // Прогноз уже на месте — по нему и закрываются вклады с истёкшим сроком.
-  await autoCloseMaturedDeposits(client, userId, today)
+  // Прогноз уже на месте — по нему и закрываются вклады и облигации с истёкшим сроком.
+  await autoCloseMaturedPositions(client, userId, today)
   return created
 }
 
