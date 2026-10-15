@@ -33,7 +33,7 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, refreshMarketPrices, regenerateForecastPayouts, TINKOFF_PROVIDER, localDate, portfolioResult,
+  performTinkoffSync, syncPayoutForTransaction, syncTransactionForPayout, refreshMarketPrices, regenerateForecastPayouts, localDate, portfolioResult,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
@@ -1205,48 +1205,6 @@ app.patch('/api/payouts/:id', async (request, response) => {
     response.json(payoutToWire(updated, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить выплату') }) }
 })
-// Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
-// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
-// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
-// операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
-// их деньги приходят синхронизацией.
-const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
-  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION', DEPOSIT_PRINCIPAL: 'REDEMPTION',
-}
-async function syncTransactionForPayout(client: Db, userId: string, payout: Payout, stored = true) {
-  if (payout.source === 'broker' || payout.institution === TINKOFF_PROVIDER) return
-  const type = TRANSACTION_BY_PAYOUT[payout.type]
-  if (payout.status !== 'received' || !type) {
-    if (!payout.transactionId) return
-    const linked = payout.transactionId
-    payout.transactionId = undefined
-    if (stored) await updatePayout(client, userId, payout)
-    await deleteTransaction(client, userId, linked)
-    return
-  }
-  const transaction: Transaction = {
-    id: payout.transactionId ?? randomUUID(),
-    accountId: payout.accountId,
-    instrumentId: payout.instrumentId,
-    type,
-    date: payout.date,
-    amount: payout.amount,
-    currency: payout.currency,
-    commission: 0,
-    tax: 0,
-    source: 'manual',
-    description: payout.description,
-  }
-  if (payout.transactionId) {
-    const existing = await findTransaction(client, userId, payout.transactionId)
-    if (existing) {
-      await updateTransaction(client, userId, { ...existing, date: payout.date, amount: payout.amount, currency: payout.currency })
-      return
-    }
-  }
-  await insertTransaction(client, transaction)
-  payout.transactionId = transaction.id
-}
 
 app.delete('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return

@@ -518,24 +518,10 @@ async function run() {
       assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
-    // Замечание 20 (FIX_PLAN 2.8): вклад с истёкшим сроком даёт проценты и возврат тела,
-    // и они приходят просроченными, а не пропадают.
-    await test('вклад с истёкшим сроком попадает в календарь просроченными выплатами', async () => {
-      const deposit = await api('/api/positions', {
-        method: 'POST', token: tokenA,
-        body: { name: 'Смоук-тест старый вклад', type: 'Вклад', amount: 500000, date: '2020-01-01', rate: 16, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
-      })
-      assert.equal(deposit.status, 201)
-      const payouts = await api('/api/payouts', { token: tokenA })
-      const own = payouts.json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
-      assert.deepEqual(own.map((payout: { type: string }) => payout.type).sort(), ['DEPOSIT_PRINCIPAL', 'INTEREST'])
-      assert.ok(own.every((payout: { overdue: boolean; status: string }) => payout.overdue && payout.status === 'expected'))
-      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
-    })
-
-    // Вклад, тело которого отмечено полученным, закрыт: не входит в стоимость портфеля,
-    // а тело не считается доходом — в результат идут только проценты.
-    await test('полученный возврат тела закрывает вклад без двойного счёта', async () => {
+    // П32 (решение владельца 15.10): вклад с истёкшим сроком закрывается сам — возврат тела
+    // и проценты отмечаются полученными, деньги уходят в свободные, позиция закрыта и не
+    // входит в стоимость портфеля; тело не считается доходом — в результат идут только проценты.
+    await test('вклад с истёкшим сроком закрывается сам без двойного счёта', async () => {
       const before = await api('/api/portfolio/summary', { token: tokenA })
       const deposit = await api('/api/positions', {
         method: 'POST', token: tokenA,
@@ -543,11 +529,8 @@ async function run() {
       })
       assert.equal(deposit.status, 201)
       const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
-      const open = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(open.json.total, before.json.total + 200000)
-      for (const payout of own) {
-        assert.equal((await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })).status, 200)
-      }
+      assert.deepEqual(own.map((payout: { type: string }) => payout.type).sort(), ['DEPOSIT_PRINCIPAL', 'INTEREST'])
+      assert.ok(own.every((payout: { status: string }) => payout.status === 'received'))
       const interest = own.find((payout: { type: string }) => payout.type === 'INTEREST').amount
       const closed = await api(`/api/positions/${deposit.json.id}`, { token: tokenA })
       assert.equal(closed.json.closedOn, '2021-01-01')
@@ -561,10 +544,41 @@ async function run() {
       assert.equal(summary.json.paid, before.json.paid + interest)
       assert.equal(Math.round(summary.json.financialResult), Math.round(before.json.financialResult + interest))
       assert.equal(Math.round(summary.json.contributed), Math.round(before.json.contributed + 200000))
+      // Повторный пересчёт (правка, суточный цикл) не задваивает выплаты и деньги.
+      await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { rate: 10 } })
+      const again = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
+      assert.equal(again.length, 2)
+      assert.equal(Math.round((await api('/api/portfolio/summary', { token: tokenA })).json.cash), Math.round(summary.json.cash))
       for (const payout of own) {
         await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
       }
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+    })
+
+    // Вклад без ставки прогноза не получает — при истёкшем сроке возвращается сумма вложения.
+    // Вклад с автопролонгацией продлевается, а не закрывается.
+    await test('вклад без ставки закрывается возвратом вложения, с пролонгацией — нет', async () => {
+      const plain = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест вклад без ставки', type: 'Вклад', amount: 70000, date: '2020-01-01', termEndDate: '2021-01-01' },
+      })
+      const prolonged = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест вклад с пролонгацией', type: 'Вклад', amount: 50000, date: '2020-01-01', rate: 8, termEndDate: '2021-01-01', autoProlongation: true },
+      })
+      assert.equal(plain.status, 201)
+      assert.equal(prolonged.status, 201)
+      const payouts = (await api('/api/payouts', { token: tokenA })).json
+      const plainOwn = payouts.filter((payout: { instrumentId: string }) => payout.instrumentId === plain.json.instrumentId)
+      assert.deepEqual(plainOwn.map((payout: { type: string; amount: number; status: string }) => [payout.type, payout.amount, payout.status]), [['DEPOSIT_PRINCIPAL', 70000, 'received']])
+      assert.equal((await api(`/api/positions/${plain.json.id}`, { token: tokenA })).json.closedOn, '2021-01-01')
+      const prolongedPosition = await api(`/api/positions/${prolonged.json.id}`, { token: tokenA })
+      assert.equal(prolongedPosition.json.closedOn, undefined)
+      for (const payout of plainOwn) {
+        await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      }
+      assert.equal((await api(`/api/positions/${plain.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await api(`/api/positions/${prolonged.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
     // Т8: облигация с прошедшим погашением получает строку погашения, и отметка

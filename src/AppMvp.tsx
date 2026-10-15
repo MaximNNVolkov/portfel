@@ -2655,14 +2655,17 @@ function ProductsPage({
   }
   const [sortBy, setSortBy] = useState<ProductSortKey>("value");
   const nearestPayoutByInstrument = useMemo(() => nearestPayoutMap(payments), [payments]);
+  // Закрытые вклады и погашенные бумаги в списке не показываем (П32, решение владельца):
+  // в портфель они уже не входят, карточка открывается из операций и выплат.
+  const active = products.filter((product) => !product.closedOn);
   // Свободные деньги — не инструмент, но входят в категорию «Деньги» на главной и в
   // «Аналитике»: без этой строки категория здесь не сходилась с итогом (П8). К банку их
   // не привязать (пополнение вводится без счёта), поэтому при фильтре по банку строки нет.
   const cash = summary?.cash;
   const showCash = cash !== undefined && cash !== 0 && !bank && (!group || group === "Деньги");
-  const productTypes = Array.from(new Set([...products.map((product) => product.type), ...(showCash ? ["Деньги" as AssetType] : [])]));
-  const banks = Array.from(new Set(products.map((product) => product.institution).filter(Boolean))).sort();
-  const filtered = products.filter(
+  const productTypes = Array.from(new Set([...active.map((product) => product.type), ...(showCash ? ["Деньги" as AssetType] : [])]));
+  const banks = Array.from(new Set(active.map((product) => product.institution).filter(Boolean))).sort();
+  const filtered = active.filter(
     (product) => (!group || product.type === group) && (!bank || product.institution === bank),
   );
   // Без выбранной категории список идёт блоками по категориям в порядке их веса в портфеле.
@@ -2807,7 +2810,7 @@ function ProductsPage({
       )}
       {ordered.length === 0 && !showCash ? (
         <p className="muted">
-          {products.length === 0
+          {active.length === 0
             ? "Пока нет добавленных инструментов."
             : "Нет инструментов, подходящих под выбранный фильтр."}
         </p>
