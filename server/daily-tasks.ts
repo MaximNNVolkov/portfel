@@ -10,10 +10,10 @@ import { aggregateByGroup, calculateReturns, convertCurrency, sumInBase, type As
 import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
-  findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
-  deleteForecastPayouts, deletePayoutsForTransaction, listPayouts, listPositions, updatePosition,
+  findTransaction, findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
+  deleteForecastPayouts, deletePayoutsForTransaction, deleteTransaction, listPayouts, listPositions, updatePayout, updatePosition, updateTransaction,
   recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
-  type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction,
+  type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
 
 // Базовая валюта — настраиваемое поле портфеля (§13, §6.10), RUB — только дефолт для
@@ -184,6 +184,92 @@ export async function syncPayoutForTransaction(client: Db, transaction: Transact
   } satisfies Payout)
 }
 
+// Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
+// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
+// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
+// операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
+// их деньги приходят синхронизацией.
+const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
+  COUPON: 'COUPON', DIVIDEND: 'DIVIDEND', INTEREST: 'INTEREST', REDEMPTION: 'REDEMPTION', DEPOSIT_PRINCIPAL: 'REDEMPTION',
+}
+export async function syncTransactionForPayout(client: Db, userId: string, payout: Payout, stored = true) {
+  if (payout.source === 'broker' || payout.institution === TINKOFF_PROVIDER) return
+  const type = TRANSACTION_BY_PAYOUT[payout.type]
+  if (payout.status !== 'received' || !type) {
+    if (!payout.transactionId) return
+    const linked = payout.transactionId
+    payout.transactionId = undefined
+    if (stored) await updatePayout(client, userId, payout)
+    await deleteTransaction(client, userId, linked)
+    return
+  }
+  const transaction: Transaction = {
+    id: payout.transactionId ?? randomUUID(),
+    accountId: payout.accountId,
+    instrumentId: payout.instrumentId,
+    type,
+    date: payout.date,
+    amount: payout.amount,
+    currency: payout.currency,
+    commission: 0,
+    tax: 0,
+    source: 'manual',
+    description: payout.description,
+  }
+  if (payout.transactionId) {
+    const existing = await findTransaction(client, userId, payout.transactionId)
+    if (existing) {
+      await updateTransaction(client, userId, { ...existing, date: payout.date, amount: payout.amount, currency: payout.currency })
+      return
+    }
+  }
+  await insertTransaction(client, transaction)
+  payout.transactionId = transaction.id
+}
+
+// Вклад закрывается сам в дату окончания (П32, решение владельца 15.10): банк возвращает
+// тело и проценты без участия пользователя, поэтому прошедшие ожидаемые выплаты по вкладу
+// с истёкшим сроком отмечаются полученными — деньги уходят в свободные (через ту же
+// связанную операцию, что и ручная отметка), позиция закрывается (closed_on) и пропадает
+// из списка инструментов. Вклад без прогноза (нет ставки) получает возврат тела на сумму
+// вложения. Автопролонгация продлевает срок — такой вклад не закрываем. Брокерские вклады
+// не трогаем: их деньги приходят синхронизацией.
+export async function autoCloseMaturedDeposits(client: Db, userId: string, today = localDate()): Promise<number> {
+  const positions = (await listPositions(client, userId)).filter((position) => {
+    const end = position.instrument.termEndDate ?? position.instrument.maturityDate
+    return position.instrument.groupType === 'deposit' && !position.closedOn && position.source !== 'broker'
+      && !position.instrument.autoProlongation && Boolean(end) && end! <= today
+  })
+  if (positions.length === 0) return 0
+  const payouts = await listPayouts(client, userId)
+  for (const position of positions) {
+    const own = payouts.filter((payout) => payout.instrumentId === position.instrumentId && payout.accountId === position.accountId)
+    for (const payout of own) {
+      if (payout.status !== 'expected' || payout.date > today || payout.source === 'broker') continue
+      const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source }
+      await syncTransactionForPayout(client, userId, received)
+      await updatePayout(client, userId, received)
+    }
+    if (!own.some((payout) => payout.type === 'DEPOSIT_PRINCIPAL') && position.invested > 0) {
+      const principal: Payout = {
+        id: randomUUID(),
+        accountId: position.accountId,
+        instrumentId: position.instrumentId,
+        date: (position.instrument.termEndDate ?? position.instrument.maturityDate)!,
+        type: 'DEPOSIT_PRINCIPAL',
+        amount: position.invested,
+        currency: position.instrument.currency,
+        status: 'received',
+        source: 'manual',
+        description: `Возврат вклада «${position.instrument.name}»`,
+      }
+      await syncTransactionForPayout(client, userId, principal, false)
+      await insertPayout(client, principal)
+    }
+  }
+  return positions.length
+}
+
 // §15 («система должна рассчитывать ожидаемые проценты и формировать будущие выплаты»)
 // и §22 (календарь показывает ожидаемые купоны, проценты, возврат тела и погашение).
 // Прогноз — производная от параметров инструментов, а не самостоятельные данные, поэтому
@@ -218,6 +304,8 @@ export async function regenerateForecastPayouts(
       created += 1
     }
   }
+  // Прогноз уже на месте — по нему и закрываются вклады с истёкшим сроком.
+  await autoCloseMaturedDeposits(client, userId, today)
   return created
 }
 
