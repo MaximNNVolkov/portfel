@@ -131,3 +131,5 @@
 .import-row > :not(input) { grid-column: 2; }
 /* Банковские описания без пробелов («ОПЛАТА_ПО_ДОГОВОРУ_…») не вылезают за карточку (Т25). */
 .confirm-card, .detail-line span, .import-row > :not(input), .list-row-details { overflow-wrap: anywhere; min-width: 0; }
+/* Интеграция с Hermes: вторая карточка на «Интеграциях». */
+.integration-card + .integration-card { margin-top: 18px; }.integration-subtitle { margin: 22px 0 6px; color: var(--ink); font: 700 13px 'Manrope', sans-serif; }.integration-card > .outline-button { margin-top: 12px; }.inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }.detail-line .inline-actions { margin-top: 0; }.secret-value { display: block; margin: 8px 0; padding: 8px 10px; border-radius: 5px; background: var(--paper); color: var(--ink); font-size: 11px; overflow-wrap: anywhere; user-select: all; }.integration-card > .modal-form { margin-top: 14px; }.inline-actions .inline-link-button { font-size: 12px; }

@@ -24,6 +24,7 @@ import {
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import { buildAttention } from './attention.ts'
+import { sendTestNotification, validateWebhookUrl } from './notifications.ts'
 import { couponForecastGap } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
@@ -115,6 +116,16 @@ app.use('/api', (request, response, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(request.method) || bearerToken(request)) return next()
   if (request.get('x-requested-with') !== 'portfel') return response.status(403).json({ error: 'Запрос отклонён: нет заголовка X-Requested-With' })
   next()
+})
+// Ключ внешнего клиента (Hermes, docs/HERMES.md) — не сессия: он читает портфель и может
+// только добавить продукт. Ни правки, ни удаления, ни настроек, ни управления ключами —
+// утёкший ключ не должен стоить портфеля.
+app.use('/api', (request, response, next) => {
+  if (!bearerToken(request).startsWith(API_KEY_PREFIX)) return next()
+  const readable = request.method === 'GET' && !request.path.startsWith('/auth/') && !request.path.startsWith('/integrations/')
+  const addsProduct = request.method === 'POST' && request.path === '/positions'
+  if (readable || addsProduct) return next()
+  response.status(403).json({ error: 'Ключ Hermes может только читать портфель и добавлять продукты' })
 })
 // Идентификаторы записей — UUID: «/api/positions/abc» — это «не найдено», а не падение
 // запроса к базе с ответом 500 (тестер, Т11).
@@ -246,6 +257,8 @@ function hashPassword(password: string, salt: string) { return scryptSync(passwo
 // поэтому XSS не может унести сессию. Заголовок Authorization: Bearer остаётся для
 // API-клиентов и smoke-теста (server/smoke-test.ts).
 const SESSION_COOKIE = 'portfel_session'
+// Префикс отличает ключ внешнего клиента от токена сессии ещё до запроса к базе.
+const API_KEY_PREFIX = 'pfk_'
 function bearerToken(request: Request) { const value = request.headers.authorization; return value?.startsWith('Bearer ') ? value.slice(7) : '' }
 function cookieToken(request: Request) {
   for (const part of (request.headers.cookie ?? '').split(';')) {
@@ -275,7 +288,10 @@ async function createSession(userId: string): Promise<string> {
 }
 async function currentUserId(request: Request, response: Response): Promise<string | undefined> {
   const token = authToken(request)
-  const result = token ? await db.query('SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > NOW()', [hashToken(token)]) : undefined
+  const result = !token ? undefined
+    : token.startsWith(API_KEY_PREFIX)
+      ? await db.query('UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = $1 RETURNING user_id', [hashToken(token)])
+      : await db.query('SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > NOW()', [hashToken(token)])
   const userId = result?.rows[0]?.user_id as string | undefined
   if (!userId) { response.status(401).json({ error: 'Нужно войти в аккаунт' }); return undefined }
   return userId
@@ -411,6 +427,83 @@ app.patch('/api/settings', async (request, response) => {
   const portfolio = await ensurePortfolio(db, userId, randomUUID())
   const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw, targetAllocation })
   response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES, targetAllocation: updated.targetAllocation })
+})
+
+// Интеграция с Hermes (docs/HERMES.md): ключи, по которым агент читает портфель и
+// добавляет продукты, и вебхук, куда «Портфель» шлёт уведомления. Управление — только
+// из сессии: ключ сюда не пускает middleware выше.
+type ApiKeyRow = { id: string; name: string; key_preview: string; created_at: Date; last_used_at: Date | null }
+const apiKeyToWire = (row: ApiKeyRow) => ({
+  id: row.id, name: row.name, preview: row.key_preview,
+  createdAt: new Date(row.created_at).toISOString(), lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
+})
+const MAX_API_KEYS = 10
+app.get('/api/integrations/hermes', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const [keys, webhook] = await Promise.all([
+    db.query('SELECT id, name, key_preview, created_at, last_used_at FROM api_keys WHERE user_id = $1 ORDER BY created_at', [userId]),
+    db.query('SELECT url, enabled, last_sent_at, last_error FROM notification_webhooks WHERE user_id = $1', [userId]),
+  ])
+  const hook = webhook.rows[0]
+  response.json({
+    keys: (keys.rows as ApiKeyRow[]).map(apiKeyToWire),
+    webhook: hook ? {
+      url: hook.url, enabled: hook.enabled,
+      lastSentAt: hook.last_sent_at ? new Date(hook.last_sent_at).toISOString() : null, lastError: hook.last_error,
+    } : null,
+  })
+})
+app.post('/api/integrations/hermes/keys', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const name = (optionalText(request.body?.name) ?? 'Hermes').slice(0, 100)
+  const count = await db.query('SELECT COUNT(*)::int AS count FROM api_keys WHERE user_id = $1', [userId])
+  if (count.rows[0].count >= MAX_API_KEYS) return response.status(400).json({ error: `Ключей не больше ${MAX_API_KEYS} — отзовите ненужный` })
+  // Сам ключ показывается один раз, в ответе; в базе — только sha256 и последние символы.
+  const key = `${API_KEY_PREFIX}${randomBytes(32).toString('hex')}`
+  const result = await db.query(
+    `INSERT INTO api_keys (id, user_id, name, key_hash, key_preview) VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, name, key_preview, created_at, last_used_at`,
+    [randomUUID(), userId, name, hashToken(key), `${API_KEY_PREFIX}…${key.slice(-4)}`],
+  )
+  response.status(201).json({ ...apiKeyToWire(result.rows[0] as ApiKeyRow), key })
+})
+app.delete('/api/integrations/hermes/keys/:id', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const result = await db.query('DELETE FROM api_keys WHERE id = $1 AND user_id = $2', [request.params.id, userId])
+  if (!result.rowCount) return response.status(404).json({ error: 'Ключ не найден' })
+  response.status(204).send()
+})
+app.put('/api/integrations/hermes/webhook', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    const url = validateWebhookUrl(request.body?.url)
+    const secret = optionalText(request.body?.secret)
+    const enabled = request.body?.enabled !== false
+    if (secret !== undefined && secret.length < 16) throw new Error('Секрет должен быть не короче 16 символов')
+    const existing = await db.query('SELECT 1 FROM notification_webhooks WHERE user_id = $1', [userId])
+    // Секрет можно не присылать повторно: на экране он не показывается, а адрес правят чаще.
+    if (!existing.rowCount && !secret) throw new Error('Укажите секрет вебхука — тот же, что в настройках маршрута Hermes')
+    await db.query(
+      `INSERT INTO notification_webhooks (user_id, url, encrypted_secret, enabled) VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id) DO UPDATE SET url = EXCLUDED.url, enabled = EXCLUDED.enabled, updated_at = NOW(),
+          encrypted_secret = CASE WHEN $5 THEN EXCLUDED.encrypted_secret ELSE notification_webhooks.encrypted_secret END,
+          last_error = NULL`,
+      [userId, url, encryptToken(secret ?? ''), enabled, secret !== undefined],
+    )
+    response.json({ url, enabled })
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить вебхук') }) }
+})
+app.delete('/api/integrations/hermes/webhook', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  await db.query('DELETE FROM notification_webhooks WHERE user_id = $1', [userId])
+  response.status(204).send()
+})
+app.post('/api/integrations/hermes/webhook/test', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  try {
+    await sendTestNotification(db, userId)
+    response.json({ message: 'Проверочное сообщение отправлено' })
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось отправить проверочное сообщение') }) }
 })
 
 // §11 BrokerConnection: статус подключения живёт в базе, а не в памяти процесса, иначе

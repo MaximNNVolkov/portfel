@@ -5,6 +5,7 @@ import { decryptToken } from './token-crypto.ts'
 import { performTinkoffSync, recordSnapshot, refreshMarketPrices, regenerateForecastPayouts } from './daily-tasks.ts'
 import { listPendingMigrations } from './migrations.ts'
 import { processNextDocument } from './ocr.ts'
+import { listWebhookUsers, sendPendingNotifications } from './notifications.ts'
 import { configureRateStore } from './market-data.ts'
 import {
   deleteExpiredAuthRecords, failStaleProcessingDocuments, findBrokerConnection, listAllBrokerConnections, listAllPortfolios,
@@ -133,6 +134,34 @@ async function staleDocumentLoop(): Promise<void> {
   }
 }
 
+// Уведомления во вебхук Hermes (docs/HERMES.md). Свой цикл раз в час, а не в суточном:
+// суточный цикл стартует при каждом деплое, и сообщение пришло бы в три часа ночи. Каждое
+// событие уходит один раз (notification_log), поэтому частый цикл не повторяет сообщений.
+const NOTIFY_INTERVAL_SECONDS = Number(process.env.NOTIFY_INTERVAL_SECONDS || 3600)
+const NOTIFY_TIMEZONE = process.env.NOTIFY_TIMEZONE || 'Europe/Moscow'
+const NOTIFY_FROM_HOUR = Number(process.env.NOTIFY_FROM_HOUR ?? 9)
+const NOTIFY_TO_HOUR = Number(process.env.NOTIFY_TO_HOUR ?? 22)
+
+function zonedNow(): { date: string; hour: number } {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: NOTIFY_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]))
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) }
+}
+
+async function notificationLoop(): Promise<void> {
+  for (;;) {
+    const { date, hour } = zonedNow()
+    if (hour >= NOTIFY_FROM_HOUR && hour < NOTIFY_TO_HOUR) {
+      const userIds = await listWebhookUsers(db).catch((error) => { logError('scheduler.notify-users', error); return [] as string[] })
+      for (const userId of userIds) {
+        await sendPendingNotifications(db, userId, date).catch((error) => logError('scheduler.notify', error))
+      }
+    }
+    await sleep(NOTIFY_INTERVAL_SECONDS)
+  }
+}
+
 // API и планировщик перезапускаются одновременно, а миграции применяет только API: без этого
 // ожидания первый опрос очереди OCR после деплоя с новой миграцией падал на несуществующей
 // колонке (content_hash, claimed_at). Ошибка БД здесь — тоже повод подождать, а не упасть:
@@ -162,3 +191,4 @@ await waitForSchema()
 dailyLoop()
 ocrLoop()
 staleDocumentLoop()
+notificationLoop()

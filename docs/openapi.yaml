@@ -12,7 +12,10 @@ info:
     Авторизация — заголовок `Authorization: Bearer <token>` или httpOnly-cookie
     `portfel_session` (её ставят `/api/auth/register` и `/api/auth/login`, ими же выдаётся
     токен). Изменяющий запрос (не GET/HEAD/OPTIONS) без Bearer должен нести заголовок
-    `X-Requested-With: portfel`, иначе 403 — защита от CSRF. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
+    `X-Requested-With: portfel`, иначе 403 — защита от CSRF. Ключ внешнего клиента
+    (`pfk_…`, выпускается в `/api/integrations/hermes/keys`) передаётся тем же Bearer, но даёт
+    только GET-запросы (кроме `/api/auth/*` и `/api/integrations/*`) и `POST /api/positions`,
+    остальное — 403. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
 
     Пагинация списков — `limit` (1–500) и `offset`. Без них возвращается весь список.
 
@@ -27,6 +30,7 @@ tags:
   - name: auth
   - name: settings
   - name: brokers
+  - name: integrations
   - name: market-data
   - name: positions
   - name: ocr
@@ -227,6 +231,111 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes:
+    get:
+      tags: [integrations]
+      summary: Ключи и вебхук Hermes (docs/HERMES.md)
+      description: Только из сессии. Сам ключ и секрет вебхука не возвращаются.
+      responses:
+        '200':
+          description: Ключи и настройки уведомлений
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApiKey' }
+                  webhook:
+                    oneOf:
+                      - type: 'null'
+                      - type: object
+                        properties:
+                          url: { type: string }
+                          enabled: { type: boolean }
+                          lastSentAt: { type: [string, 'null'], format: date-time }
+                          lastError: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes/keys:
+    post:
+      tags: [integrations]
+      summary: Выпустить ключ для Hermes
+      description: Ключ (`key`) показывается один раз; в базе хранится только его хеш. Не больше 10 ключей.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 100 }
+      responses:
+        '201':
+          description: Ключ выпущен
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiKey'
+                  - type: object
+                    properties:
+                      key: { type: string, pattern: '^pfk_[0-9a-f]{64}$' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes/keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    delete:
+      tags: [integrations]
+      summary: Отозвать ключ
+      responses:
+        '204': { description: 'Ключ отозван' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes/webhook:
+    put:
+      tags: [integrations]
+      summary: Сохранить вебхук уведомлений
+      description: |
+        Тело уведомления — JSON `{ event, text, items, sentAt }`, подпись в формате Generic V2
+        вебхуков Hermes: `X-Webhook-Timestamp` (секунды Unix) и `X-Webhook-Signature-V2` —
+        HMAC-SHA256 в hex от `<timestamp>.<тело>`. Секрет обязателен при первом сохранении,
+        дальше — только чтобы заменить.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                secret: { type: string, minLength: 16 }
+                enabled: { type: boolean, default: true }
+      responses:
+        '200': { description: 'Сохранено' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [integrations]
+      summary: Отключить уведомления
+      responses:
+        '204': { description: 'Вебхук удалён' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes/webhook/test:
+    post:
+      tags: [integrations]
+      summary: Отправить проверочное уведомление
+      responses:
+        '200': { description: 'Отправлено' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
 
   /api/market-data/refresh:
     post:
@@ -811,6 +920,14 @@ components:
       schema: { type: integer, minimum: 0 }
 
   schemas:
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        preview: { type: string, description: 'Префикс и последние 4 символа, например pfk_…a1b2' }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: [string, 'null'], format: date-time }
     StatementMapping:
       type: object
       description: Номера колонок (с 0); null — колонка не используется.

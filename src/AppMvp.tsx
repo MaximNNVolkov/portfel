@@ -5092,7 +5092,214 @@ function Integrations({
         )}
         {message && <div className="demo-note">{message}</div>}
       </div>
+      <HermesIntegration />
     </Page>
+  );
+}
+type HermesKey = { id: string; name: string; preview: string; createdAt: string; lastUsedAt: string | null };
+type HermesWebhook = { url: string; enabled: boolean; lastSentAt: string | null; lastError: string | null };
+// Hermes — ИИ-агент владельца (docs/HERMES.md): по ключу читает портфель и добавляет вклады,
+// а «Портфель» шлёт ему уведомления в вебхук.
+function HermesIntegration() {
+  const [keys, setKeys] = useState<HermesKey[]>([]);
+  const [webhook, setWebhook] = useState<HermesWebhook | null>(null);
+  const [newKey, setNewKey] = useState("");
+  const [confirmRevoke, setConfirmRevoke] = useState("");
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const request = async (path: string, init?: RequestInit) => {
+    const response = await apiFetch(`${apiUrl}/integrations/hermes${path}`, {
+      ...init,
+      headers: init?.body ? { "content-type": "application/json" } : undefined,
+    });
+    const result = response.status === 204 ? {} : ((await response.json()) as Record<string, unknown>);
+    if (!response.ok) throw new Error(typeof result.error === "string" ? result.error : "Не удалось выполнить действие");
+    return result;
+  };
+  const load = async () => {
+    const result = (await request("")) as { keys: HermesKey[]; webhook: HermesWebhook | null };
+    setKeys(result.keys);
+    setWebhook(result.webhook);
+    if (result.webhook) {
+      setUrl(result.webhook.url);
+      setEnabled(result.webhook.enabled);
+    }
+  };
+  useEffect(() => {
+    load().catch((error) => setMessage(errorText(error, "Не удалось загрузить настройки Hermes")));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const run = async (action: () => Promise<void>, fallback: string) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await action();
+    } catch (error) {
+      setMessage(errorText(error, fallback));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const createKey = () =>
+    run(async () => {
+      const result = (await request("/keys", { method: "POST", body: JSON.stringify({ name: "Hermes" }) })) as { key: string };
+      setNewKey(result.key);
+      await load();
+    }, "Не удалось выпустить ключ");
+  const revokeKey = (id: string) =>
+    run(async () => {
+      await request(`/keys/${id}`, { method: "DELETE" });
+      setConfirmRevoke("");
+      await load();
+    }, "Не удалось отозвать ключ");
+  const saveWebhook = (event: FormEvent) => {
+    event.preventDefault();
+    run(async () => {
+      await request("/webhook", { method: "PUT", body: JSON.stringify({ url, secret: secret || undefined, enabled }) });
+      setSecret("");
+      await load();
+      setMessage("Вебхук сохранён");
+    }, "Не удалось сохранить вебхук");
+  };
+  const testWebhook = () =>
+    run(async () => {
+      const result = (await request("/webhook/test", { method: "POST" })) as { message?: string };
+      setMessage(result.message || "Проверочное сообщение отправлено");
+      await load();
+    }, "Не удалось отправить проверочное сообщение");
+  const removeWebhook = () =>
+    run(async () => {
+      await request("/webhook", { method: "DELETE" });
+      setUrl("");
+      setSecret("");
+      setEnabled(true);
+      await load();
+    }, "Не удалось отключить уведомления");
+
+  const state = keys.length || webhook ? "connected" : "disconnected";
+  return (
+    <div className="integration-card">
+      <div className="integration-heading">
+        <div className="broker-logo">H</div>
+        <div>
+          <h2>Hermes</h2>
+          <p>ИИ-агент: отвечает про финансы, добавляет вклады, присылает уведомления</p>
+        </div>
+        <span className={`connection-state ${state}`}>{state === "connected" ? "Подключено" : "Не подключено"}</span>
+      </div>
+
+      <h3 className="integration-subtitle">Ключ доступа</h3>
+      <small className="field-hint">
+        Ключ вставляется в навык Hermes (переменная PORTFEL_API_KEY). Он даёт только чтение
+        портфеля и добавление продуктов — изменить или удалить что-либо по нему нельзя.
+      </small>
+      {keys.length > 0 && (
+        <div className="integration-facts">
+          {keys.map((key) => (
+            <div className="detail-line" key={key.id}>
+              <span>
+                {key.name} · {key.preview}
+                <br />
+                <small>
+                  {key.lastUsedAt ? `Использован ${formatDateTime(key.lastUsedAt)}` : "Ещё не использовался"}
+                </small>
+              </span>
+              {confirmRevoke === key.id ? (
+                <span className="inline-actions">
+                  <button className="outline-button danger-text" type="button" disabled={busy} onClick={() => revokeKey(key.id)}>
+                    Отозвать
+                  </button>
+                  <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke("")}>
+                    Отмена
+                  </button>
+                </span>
+              ) : (
+                <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke(key.id)}>
+                  Отозвать…
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {newKey && (
+        <div className="demo-note">
+          Скопируйте ключ сейчас — больше он показан не будет:
+          <code className="secret-value">{newKey}</code>
+          <button
+            className="outline-button"
+            type="button"
+            onClick={() => navigator.clipboard?.writeText(newKey).then(() => setMessage("Ключ скопирован"), () => undefined)}
+          >
+            Скопировать
+          </button>
+        </div>
+      )}
+      <button className="outline-button" type="button" disabled={busy} onClick={createKey}>
+        {keys.length ? "Выпустить ещё ключ" : "Выпустить ключ"}
+      </button>
+
+      <h3 className="integration-subtitle">Уведомления</h3>
+      <small className="field-hint">
+        Раз в час с 9 до 22 «Портфель» отправляет в Hermes новые события: выплаты в ближайшие
+        три дня, неотмеченные выплаты, закрытые вклады и погашенные облигации, ошибки брокера.
+        Каждое событие приходит один раз.
+      </small>
+      {webhook?.lastSentAt && (
+        <div className="integration-facts">
+          <div className="detail-line">
+            <span>Последняя отправка</span>
+            <span>{formatDateTime(webhook.lastSentAt)}</span>
+          </div>
+        </div>
+      )}
+      {webhook?.lastError && <div className="demo-note warn">⚠ {webhook.lastError}</div>}
+      <form className="modal-form" onSubmit={saveWebhook}>
+        <label>
+          Адрес вебхука Hermes
+          <input
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder="http://127.0.0.1:8644/webhooks/portfel"
+            inputMode="url"
+            required
+          />
+        </label>
+        <label>
+          Секрет подписи
+          <input
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
+            type="password"
+            placeholder={webhook ? "Сохранён — введите, чтобы заменить" : "Тот же, что в маршруте Hermes"}
+            required={!webhook}
+            minLength={16}
+          />
+        </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          Присылать уведомления
+        </label>
+        <button className="primary-button" type="submit" disabled={busy}>
+          {webhook ? "Сохранить" : "Подключить уведомления"}
+        </button>
+      </form>
+      {webhook && (
+        <div className="inline-actions">
+          <button className="outline-button" type="button" disabled={busy} onClick={testWebhook}>
+            Отправить проверку
+          </button>
+          <button className="inline-link-button" type="button" disabled={busy} onClick={removeWebhook}>
+            Отключить уведомления
+          </button>
+        </div>
+      )}
+      {message && <div className="demo-note">{message}</div>}
+    </div>
   );
 }
 function AttentionPage({
