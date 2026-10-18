@@ -1112,6 +1112,7 @@ components:
         price: { type: number, exclusiveMinimum: 0 }
         commission: { type: number }
         tax: { type: number }
+        currency: { type: string, enum: [RUB, USD, CNY], description: 'Валюта операции без инструмента (пополнение, вывод, выплата). У операции с позицией — валюта инструмента' }
 
     AttentionItem:
       type: object
@@ -1171,6 +1172,7 @@ components:
         taxes: { type: number }
         groups: { type: array, items: { type: object, additionalProperties: true } }
         valueChange: { type: [number, 'null'], description: 'Изменение цены позиций (стоимость − вложено)' }
+        realized: { type: number, description: 'Реализованный результат: продажи и погашения минус вложенное в них' }
         contributed: { type: [number, 'null'], description: 'Внесено своих денег: итог − финансовый результат' }
         rebalance:
           type: array
