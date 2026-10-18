@@ -555,6 +555,51 @@ async function run() {
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
+    // Т29: правка закрытого вклада пересчитывает выплаты при закрытии из новых параметров,
+    // продление срока открывает его снова. Т28: удаление убирает его деньги из портфеля.
+    await test('правка и удаление закрытого вклада пересчитывают деньги', async () => {
+      const before = (await api('/api/portfolio/summary', { token: tokenA })).json
+      const deposit = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест правка закрытого', type: 'Вклад', amount: 100000, date: '2020-01-01', rate: 10, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
+      })
+      assert.equal(deposit.status, 201)
+      const own = async () => (await api('/api/payouts', { token: tokenA })).json
+        .filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
+        .map((payout: { type: string; amount: number; status: string }) => [payout.type, payout.amount, payout.status])
+        .sort()
+      const interest = (await own()).find(([type]: [string]) => type === 'INTEREST')[1]
+
+      const edited = await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { invested: 200000 } })
+      assert.equal(edited.status, 200)
+      assert.equal(edited.json.closedOn, '2021-01-01')
+      const recomputed = await own()
+      assert.deepEqual(recomputed[0], ['DEPOSIT_PRINCIPAL', 200000, 'received'])
+      assert.equal(recomputed[1][0], 'INTEREST')
+      assert.ok(Math.abs(recomputed[1][1] - interest * 2) < 0.05)
+      let summary = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(Math.round(summary.financialResult), Math.round(before.financialResult + interest * 2))
+      assert.equal(Math.round(summary.cash), Math.round(before.cash + 200000 + interest * 2))
+
+      const extended = await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { termEndDate: '2099-01-01' } })
+      assert.equal(extended.json.closedOn, undefined)
+      assert.ok((await own()).every(([, , status]: [string, number, string]) => status === 'expected'))
+      summary = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(Math.round(summary.cash), Math.round(before.cash))
+
+      await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { termEndDate: '2021-01-01' } })
+      assert.equal((await api(`/api/positions/${deposit.json.id}`, { token: tokenA })).json.closedOn, '2021-01-01')
+
+      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      summary = (await api('/api/portfolio/summary', { token: tokenA })).json
+      assert.equal(Math.round(summary.cash), Math.round(before.cash))
+      assert.equal(Math.round(summary.financialResult), Math.round(before.financialResult))
+      assert.equal(Math.round(summary.contributed), Math.round(before.contributed))
+      const left = (await api('/api/transactions', { token: tokenA })).json
+        .filter((item: { instrumentId?: string }) => item.instrumentId === deposit.json.instrumentId)
+      assert.equal(left.length, 0)
+    })
+
     // Вклад без ставки прогноза не получает — при истёкшем сроке возвращается сумма вложения.
     // Вклад с автопролонгацией продлевается, а не закрывается.
     await test('вклад без ставки закрывается возвратом вложения, с пролонгацией — нет', async () => {
@@ -574,6 +619,10 @@ async function run() {
       assert.equal((await api(`/api/positions/${plain.json.id}`, { token: tokenA })).json.closedOn, '2021-01-01')
       const prolongedPosition = await api(`/api/positions/${prolonged.json.id}`, { token: tokenA })
       assert.equal(prolongedPosition.json.closedOn, undefined)
+      // Т30: пролонгируемый вклад не ждёт возврата тела — только проценты по срокам.
+      const prolongedOwn = payouts.filter((payout: { instrumentId: string }) => payout.instrumentId === prolonged.json.instrumentId)
+      assert.ok(prolongedOwn.length > 0)
+      assert.ok(prolongedOwn.every((payout: { type: string }) => payout.type === 'INTEREST'))
       for (const payout of plainOwn) {
         await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
       }

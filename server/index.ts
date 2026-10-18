@@ -34,13 +34,13 @@ import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from 
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
   portfolioEngineInputs, isCashInput, closedPositionResult,
-  performTinkoffSync, syncPayoutForTransaction, syncTransactionForPayout, refreshMarketPrices, regenerateForecastPayouts, localDate, portfolioResult,
+  performTinkoffSync, syncPayoutForTransaction, syncTransactionForPayout, refreshMarketPrices, regenerateForecastPayouts, resetClosedPositionPayouts, restoreReceivedPayouts, localDate, portfolioResult,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
 import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
 import { parseCsv, parseMapping, statementRows, type StatementRow } from './statement-import.ts'
 import {
-  deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition,
+  deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition, deletePositionHistory,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
   findCashPosition, findPayout, findPortfolio, findPosition,
   findTransaction,
@@ -747,17 +747,19 @@ app.patch('/api/positions/:id', async (request, response) => {
         openedOn: body.date !== undefined ? requiredDate(body.date, 'date') : existing.openedOn,
       }
       validateHolding(instrument, record)
+      // Закрытая позиция: выплаты при закрытии считались из старых параметров (Т29).
+      const keptReceived = existing.closedOn && existing.source !== 'broker'
+        ? await resetClosedPositionPayouts(client, userId, existing)
+        : new Set<string>()
       await updateInstrument(client, userId, instrument)
       await updatePosition(client, userId, record)
       // Ставка, срок, купон или количество могли измениться — плановые выплаты по этому
       // инструменту больше не соответствуют его параметрам и считаются заново (§15).
       await regenerateForecastPayouts(client, userId)
+      await restoreReceivedPayouts(client, userId, record, keptReceived)
       await recordSnapshot(client, userId)
-      return {
-        ...record,
-        instrument,
-        account: { id: account.id, type: account.type, provider: account.provider, currency: account.currency },
-      } satisfies Position
+      // Перечитываем: после пересчёта позиция могла закрыться или снова открыться (Т29).
+      return (await findPosition(client, userId, existing.id))!
     })
     response.json((await valuedPositions(userId, [updated]))[0])
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
@@ -768,6 +770,9 @@ app.delete('/api/positions/:id', async (request, response) => {
   if (!existing) return response.status(404).json({ error: 'Инструмент не найден' })
   await withTransaction(db, async (client) => {
     await deletePosition(client, userId, existing.id)
+    // Вместе с позицией уходят её выплаты и операции — иначе деньги удалённого вклада
+    // оставались в свободных и в результате (Т28).
+    await deletePositionHistory(client, userId, existing.accountId, existing.instrumentId)
     // Порядок важен: сначала пересчёт (он убирает прогнозные выплаты удалённой позиции),
     // и только потом удаление инструмента — иначе оставшиеся ссылки из portfolio.payouts
     // заставили бы deleteOrphanInstrument считать инструмент всё ещё используемым.
@@ -1026,10 +1031,10 @@ app.get('/api/tax/estimate', async (request, response) => {
 app.get('/api/tax/export', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
-    const { year, transactions, toRub, nameOf } = await taxInputs(request, userId)
+    const { year, transactions, toRub, nameOf, redemptionCost } = await taxInputs(request, userId)
     response.setHeader('Content-Type', 'text/csv; charset=utf-8')
     response.setHeader('Content-Disposition', `attachment; filename="dohody-${year}.csv"`)
-    response.send(taxRowsToCsv(taxIncomeRows(transactions, year, toRub, nameOf)))
+    response.send(taxRowsToCsv(taxIncomeRows(transactions, year, toRub, nameOf, redemptionCost)))
   } catch (error) { response.status(400).json({ error: clientError(error, 'Некорректный запрос') }) }
 })
 

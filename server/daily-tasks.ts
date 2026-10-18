@@ -11,7 +11,7 @@ import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransaction, findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
-  deleteForecastPayouts, deletePayoutsForTransaction, deleteTransaction, listPayouts, listPositions, updatePayout, updatePosition, updateTransaction,
+  deleteForecastPayouts, deletePayout, deletePayoutsForTransaction, deleteTransaction, listPayouts, PRINCIPAL_PAYOUT_TYPES, listPositions, updatePayout, updatePosition, updateTransaction,
   recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction, type TransactionType,
 } from './repository.ts'
@@ -287,6 +287,39 @@ export async function autoCloseMaturedPositions(client: Db, userId: string, toda
     }
   }
   return positions.length
+}
+
+// Правка закрытого вклада или облигации (тестер Т29): выплаты, отмеченные при закрытии,
+// посчитаны из старых параметров — с новой суммой возврат тела оставался прежним, а с
+// продлённым сроком позиция оставалась закрытой и обрастала прогнозом поверх возврата.
+// Перед сохранением правки все неброкерские выплаты позиции и их операции удаляются,
+// прогноз считается заново из новых параметров (и закрывает позицию снова, если срок
+// по-прежнему прошёл). Возвращаются отметки «получено» с дохода (не с возврата тела) —
+// их восстанавливает restoreReceivedPayouts, если срок продлили и позиция снова открыта.
+export async function resetClosedPositionPayouts(client: Db, userId: string, position: Position): Promise<Set<string>> {
+  const own = (await listPayouts(client, userId)).filter((payout) =>
+    payout.instrumentId === position.instrumentId && payout.accountId === position.accountId && payout.source !== 'broker')
+  const received = new Set(own
+    .filter((payout) => payout.status === 'received' && !PRINCIPAL_PAYOUT_TYPES.includes(payout.type))
+    .map((payout) => `${payout.date}|${payout.type}`))
+  for (const payout of own) {
+    await deletePayout(client, userId, payout.id)
+    if (payout.transactionId) await deleteTransaction(client, userId, payout.transactionId)
+  }
+  return received
+}
+
+export async function restoreReceivedPayouts(
+  client: Db, userId: string, position: { accountId: string; instrumentId: string }, keys: Set<string>, today = localDate(),
+): Promise<void> {
+  if (keys.size === 0) return
+  for (const payout of await listPayouts(client, userId)) {
+    if (payout.instrumentId !== position.instrumentId || payout.accountId !== position.accountId) continue
+    if (payout.status !== 'expected' || payout.date > today || !keys.has(`${payout.date}|${payout.type}`)) continue
+    const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source }
+    await syncTransactionForPayout(client, userId, received)
+    await updatePayout(client, userId, received)
+  }
 }
 
 // §15 («система должна рассчитывать ожидаемые проценты и формировать будущие выплаты»)

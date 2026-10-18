@@ -3,7 +3,7 @@
 // `npx tsx server/payout-forecast.test.ts`. Ненулевой код возврата = провал.
 
 import assert from 'node:assert/strict'
-import { addMonths, couponForecastGap, depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
+import { addMonths, couponForecastGap, depositAccruedInterest, depositTerms, forecastPayouts } from './payout-forecast.ts'
 import type { Instrument, PositionRecord } from './repository.ts'
 
 let failed = 0
@@ -218,6 +218,17 @@ test('облигация с прошедшим погашением получа
   // Брокерское погашение приходит синхронизацией, покупка после погашения — ошибка ввода.
   assert.deepEqual(forecastPayouts(position({ quantity: 5, source: 'broker' }), bond, TODAY), [])
   assert.deepEqual(forecastPayouts(position({ quantity: 5, openedOn: '2026-04-01' }), bond, TODAY), [])
+})
+
+test('автопролонгация: срок продлевается, тело не возвращается, проценты идут дальше (Т30)', () => {
+  assert.deepEqual(depositTerms('2025-01-10', '2026-01-10', true, '2026-10-18'), [['2025-01-10', '2026-01-10'], ['2026-01-10', '2027-01-10']])
+  assert.deepEqual(depositTerms('2025-01-31', '2025-04-30', true, '2025-08-01'), [['2025-01-31', '2025-04-30'], ['2025-04-30', '2025-07-31'], ['2025-07-31', '2025-10-31']])
+  assert.deepEqual(depositTerms('2025-01-10', '2026-01-10', false, '2026-10-18'), [['2025-01-10', '2026-01-10']])
+  const deposit = instrument({ rate: 12, termEndDate: '2026-01-10', autoProlongation: true })
+  const result = forecastPayouts(position({ openedOn: '2025-01-10', invested: 50000 }), deposit, '2026-10-18')
+  assert.deepEqual(result.map((payout) => [payout.type, payout.date, payout.amount]), [['INTEREST', '2026-01-10', 6000], ['INTEREST', '2027-01-10', 6000]])
+  // Начислено по текущему сроку, а не ноль «после окончания».
+  assert.equal(depositAccruedInterest(position({ openedOn: '2025-01-10', invested: 50000 }), deposit, '2026-02-09'), 493.15)
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')

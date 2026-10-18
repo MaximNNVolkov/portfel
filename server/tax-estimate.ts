@@ -178,17 +178,25 @@ export function taxIncomeRows(
   year: number,
   toRub: (amount: number, currency: string) => number | null,
   nameOf: (transaction: Transaction) => string,
+  /** Та же себестоимость погашения, что и в estimateTax: без неё CSV расходился с оценкой (Т32). */
+  redemptionCost: (transaction: Transaction) => number | undefined = () => undefined,
 ): TaxIncomeRow[] {
   return transactions
-    .filter((item) => item.date.startsWith(`${year}-`) && KIND_LABELS[item.type])
+    .filter((item) => item.date.startsWith(`${year}-`)
+      // Погашение — доход, только если известна цена покупки облигации; возврат тела
+      // вклада (тот же тип операции) доходом не является.
+      && (item.type === 'REDEMPTION' ? redemptionCost(item) !== undefined : KIND_LABELS[item.type]))
     .map((item) => {
       // Продажа без себестоимости выгружается выручкой, а не «результатом» на всю сумму
       // (критик К35); уплаченный налог — в колонку налога, а не дохода (К36).
       const withCost = item.type === 'SELL' && item.costBasis !== undefined
-      const amount = item.type === 'TAX' ? 0 : withCost ? item.amount - item.costBasis! - (item.commission || 0) : item.amount
+      const amount = item.type === 'TAX' ? 0
+        : item.type === 'REDEMPTION' ? item.amount - redemptionCost(item)!
+          : withCost ? item.amount - item.costBasis! - (item.commission || 0) : item.amount
       const kind = item.type === 'SELL'
         ? (withCost ? 'Результат продажи' : 'Выручка от продажи (себестоимость не указана)')
-        : item.type === 'TAX' ? 'Налог уплачен/удержан' : KIND_LABELS[item.type]!
+        : item.type === 'REDEMPTION' ? 'Результат погашения'
+          : item.type === 'TAX' ? 'Налог уплачен/удержан' : KIND_LABELS[item.type]!
       return {
         date: item.date,
         kind,

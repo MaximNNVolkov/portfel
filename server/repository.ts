@@ -785,6 +785,23 @@ export async function deleteTransaction(db: Db, userId: string, id: string): Pro
   return (result.rowCount ?? 0) > 0
 }
 
+// Всё, что записано по удаляемой позиции, — её выплаты и операции (покупки, полученные
+// проценты и возврат тела, которые завела отметка «получено» или автозакрытие). Без этого
+// удалённый вклад оставлял свои деньги в свободных и в результате (тестер Т28). Брокерские
+// строки не трогаем: их приносит синхронизация.
+export async function deletePositionHistory(db: Db, userId: string, accountId: string, instrumentId: string): Promise<void> {
+  await db.query(
+    `DELETE FROM portfolio.payouts o
+      WHERE o.account_id = $1 AND o.instrument_id = $3 AND o.source <> 'broker' AND ${OWNED_PAYOUT}`,
+    [accountId, userId, instrumentId],
+  )
+  await db.query(
+    `DELETE FROM portfolio.transactions t
+      WHERE t.account_id = $1 AND t.instrument_id = $3 AND t.source <> 'broker' AND ${OWNED_TRANSACTION}`,
+    [accountId, userId, instrumentId],
+  )
+}
+
 // Комиссии (§10.4) и налоги (§10.5) портфеля: и отдельные операции FEE/TAX, и поля
 // commission/tax внутри обычных операций. Считаются в базе, а не переносом всех строк в Node.
 export async function sumTransactionCosts(db: Db, userId: string): Promise<{ commissions: MoneyRow[]; taxes: MoneyRow[] }> {
