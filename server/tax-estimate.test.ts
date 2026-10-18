@@ -107,5 +107,14 @@ test('уплаченный налог в CSV — в колонке налога,
   assert.match(rows[1].kind, /Выручка/)
 })
 
+test('погашение облигации попадает в CSV результатом, возврат вклада — нет (Т32)', () => {
+  const cost = (item: Transaction) => (item.instrumentId === 'b1' ? 95_000 : undefined)
+  const rows = taxIncomeRows([
+    tx({ type: 'REDEMPTION', amount: 100_000, instrumentId: 'b1' }),
+    tx({ type: 'REDEMPTION', amount: 300_000, instrumentId: 'd1' }),
+  ], 2025, rub, () => 'x', cost)
+  assert.deepEqual(rows.map((row) => [row.kind, row.amount]), [['Результат погашения', 5_000]])
+})
+
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')
 process.exit(failed ? 1 : 0)

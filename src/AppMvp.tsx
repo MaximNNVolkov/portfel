@@ -42,6 +42,8 @@ type Product = {
   amortization?: boolean;
   rate?: number;
   capitalization?: boolean;
+  /** Вклад продлевается сам — не закрывается в дату окончания и не ждёт возврата тела (Т30). */
+  autoProlongation?: boolean;
   termEndDate?: string;
   interestPayoutFrequency?: string;
   accountId?: string;
@@ -75,6 +77,7 @@ type ProductDetails = {
   termEndDate: string;
   interestPayoutFrequency: string;
   capitalization: boolean;
+  autoProlongation: boolean;
   couponRate: string;
   couponDate: string;
   maturityDate: string;
@@ -85,6 +88,7 @@ const emptyProductDetails: ProductDetails = {
   termEndDate: "",
   interestPayoutFrequency: "",
   capitalization: false,
+  autoProlongation: false,
   couponRate: "",
   couponDate: "",
   maturityDate: "",
@@ -96,6 +100,7 @@ function productToDetails(product?: Product): ProductDetails {
     termEndDate: product?.termEndDate || "",
     interestPayoutFrequency: frequencyLabel(product?.interestPayoutFrequency) || "",
     capitalization: product?.capitalization || false,
+    autoProlongation: product?.autoProlongation || false,
     couponRate: product?.couponRate !== undefined ? String(product.couponRate) : "",
     couponDate: product?.couponDate || "",
     maturityDate: product?.maturityDate || "",
@@ -110,6 +115,7 @@ function depositPayload(details: ProductDetails) {
     termEndDate: details.termEndDate,
     interestPayoutFrequency: details.interestPayoutFrequency,
     capitalization: details.capitalization,
+    autoProlongation: details.autoProlongation,
   };
 }
 function bondPayload(details: ProductDetails) {
@@ -1468,8 +1474,8 @@ function AppMvp() {
     try {
       await deleteProductRecord(id);
       if (apiOnline) {
-        await refreshSummary();
-        await refreshPayments();
+        // Вместе с продуктом сервер удаляет его операции и выплаты (Т28).
+        await Promise.all([refreshSummary(), refreshPayments(), refreshTransactions()]);
       }
       setToast("Продукт удалён");
       navigate(returnTo);
@@ -1510,7 +1516,8 @@ function AppMvp() {
       }
       product = (await response.json()) as Product;
       // Новые ставка, срок, купон или количество — прогноз выплат пересчитан на сервере.
-      await Promise.all([refreshSummary(), refreshPayments()]);
+      // У закрытого продукта пересчитываются и выплаты при закрытии с их операциями (Т29).
+      await Promise.all([refreshSummary(), refreshPayments(), refreshTransactions()]);
     }
     setProducts((current) =>
       current.map((item) => (item.id === product.id ? product : item)),
@@ -1871,7 +1878,7 @@ function AppMvp() {
           <Route
             path="/products/:id/delete"
             element={
-              <DeleteProductPage products={products} onConfirm={removeProduct} />
+              <DeleteProductPage products={products} transactions={transactions} onConfirm={removeProduct} />
             }
           />
           <Route
@@ -3534,6 +3541,7 @@ function instrumentParams(product: Product): [string, React.ReactNode][] {
           ["Окончание", date(product.termEndDate)],
           ["Выплата процентов", frequencyLabel(product.interestPayoutFrequency)],
           ["Капитализация", product.capitalization ? "да" : undefined],
+          ["Автопролонгация", product.autoProlongation ? "да" : undefined],
           [
             "Начислено, не выплачено",
             product.valuation?.accruedInterest ? `≈ ${preciseMoney(product.valuation.accruedInterest)} · оценка по ставке` : undefined,
@@ -5894,6 +5902,14 @@ function DepositOptionalFields({
         />
         Капитализация процентов
       </label>
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={details.autoProlongation}
+          onChange={(event) => onChange("autoProlongation", event.target.checked)}
+        />
+        Автопролонгация — банк продлевает вклад сам
+      </label>
     </>
   );
 }
@@ -6283,7 +6299,8 @@ function ProductFormPage({
                       value={amount}
                       onChange={(event) => setAmount(event.target.value)}
                       type="number"
-                      min="1"
+                      min="0.01"
+                      step="any"
                       placeholder="100000"
                       required
                     />
@@ -6635,7 +6652,7 @@ function EditProductPage({
             )}
             <label>
               {type === "Вклады" ? "Сумма открытия" : "Сумма"}
-              <input value={amount} onChange={(event) => setAmount(event.target.value)} type="number" min="1" required />
+              <input value={amount} onChange={(event) => setAmount(event.target.value)} type="number" min="0.01" step="any" required />
             </label>
             {type === "Вклады" && (
               <label>
@@ -6696,9 +6713,11 @@ function EditProductPage({
 }
 function DeleteProductPage({
   products,
+  transactions,
   onConfirm,
 }: {
   products: Product[];
+  transactions: Transaction[];
   onConfirm: (id: string, returnTo: string) => void;
 }) {
   const { id } = useParams();
@@ -6709,13 +6728,23 @@ function DeleteProductPage({
   const returnTo = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/products";
   const product = products.find((item) => item.id === id);
   if (!product || !id) return <MissingRecord to={returnTo} />;
+  // Сервер удаляет вместе с продуктом его операции и выплаты (Т28) — пользователь должен
+  // знать, что свободные деньги и результат изменятся.
+  const operations = transactions.filter((item) => item.positionId === id && item.source !== "broker").length;
   return (
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
       <div className="confirm-card">
         <p>
-          Удалить <strong>{product.name}</strong> ({valueText(valuationOf(product).value)})
-          из портфеля?
+          Удалить <strong>{product.name}</strong>
+          {product.closedOn ? ` (закрыт ${fullDate(product.closedOn)})` : ` (${valueText(valuationOf(product).value)})`}
+          {" "}из портфеля?
         </p>
+        {operations > 0 && (
+          <p className="muted">
+            Вместе с ним удалятся его операции ({operations}) и выплаты — свободные деньги
+            и финансовый результат пересчитаются, как будто продукта не было.
+          </p>
+        )}
         <div className="confirm-actions">
           <Link className="outline-button" to={returnTo}>
             Отмена
@@ -7075,7 +7104,8 @@ function EditPaymentPage({
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
             type="number"
-            min="1"
+            min="0.01"
+            step="any"
             required
           />
         </label>
@@ -7249,7 +7279,8 @@ function PaymentFormPage({
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
             type="number"
-            min="1"
+            min="0.01"
+            step="any"
             required
           />
         </label>
@@ -7450,7 +7481,7 @@ function TransactionFormPage({
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
             type="number"
-            min="1"
+            min="0.01"
             step="any"
             required
           />
@@ -7548,7 +7579,8 @@ function EditTransactionPage({
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
             type="number"
-            min="1"
+            min="0.01"
+            step="any"
             required
           />
         </label>

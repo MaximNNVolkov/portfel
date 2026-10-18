@@ -71,6 +71,27 @@ function periodBounds(start: string, end: string, months: number | null): string
   return bounds
 }
 
+// Сроки вклада: один [открытие, окончание], а при автопролонгации — цепочка таких же
+// сроков, пока очередной не закончится позже сегодняшнего дня (тестер Т30): банк продлевает
+// вклад сам, тело не возвращается, проценты идут дальше. Срок в целых месяцах продлевается
+// месяцами от даты открытия (без «сползания» 31-го числа), иначе — тем же числом дней.
+export function depositTerms(start: string, end: string, autoProlongation: boolean | undefined, today: string): [string, string][] {
+  const terms: [string, string][] = [[start, end]]
+  if (!autoProlongation) return terms
+  const [startYear, startMonth] = start.split('-').map(Number)
+  const [endYear, endMonth] = end.split('-').map(Number)
+  const months = (endYear - startYear) * 12 + (endMonth - startMonth)
+  const byMonths = months > 0 && addMonths(start, months) === end
+  const days = daysBetween(start, end)
+  const endOf = (index: number) => byMonths
+    ? addMonths(start, months * index)
+    : new Date(toTime(start) + days * index * DAY_MS).toISOString().slice(0, 10)
+  for (let index = 2; index < MAX_PERIODS && daysBetween(terms[terms.length - 1][1], today) >= 0; index += 1) {
+    terms.push([terms[terms.length - 1][1], endOf(index)])
+  }
+  return terms
+}
+
 // §15: проценты по вкладу и возврат тела вклада. Капитализация не выплачивается по периодам,
 // а увеличивает базу начисления и уходит одной суммой в конце срока — поэтому оба режима
 // используют одни и те же границы периодов и отличаются только моментом выплаты.
@@ -79,7 +100,8 @@ function periodBounds(start: string, end: string, months: number | null): string
 // (Замечание 20, решение Р-1 в docs/FIX_PLAN.md): вклад с истёкшим сроком иначе молча
 // терял и проценты, и возврат тела. Прошедшие выплаты приходят как «ожидается» и в
 // календаре попадают в группу «Просрочено» — пользователь отмечает их полученными.
-function forecastDeposit(position: PositionRecord, instrument: Instrument): ForecastPayout[] {
+// Вклад с автопролонгацией тело не возвращает: проценты считаются по всем срокам цепочки.
+function forecastDeposit(position: PositionRecord, instrument: Instrument, today: string): ForecastPayout[] {
   const principal = position.invested
   const rate = instrument.rate ?? instrument.effectiveRate
   const start = position.openedOn
@@ -88,45 +110,49 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument): Fore
   if (daysBetween(start, end) <= 0) return []
 
   const currency = instrument.currency
-  const bounds = periodBounds(start, end, monthsPerPeriod(instrument.interestPayoutFrequency))
   const payouts: ForecastPayout[] = []
-  let balance = principal
-  let capitalized = 0
+  for (const [termStart, termEnd] of depositTerms(start, end, instrument.autoProlongation, today)) {
+    const bounds = periodBounds(termStart, termEnd, monthsPerPeriod(instrument.interestPayoutFrequency))
+    let balance = principal
+    let capitalized = 0
 
-  for (let index = 1; index < bounds.length; index += 1) {
-    const from = bounds[index - 1]
-    const to = bounds[index]
-    const interest = balance * (rate / 100) * (daysBetween(from, to) / 365)
-    if (instrument.capitalization) {
-      balance += interest
-      capitalized += interest
-    } else {
+    for (let index = 1; index < bounds.length; index += 1) {
+      const from = bounds[index - 1]
+      const to = bounds[index]
+      const interest = balance * (rate / 100) * (daysBetween(from, to) / 365)
+      if (instrument.capitalization) {
+        balance += interest
+        capitalized += interest
+      } else {
+        payouts.push({
+          date: to,
+          type: 'INTEREST',
+          amount: round2(interest),
+          currency,
+          description: `Проценты по вкладу «${instrument.name}»`,
+        })
+      }
+    }
+
+    if (instrument.capitalization && capitalized > 0) {
       payouts.push({
-        date: to,
+        date: termEnd,
         type: 'INTEREST',
-        amount: round2(interest),
+        amount: round2(capitalized),
         currency,
-        description: `Проценты по вкладу «${instrument.name}»`,
+        description: `Проценты по вкладу «${instrument.name}» с капитализацией`,
       })
     }
   }
-
-  if (instrument.capitalization && capitalized > 0) {
+  if (!instrument.autoProlongation) {
     payouts.push({
       date: end,
-      type: 'INTEREST',
-      amount: round2(capitalized),
+      type: 'DEPOSIT_PRINCIPAL',
+      amount: round2(principal),
       currency,
-      description: `Проценты по вкладу «${instrument.name}» с капитализацией`,
+      description: `Возврат вклада «${instrument.name}»`,
     })
   }
-  payouts.push({
-    date: end,
-    type: 'DEPOSIT_PRINCIPAL',
-    amount: round2(principal),
-    currency,
-    description: `Возврат вклада «${instrument.name}»`,
-  })
   return payouts
 }
 
@@ -139,10 +165,11 @@ function forecastDeposit(position: PositionRecord, instrument: Instrument): Fore
 export function depositAccruedInterest(position: PositionRecord, instrument: Instrument, today: string): number | null {
   const principal = position.invested
   const rate = instrument.rate ?? instrument.effectiveRate
-  const start = position.openedOn
-  const end = instrument.termEndDate
-  if (!start || !end || !rate || rate <= 0 || !(principal > 0)) return null
-  if (daysBetween(start, today) <= 0 || daysBetween(today, end) <= 0) return 0
+  if (!position.openedOn || !instrument.termEndDate || !rate || rate <= 0 || !(principal > 0)) return null
+  // При автопролонгации начисление идёт по текущему сроку цепочки (Т30).
+  const terms = depositTerms(position.openedOn, instrument.termEndDate, instrument.autoProlongation, today)
+  const [start, end] = terms[terms.length - 1]
+  if (daysBetween(position.openedOn, today) <= 0 || daysBetween(today, end) <= 0) return 0
   const bounds = periodBounds(start, end, monthsPerPeriod(instrument.interestPayoutFrequency))
   let balance = principal
   let capitalized = 0
@@ -300,7 +327,7 @@ export function forecastPayouts(
   instrument: Instrument,
   today: string,
 ): ForecastPayout[] {
-  if (instrument.groupType === 'deposit') return forecastDeposit(position, instrument)
+  if (instrument.groupType === 'deposit') return forecastDeposit(position, instrument, today)
   if (instrument.groupType === 'bond') return forecastBond(position, instrument, today)
   return []
 }
