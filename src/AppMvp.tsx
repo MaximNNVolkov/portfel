@@ -128,6 +128,8 @@ function bondPayload(details: ProductDetails) {
 }
 // Бумага с Московской биржи (GET /market-data/securities/:secid): то, что пользователь
 // не вводит руками. offline — биржа не ответила, известен только введённый тикер.
+// unlisted — бумаги на бирже нет (внебиржевой ПИФ, частная облигация, Т35): запись
+// сохраняется по названию, количеству и цене покупки, как ручной продукт.
 type MoexSecurity = {
   secid: string;
   name: string;
@@ -143,6 +145,7 @@ type MoexSecurity = {
   maturityDate?: string;
   offerDate?: string;
   offline?: boolean;
+  unlisted?: boolean;
 };
 type MoexSearchItem = Pick<MoexSecurity, "secid" | "shortName" | "name" | "isin" | "group">;
 const moexGroupTypes: Record<MoexSecurity["group"], AssetType> = { share: "Акции", bond: "Облигации", fund: "Фонды" };
@@ -251,6 +254,8 @@ type PortfolioSummary = {
   financialResult?: number | null;
   returnPercent?: number | null;
   valueChange?: number | null;
+  /** Реализованный результат: продажи и погашения минус вложенное в них (§10.2). */
+  realized?: number;
   commissions?: number;
   taxes?: number;
   /** Внесено своих денег: итог минус результат. */
@@ -596,7 +601,7 @@ function sumPayoutsBase(list: Payment[]) {
   return { total, partial };
 }
 // Сумма одной выплаты — в её собственной валюте.
-const payoutMoney = (payment: Payment) =>
+const payoutMoney = (payment: { amount: number; currency?: string }) =>
   payment.currency && payment.currency !== "RUB"
     ? `${payment.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${payment.currency}`
     : money(payment.amount);
@@ -2088,6 +2093,8 @@ function Dashboard({
     ? [
         `цена ${signedMoney(summary.valueChange ?? profit, display)}`,
         paid ? `выплаты ${signedMoney(paid, display)}` : null,
+        // Без продаж и погашений слагаемые не сходились с итогом (Т33).
+        Math.abs(summary.realized ?? 0) >= 0.5 ? `продажи и погашения ${signedMoney(summary.realized ?? 0, display)}` : null,
         summary.commissions ? `комиссии ${signedMoney(-summary.commissions, display)}` : null,
         summary.taxes ? `налоги ${signedMoney(-summary.taxes, display)}` : null,
       ].filter(Boolean).join(" · ")
@@ -3563,7 +3570,7 @@ function instrumentParams(product: Product): [string, React.ReactNode][] {
 // Направление денег операции для знака суммы в ленте: покупка и расходы уменьшают деньги.
 const OUTGOING_TRANSACTION_TYPES: TransactionType[] = ["BUY", "WITHDRAW", "FEE", "TAX"];
 function signedTransactionAmount(transaction: Transaction) {
-  return `${OUTGOING_TRANSACTION_TYPES.includes(transaction.type) ? "−" : "+"}${money(transaction.amount)}`;
+  return `${OUTGOING_TRANSACTION_TYPES.includes(transaction.type) ? "−" : "+"}${payoutMoney(transaction)}`;
 }
 
 function ProductDetailPage({
@@ -4031,7 +4038,7 @@ function AnalyticsPage({
           <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
             {signedMoney(result.result, money)}
           </strong>
-          <small>цена + выплаты − комиссии</small>
+          <small>цена + выплаты + продажи − комиссии и налоги</small>
         </article>
         <article className="stat-card">
           <span>Крупнейшая позиция</span>
@@ -4104,7 +4111,7 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
           })}
         </div>
       )}
-      <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Пополнения и покупки ростом не считаются.</p>
+      <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Пополнения и покупки ростом не считаются, процент — к среднему вложенному за период.</p>
     </section>
   );
 }
@@ -5738,6 +5745,7 @@ function SecurityPicker({
   onPick,
   initialQuery = "",
   autoFocus,
+  allowUnlisted,
 }: {
   token: string;
   onUnauthorized: () => void;
@@ -5745,8 +5753,9 @@ function SecurityPicker({
   onPick: (security: MoexSecurity | null) => void;
   initialQuery?: string;
   autoFocus?: boolean;
+  allowUnlisted?: boolean;
 }) {
-  const [query, setQuery] = useState(value?.secid ?? initialQuery);
+  const [query, setQuery] = useState(value ? value.secid || value.shortName : initialQuery);
   const [results, setResults] = useState<MoexSearchItem[]>([]);
   const [status, setStatus] = useState<"idle" | "searching" | "loading" | "error">("idle");
   const [message, setMessage] = useState("");
@@ -5844,7 +5853,9 @@ function SecurityPicker({
         <div className="security-picked">
           <strong>{value.shortName}</strong>
           <span className="muted">
-            {value.offline
+            {value.unlisted
+              ? "Нет на Московской бирже — укажите количество и цену покупки, цену можно обновлять вручную"
+              : value.offline
               ? "Данные биржи подтянутся позже — укажите цену покупки"
               : [
                   value.secid,
@@ -5868,6 +5879,20 @@ function SecurityPicker({
           }
         >
           Продолжить с тикером «{typed}»
+        </button>
+      )}
+      {/* Поиск MOEX почти всегда возвращает похожие бумаги, поэтому выход «нет в списке» —
+          под любым результатом, а не только при пустом (Т35). */}
+      {allowUnlisted && (status === "idle" || status === "error") && query.trim().length >= 2 && !value && (
+        <button
+          type="button"
+          className="outline-button"
+          onClick={() => {
+            const title = query.trim();
+            onPick({ secid: "", name: title, shortName: title, group: "fund", currency: "RUB", price: null, accruedInterest: null, offline: true, unlisted: true });
+          }}
+        >
+          Нет в списке — добавить «{query.trim()}» без биржи
         </button>
       )}
     </div>
@@ -6066,13 +6091,24 @@ function ProductFormPage({
     const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual", ...(fromCash ? { fromCash: true } : {}) };
     // Бумага уходит без суммы: название, параметры выпуска и цену сервер берёт с MOEX.
     // У вклада и прочего одна сумма — она же вложенная.
-    const payload = isSecurity && security
+    const payload = isSecurity && security && !security.unlisted
       ? {
           ...common,
           ticker: security.secid,
           ...(security.offline ? { name: security.shortName } : {}),
           quantity: Number(quantity),
           averagePrice: purchasePrice.trim() ? Number(purchasePrice) : undefined,
+        }
+      : isSecurity && security?.unlisted
+      ? {
+          // Бумаги нет на бирже: без тикера сервер не ходит на MOEX, сумма — по цене покупки.
+          ...common,
+          name: security.shortName,
+          quantity: Number(quantity),
+          averagePrice: Number(purchasePrice),
+          amount: Number(quantity) * Number(purchasePrice),
+          invested: Number(quantity) * Number(purchasePrice),
+          currency,
         }
       : {
           ...common,
@@ -6253,6 +6289,7 @@ function ProductFormPage({
                     value={security}
                     onPick={pickSecurity}
                     autoFocus
+                    allowUnlisted
                   />
                   <label>
                     Количество, шт.
@@ -6362,7 +6399,11 @@ function ProductFormPage({
                       {securityPriceText(security.price * Number(quantity), security.currency)}
                     </span>
                   ) : (
-                    <span className="attention-text">Цены на бирже сейчас нет — укажите цену покупки.</span>
+                    <span className="attention-text">
+                      {security.unlisted
+                        ? "Бумаги нет на бирже — укажите цену покупки, стоимость считается по ней."
+                        : "Цены на бирже сейчас нет — укажите цену покупки."}
+                    </span>
                   )}
                 </p>
               ) : (
@@ -6431,7 +6472,7 @@ function ProductFormPage({
                     </label>
                   )}
                   {type === "Вклады" && <DepositOptionalFields details={details} onChange={updateDetail} />}
-                  {!isSecurity && (
+                  {(!isSecurity || security?.unlisted) && (
                     <label>
                       Валюта
                       <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
@@ -7372,6 +7413,29 @@ function TransactionInstrumentSelect({
     </label>
   );
 }
+// Пополнение, вывод и выплата без инструмента бывают в USD и CNY (§12, Т36): по валюте
+// операции сервер ведёт свободные деньги. У операции с инструментом валюта — его.
+function TransactionCurrencySelect({
+  type,
+  positionId,
+  currency,
+  onChange,
+}: {
+  type: TransactionType;
+  positionId: string;
+  currency: string;
+  onChange: (currency: string) => void;
+}) {
+  if (POSITION_TRANSACTION_TYPES.includes(type) || positionId) return null;
+  return (
+    <label>
+      Валюта
+      <select value={currency} onChange={(event) => onChange(event.target.value)}>
+        {currencyOptions}
+      </select>
+    </label>
+  );
+}
 function TransactionFormPage({
   products,
   onSubmit,
@@ -7386,6 +7450,7 @@ function TransactionFormPage({
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
+  const [currency, setCurrency] = useState("RUB");
   // Из карточки инструмента операция открывается уже привязанной к нему.
   const [positionId, setPositionId] = useState(
     () => products.find((product) => product.id === searchParams.get("position"))?.id || "",
@@ -7401,6 +7466,7 @@ function TransactionFormPage({
       positionId: transactionPositionId(type, positionId, products),
       quantity: tradesPosition && quantity ? Number(quantity) : undefined,
       price: tradesPosition && price ? Number(price) : undefined,
+      currency,
     });
   };
   const tradesPosition = POSITION_TRANSACTION_TYPES.includes(type);
@@ -7433,6 +7499,7 @@ function TransactionFormPage({
           positionId={positionId}
           onChange={setPositionId}
         />
+        <TransactionCurrencySelect type={type} positionId={positionId} currency={currency} onChange={setCurrency} />
         {tradesPosition && (
           <div className="form-row">
             <label>
@@ -7520,6 +7587,7 @@ function EditTransactionPage({
   const [amount, setAmount] = useState(String(transaction?.amount || ""));
   const [date, setDate] = useState(transaction?.date || "");
   const [positionId, setPositionId] = useState(transaction?.positionId || "");
+  const [currency, setCurrency] = useState(transaction?.currency || "RUB");
   useEffect(() => {
     if (!transaction) return;
     setType(transaction.type);
@@ -7527,6 +7595,7 @@ function EditTransactionPage({
     setAmount(String(transaction.amount));
     setDate(transaction.date);
     setPositionId(transaction.positionId || "");
+    setCurrency(transaction.currency || "RUB");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, Boolean(transaction)]);
   if (!transaction) return <MissingRecord to="/transactions" />;
@@ -7539,6 +7608,7 @@ function EditTransactionPage({
       date,
       type,
       positionId: transactionPositionId(type, positionId, products),
+      currency,
     });
   };
   return (
@@ -7565,6 +7635,7 @@ function EditTransactionPage({
           positionId={positionId}
           onChange={setPositionId}
         />
+        <TransactionCurrencySelect type={type} positionId={positionId} currency={currency} onChange={setCurrency} />
         <label>
           Название
           <input
@@ -7615,7 +7686,7 @@ function DeleteTransactionPage({
       <div className="confirm-card">
         <p>
           Удалить операцию <strong>{transaction.title}</strong> (
-          {money(transaction.amount)})?
+          {payoutMoney(transaction)})?
           {POSITION_TRANSACTION_TYPES.includes(transaction.type) &&
             " Позиция инструмента будет пересчитана."}
         </p>

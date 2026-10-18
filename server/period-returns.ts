@@ -6,8 +6,14 @@
 // изменение стоимости + выплаты + реализованное − комиссии − налоги) между снимками.
 // Пополнения и покупки его не меняют, продажа с прибылью не превращается в «убыток»
 // (критик К38: раньше считалась разница «стоимость − вложено», а у свободных денег
-// «вложено» равно остатку). Процент — к стоимости на начало периода. Старые снимки без
-// сохранённого результата в расчёт не берутся.
+// «вложено» равно остатку). Старые снимки без сохранённого результата в расчёт не берутся.
+//
+// Процент — к среднему капиталу периода, а не к стоимости на его начало (тестер Т34): с
+// пополнениями результат зарабатывали и новые деньги, и «+9,1% с начала истории» рядом с
+// «+1,4% за всё время» вводило в заблуждение. Капитал на дату снимка — стоимость минус
+// заработанное с начала периода (то есть стоимость на начало плюс внесённое после);
+// среднее взвешено по дням между снимками (модифицированный метод Дитца). Без пополнений
+// капитал постоянен, и процент совпадает с прежним — к стоимости на начало.
 
 export type ReturnSnapshot = { date: string; value: number; invested: number | null; result: number | null }
 export type PeriodKey = 'day' | 'month' | 'year' | 'all'
@@ -30,6 +36,22 @@ function shiftDays(date: string, days: number): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10)
 }
 
+function daysBetween(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000)
+}
+
+// Средний капитал периода: капитал снимка держится до следующего снимка.
+function averageCapital(period: ReturnSnapshot[], baseResult: number): number {
+  let weighted = 0
+  let days = 0
+  for (let index = 0; index < period.length - 1; index += 1) {
+    const span = daysBetween(period[index].date, period[index + 1].date)
+    weighted += (period[index].value - ((period[index].result ?? 0) - baseResult)) * span
+    days += span
+  }
+  return days > 0 ? weighted / days : period[0].value
+}
+
 export function periodReturns(snapshots: ReturnSnapshot[], today: string): PeriodReturn[] {
   const usable = snapshots
     .filter((item) => item.result !== null && Number.isFinite(item.result) && Number.isFinite(item.value) && item.date <= today)
@@ -50,11 +72,12 @@ export function periodReturns(snapshots: ReturnSnapshot[], today: string): Perio
     }
     if (base.date === last.date) continue
     const change = gain(last) - gain(base)
+    const capital = averageCapital(usable.filter((item) => item.date >= base.date), gain(base))
     result.push({
       period,
       from: base.date,
       result: Math.round(change * 100) / 100,
-      percent: base.value > 0 ? Math.round((change / base.value) * 10_000) / 100 : null,
+      percent: capital > 0 ? Math.round((change / capital) * 10_000) / 100 : null,
     })
   }
   return result

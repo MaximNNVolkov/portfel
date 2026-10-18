@@ -423,6 +423,23 @@ async function run() {
       const untitled = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2026-01-10' } })
       assert.equal(untitled.json.title, 'Пополнение', 'без описания — русское название типа, а не DEPOSIT')
       assert.equal((await api(`/api/transactions/${untitled.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      // Т36: пополнение без инструмента — в выбранной валюте, неподдерживаемая отклоняется.
+      const euro = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2026-01-10', currency: 'EUR' } })
+      assert.equal(euro.status, 400)
+      const dollars = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 5, date: '2026-01-10', currency: 'usd' } })
+      assert.equal(dollars.json.currency, 'USD')
+      const edited = await api(`/api/transactions/${dollars.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 7 } })
+      assert.equal(edited.json.currency, 'USD', 'правка суммы валюту не сбрасывает')
+      assert.equal((await api(`/api/transactions/${dollars.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      // Т35: фонд, которого нет на бирже, сохраняется по названию и сумме, без похода на MOEX.
+      const unlisted = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { type: 'Фонды', name: 'ЗПИФ Недвижимость', date: '2026-01-10', quantity: 2, averagePrice: 1500, amount: 3000, invested: 3000, currency: 'RUB', source: 'manual' },
+      })
+      assert.equal(unlisted.status, 201)
+      assert.equal(unlisted.json.name, 'ЗПИФ Недвижимость')
+      assert.equal(unlisted.json.amount, 3000)
+      assert.equal((await api(`/api/positions/${unlisted.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
 
       const broken = await fetch(`${BASE_URL}/api/positions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` }, body: '{bad',

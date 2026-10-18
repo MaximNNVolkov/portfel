@@ -130,7 +130,7 @@ export async function portfolioResult(
     commissions: commissions.total,
     taxes: taxes.total,
   })
-  return { payouts, received, commissions, taxes, returns }
+  return { payouts, received, commissions, taxes, returns, realized: Math.round(realized * 100) / 100 }
 }
 
 export async function recordSnapshot(client: Db, userId: string, date = new Date().toISOString().slice(0, 10)) {

@@ -28,7 +28,7 @@ import { sendTestNotification, validateWebhookUrl } from './notifications.ts'
 import { couponForecastGap } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
-  checkNonNegative, notInFuture, positionToWire, positiveNumber, reconcileInvested, requiredDate, requiredText, validateHolding, MANUAL_PROVIDER, type PositionBody,
+  checkNonNegative, notInFuture, positionToWire, positiveNumber, reconcileInvested, requiredDate, requiredText, validateHolding, MANUAL_PROVIDER, SUPPORTED_CURRENCIES, type PositionBody,
 } from './positions.ts'
 import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
@@ -846,7 +846,7 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const baseCurrency = await resolveBaseCurrency(db, userId)
   const context = await engineContext(baseCurrency)
   const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
-  const { payouts, received, commissions, taxes, returns } = await portfolioResult(db, userId, positions, aggregate, context)
+  const { payouts, received, commissions, taxes, returns, realized } = await portfolioResult(db, userId, positions, aggregate, context)
   const expected = sumInBase(payouts.expected, context)
   const expectedPrincipal = sumInBase(payouts.expectedPrincipal, context)
   const overdue = sumInBase(payouts.overdue, context)
@@ -881,6 +881,9 @@ app.get('/api/portfolio/summary', async (request, response) => {
     returnPercent: returns.returnPercent,
     // Изменение цены позиций (стоимость − вложено) — одна из составляющих результата.
     valueChange: returns.valueChange,
+    // Реализованный результат (§10.2): продажи и погашения минус вложенное в них — без него
+    // разбивка «цена · выплаты · комиссии · налоги» не сходилась с итогом (Т33).
+    realized,
     // «Внесено своих денег»: итог минус результат. Пришедшие купоны и дивиденды лежат в
     // свободных деньгах, но своими вложениями не являются — иначе «вложено» росло бы от
     // каждой выплаты, а результат их не показывал.
@@ -1456,6 +1459,13 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
   const price = POSITION_TYPES.includes(type)
     ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
     : undefined
+  // Пополнение и вывод без инструмента могут быть в USD или CNY (§12, Т36): валюта операции
+  // и есть валюта свободных денег, на которые она ложится.
+  const requested = optionalText(body.currency)?.toUpperCase()
+  if (requested && !SUPPORTED_CURRENCIES.includes(requested)) {
+    throw new Error(`Валюта ${requested} пока не поддерживается: доступны ${SUPPORTED_CURRENCIES.join(', ')}`)
+  }
+  const cashCurrency = !position && requested ? requested : undefined
 
   return {
     id,
@@ -1465,7 +1475,7 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
     type,
     date,
     amount,
-    currency: position?.instrument.currency ?? existing?.currency ?? 'RUB',
+    currency: position?.instrument.currency ?? cashCurrency ?? existing?.currency ?? 'RUB',
     quantity,
     price,
     commission: commission ?? existing?.commission ?? 0,
