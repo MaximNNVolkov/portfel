@@ -6281,10 +6281,10 @@ function ProductFormPage({
         <div className="upload-box">
           <span>▧</span>
           <strong>Загрузите скриншоты</strong>
-          <small>Один или несколько файлов PNG, JPG до 10 МБ каждый. Распознанные данные сохранятся сразу, без подтверждения — отредактировать их можно будет на экране-сводке.</small>
+          <small>Один или несколько файлов PNG, JPG, WebP до 10 МБ каждый. Распознанные данные сохранятся сразу, без подтверждения — отредактировать их можно будет на экране-сводке.</small>
           <input
             type="file"
-            accept="image/png,image/jpeg"
+            accept="image/png,image/jpeg,image/webp"
             multiple
             onChange={(event) => {
               setFiles(Array.from(event.target.files ?? []));

@@ -82,7 +82,7 @@ const db = new Pool({ connectionString: databaseUrl, max: 10 })
 configureRateStore(db)
 const users = new Map<string, User>()
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000
-const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg'].includes(file.mimetype)) })
+const upload = multer({ dest: resolve(process.cwd(), 'server/uploads'), limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: (_request, file, callback) => callback(null, ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimetype)) })
 
 // Одна загрузка приложения — около 9 запросов; прежние 300 за 15 минут кончались после
 // ~30 обновлений страницы (меньше — для семьи за одним NAT), и все экраны получали 429.

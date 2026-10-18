@@ -6,7 +6,7 @@
 // в БД и в tesseract, поэтому проверяется вручную на живом стенде.
 
 import assert from 'node:assert/strict'
-import { buildOcrCandidates, parseDepositCard, parseRuDate, extractNumbers, isPossibleDuplicate, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
+import { buildOcrCandidates, parseDepositCard, splitDepositGrid, parseRuDate, extractNumbers, isPossibleDuplicate, groupOcrLines, hasNameText, inferAssetType, isTotalLine, normalizeCurrency, normalizeOcrName, parseNumber, stripIdentifiers, toCandidateName } from './ocr.ts'
 
 let failed = 0
 function test(name: string, run: () => void) {
@@ -217,6 +217,52 @@ test('карточка вклада распознаётся одной запи
     partialWithdrawal: false,
   })
   assert.deepEqual(deposit.missingFields, [])
+})
+
+// Витрина вкладов Финуслуг (скриншоты владельца 18.10.2026): сетка 2×3, tesseract
+// читает обе колонки одной строкой. Раньше получался один вклад без суммы.
+const FINUSLUGI_GRID = [
+  '09:31 ит ое»', 'Застраховать Занять',
+  'Вклад Вклад', 'до 29.09.2027 до 30.10.2027', 'Сумма вклада Сумма вклада', '10 000 Р 10 000 Р',
+  'Ставка Ставка', '21% 21%', 'Прогноз дохода Прогноз дохода', '6 327,23 Р 6 327,72 P',
+  'Вклад Вклад', 'до 25.11.2027 до 25.12.2027', 'Сумма вклада Сумма вклада', '10 024,85 Р 10 000 Р',
+  'Ставка Ставка', '21% 21%', 'Прогноз дохода Прогноз дохода', '6 343,85 Р 6 328,59 Р',
+  'Вклад Вклад', 'до 25.01.2028 до 25.02.2028', 'Сумма вклада Сумма вклада', '10 000 Р 10 000 Р',
+  'Ставка Ставка', '21% 16,5%', 'Прогноз дохода Прогноз дохода', '6 328,37 Р 4 971,91 Р',
+  'Главный Витрина Кошелек — Инвестиции Чат',
+].join('\n')
+
+test('сетка карточек Финуслуг даёт вклад на каждую карточку, без прогноза дохода', () => {
+  assert.equal(splitDepositGrid(FINUSLUGI_GRID)?.length, 6)
+  const candidates = buildOcrCandidates(FINUSLUGI_GRID)
+  assert.deepEqual(
+    candidates.map((deposit) => [deposit.name, deposit.amount, deposit.details?.rate, deposit.details?.termEndDate]),
+    [
+      ['Вклад до 29.09.2027', 10000, 21, '2027-09-29'],
+      ['Вклад до 30.10.2027', 10000, 21, '2027-10-30'],
+      ['Вклад до 25.11.2027', 10024.85, 21, '2027-11-25'],
+      ['Вклад до 25.12.2027', 10000, 21, '2027-12-25'],
+      ['Вклад до 25.01.2028', 10000, 21, '2028-01-25'],
+      ['Вклад до 25.02.2028', 10000, 16.5, '2028-02-25'],
+    ],
+  )
+  assert.ok(candidates.every((deposit) => deposit.type === 'Вклады' && deposit.missingFields.join() === 'date'))
+})
+
+test('карточка без пары не считается сеткой', () => {
+  assert.equal(splitDepositGrid('Вклад\nдо 29.09.2027\nСумма вклада\n10 000 Р\nСтавка\n21%'), null)
+})
+
+test('заголовок «Вклад» и обрывки значка не становятся названием', () => {
+  const [single] = buildOcrCandidates('Вклад\nдо 29.09.2027\nСумма вклада\n10 000 Р\nСтавка\n21%\nПрогноз дохода\n6 52725 В')
+  assert.equal(single.name, 'Вклад до 29.09.2027')
+  assert.equal(single.amount, 10000)
+  const [detail] = buildOcrCandidates([
+    'Вклад р,', 'до 30.10.2027', 'Сумма вклада Ставка', '10 000 Р 21%', 'Банк Московский Кредитный Банк',
+    'Вклад МКБ. Преимущество', 'Срок 1100 дней', 'Дата открытия 25.10.2024', 'Дата закрытия 30.10.2027',
+  ].join('\n'))
+  assert.equal(detail.name, 'МКБ. Преимущество')
+  assert.equal(detail.details?.termEndDate, '2027-10-30')
 })
 
 test('список продуктов не принимается за карточку вклада', () => {

@@ -169,6 +169,9 @@ const CARD_MARKERS = ['amount', 'rate', 'opened', 'closes', 'term']
 function labelsIn(line: string): string[] {
   return DEPOSIT_LABELS.filter(([, pattern]) => pattern.test(line)).map(([key]) => key)
 }
+function isProductName(value: string): boolean {
+  return (value.match(/[a-zа-яё]/gi)?.length ?? 0) >= 3 && !/^до\s+\d/i.test(value) && !labelsIn(value).length
+}
 function yesNo(value: string | undefined): boolean | undefined {
   // Ответ стоит в конце строки: подпись («Капитализация процентов») обрезается
   // не целиком, поэтому начало значения ненадёжно.
@@ -188,6 +191,14 @@ export function parseDepositCard(text: string): OcrCandidate | null {
     if (!keys.length) continue
     const [key, pattern] = DEPOSIT_LABELS.find(([name]) => name === keys[0])!
     const rest = line.replace(pattern, '').replace(/^[\s:—-]+/, '').trim()
+    if (key === 'product') {
+      // «Вклад» в шапке карточки — заголовок, а не название: после него идёт обрывок
+      // значка («Вклад р,») или «до 30.10.2027». Название — строка вида «Вклад МКБ.
+      // Преимущество», поэтому мусор пропускается, а не занимает поле первым.
+      const value = rest || (/^название/i.test(line) ? lines[index + 1] ?? '' : '')
+      if (isProductName(value)) fields.product ??= value
+      continue
+    }
     if (keys.length === 1 && rest) {
       fields[key] ??= rest
       continue
@@ -208,7 +219,11 @@ export function parseDepositCard(text: string): OcrCandidate | null {
   const termEndDate = parseRuDate(fields.closes) ?? parseRuDate(text.match(/до\s+\d{2}[./]\d{2}[./]\d{4}/i)?.[0])
   const bank = fields.bank?.trim()
   const product = fields.product?.trim()
-  const name = product || (bank ? `Вклад ${bank}` : 'Вклад')
+  // Без банка и названия (витрина вкладов) различает записи только дата окончания.
+  // Дата собрана парсером, а не взята из OCR, поэтому чистку названия не проходит
+  // (toCandidateName срезал бы её как хвостовую сумму).
+  const name = (product || bank) ? toCandidateName(product || `Вклад ${bank}`)
+    : termEndDate ? `Вклад до ${termEndDate.split('-').reverse().join('.')}` : 'Вклад'
   const payout = fields.payout?.toLowerCase()
 
   const details: Record<string, unknown> = {
@@ -227,7 +242,7 @@ export function parseDepositCard(text: string): OcrCandidate | null {
   if (!termEndDate) missingFields.push('termEndDate')
   if (!(rate > 0)) missingFields.push('rate')
   return {
-    name: toCandidateName(name),
+    name,
     type: 'Вклады',
     amount,
     invested: amount,
@@ -239,7 +254,56 @@ export function parseDepositCard(text: string): OcrCandidate | null {
   }
 }
 
+// Витрина вкладов (Финуслуги) — сетка карточек в две колонки. Tesseract читает её
+// построчно через обе колонки: «Сумма вклада Сумма вклада», «10 000 Р 10 000 Р».
+// Строка делится пополам, если обе половины одного вида: повтор подписи, две даты
+// «до …», два процента или две суммы с валютой.
+const GRID_SPLITS = [
+  /^(.+?)\s+(\1)$/,
+  /^(до\s+\d{2}[./]\d{2}[./]\d{4})\s+(до\s+\d{2}[./]\d{2}[./]\d{4})$/i,
+  /^(\d+(?:[.,]\d+)?\s*%)\s+(\d+(?:[.,]\d+)?\s*%)$/,
+  /^(\d[\d\s]*(?:[.,]\d+)?\s*[₽РPB])\s+(\d[\d\s]*(?:[.,]\d+)?\s*[₽РPB])$/,
+]
+function splitGridLine(line: string): [string, string] | null {
+  for (const pattern of GRID_SPLITS) {
+    const match = line.match(pattern)
+    if (match) return [match[1], match[2]]
+  }
+  return null
+}
+const CARD_HEADER = /^(?:вклад|депозит)(?=\s|$)/i
+
+// Карточки сетки по отдельности, в порядке чтения (слева направо, сверху вниз).
+// null — это не сетка: меньше двух строк с повтором подписи суммы.
+export function splitDepositGrid(text: string): string[] | null {
+  const lines = text.split(/\n|\r/).map((line) => line.trim()).filter(Boolean)
+  const doubled = lines.filter((line) => {
+    const halves = splitGridLine(line)
+    return halves && halves[0] === halves[1] && labelsIn(halves[0]).includes('amount')
+  })
+  if (doubled.length < 2) return null
+  // Карточка начинается заголовком «Вклад», если у текущей уже есть сумма. Строки,
+  // которые не делятся, относятся к левой колонке (последний ряд из одной карточки).
+  const columns: string[][][] = [[[]], [[]]]
+  for (const line of lines) {
+    const halves = splitGridLine(line) ?? [line]
+    halves.forEach((half, column) => {
+      const cards = columns[column]
+      const card = cards[cards.length - 1]
+      const hasAmount = card.some((entry) => labelsIn(entry).includes('amount'))
+      if (hasAmount && (CARD_HEADER.test(half) || labelsIn(half).includes('amount'))) cards.push([half])
+      else card.push(half)
+    })
+  }
+  const [left, right] = columns.map((cards) => cards.map((card) => card.join('\n')))
+  const ordered: string[] = []
+  for (let row = 0; row < Math.max(left.length, right.length); row += 1) ordered.push(...[left[row], right[row]].filter((card) => card !== undefined))
+  return ordered
+}
+
 export function buildOcrCandidates(text: string): OcrCandidate[] {
+  const grid = splitDepositGrid(text)?.map(parseDepositCard).filter((card): card is OcrCandidate => card !== null)
+  if (grid?.length) return grid
   const card = parseDepositCard(text)
   if (card) return [card]
 
