@@ -25,7 +25,7 @@ import {
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import { buildAttention } from './attention.ts'
 import { sendTestNotification, validateWebhookUrl } from './notifications.ts'
-import { couponForecastGap } from './payout-forecast.ts'
+import { couponForecastGap, receivedDescription } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
   checkNonNegative, notInFuture, positionToWire, positiveNumber, reconcileInvested, requiredDate, requiredText, validateHolding, MANUAL_PROVIDER, SUPPORTED_CURRENCIES, type PositionBody,
@@ -670,7 +670,10 @@ app.post('/api/positions', async (request, response) => {
       if (body.fromCash === true) await payFromCash(client, userId, created)
       await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
-      return created
+      // Вклад или облигация с прошедшим сроком закрываются при пересчёте прогноза сразу —
+      // ответ должен это показать, чтобы мастер объяснил, куда делась запись (Т40).
+      const fresh = await findPosition(client, userId, created.id)
+      return fresh?.closedOn ? { ...created, closedOn: fresh.closedOn, principalReturned: fresh.principalReturned } : created
     })
     response.status(201).json((await valuedPositions(userId, [position]))[0])
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
@@ -1288,7 +1291,10 @@ app.patch('/api/payouts/:id', async (request, response) => {
     const updated: Payout = {
       ...existing,
       ...link,
-      description: body.title !== undefined ? requiredText(body.title, 'title') : existing.description,
+      // Отметка «получено» без нового описания снимает с прогнозной строки оговорки прогноза (Т38).
+      description: body.title !== undefined
+        ? requiredText(body.title, 'title')
+        : body.status === 'received' && existing.status !== 'received' ? receivedDescription(existing.description) : existing.description,
       amount: body.amount !== undefined ? positiveNumber(body.amount, 'amount') : existing.amount,
       date: body.date !== undefined ? requiredDate(body.date, 'date') : existing.date,
       type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,

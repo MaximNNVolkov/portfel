@@ -545,6 +545,7 @@ async function run() {
         body: { name: 'Смоук-тест закрытый вклад', type: 'Вклад', amount: 200000, date: '2020-01-01', rate: 10, termEndDate: '2021-01-01', interestPayoutFrequency: 'В конце срока' },
       })
       assert.equal(deposit.status, 201)
+      assert.equal(deposit.json.closedOn, '2021-01-01', 'ответ на создание сообщает, что запись сразу закрыта (Т40)')
       const own = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
       assert.deepEqual(own.map((payout: { type: string }) => payout.type).sort(), ['DEPOSIT_PRINCIPAL', 'INTEREST'])
       assert.ok(own.every((payout: { status: string }) => payout.status === 'received'))
@@ -676,6 +677,22 @@ async function run() {
       }
       assert.equal((await api(`/api/positions/${bond.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
       assert.equal((await api(`/api/positions/${bare.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+
+      // Т38: последний купон, отмеченный при автозакрытии, — уже факт, без «(прогноз, …)».
+      const coupon = await api('/api/positions', {
+        method: 'POST', token: tokenA,
+        body: { name: 'Смоук-тест купонная ОФЗ', type: 'Облигация', amount: 1000, date: '2024-01-10', quantity: 1, nominal: 1000, couponRate: 10, maturityDate: '2025-06-01' },
+      })
+      assert.equal(coupon.status, 201)
+      const couponOwn = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === coupon.json.instrumentId)
+      const last = couponOwn.find((payout: { type: string; date: string }) => payout.type === 'COUPON' && payout.date === '2025-06-01')
+      assert.ok(last, 'последний купон в дату погашения есть')
+      assert.equal(last.status, 'received')
+      assert.doesNotMatch(last.title, /прогноз/)
+      for (const payout of couponOwn) {
+        await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
+      }
+      assert.equal((await api(`/api/positions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
     await test('оценка НДФЛ учитывает купон года, выгрузка — CSV', async () => {
