@@ -3,7 +3,7 @@
 // `npx tsx server/payout-forecast.test.ts`. Ненулевой код возврата = провал.
 
 import assert from 'node:assert/strict'
-import { addMonths, couponForecastGap, depositAccruedInterest, depositTerms, forecastPayouts } from './payout-forecast.ts'
+import { addMonths, couponForecastGap, depositAccruedInterest, depositTerms, forecastPayouts, receivedDescription } from './payout-forecast.ts'
 import type { Instrument, PositionRecord } from './repository.ts'
 
 let failed = 0
@@ -229,6 +229,13 @@ test('автопролонгация: срок продлевается, тел�
   assert.deepEqual(result.map((payout) => [payout.type, payout.date, payout.amount]), [['INTEREST', '2026-01-10', 6000], ['INTEREST', '2027-01-10', 6000]])
   // Начислено по текущему сроку, а не ноль «после окончания».
   assert.equal(depositAccruedInterest(position({ openedOn: '2025-01-10', invested: 50000 }), deposit, '2026-02-09'), 493.15)
+})
+
+test('полученная выплата теряет оговорки прогноза в описании (Т38)', () => {
+  assert.equal(receivedDescription('Последний купон «ОФЗ» (прогноз, в дату погашения)'), 'Последний купон «ОФЗ»')
+  assert.equal(receivedDescription('Купон «ОФЗ» (прогноз, 2 раза в год)'), 'Купон «ОФЗ»')
+  assert.equal(receivedDescription('Погашение номинала «ОФЗ» (амортизация не учтена в прогнозе)'), 'Погашение номинала «ОФЗ»')
+  assert.equal(receivedDescription('Проценты по вкладу «Сбер (накопительный)»'), 'Проценты по вкладу «Сбер (накопительный)»')
 })
 
 console.log(failed ? `\n${failed} тест(ов) провалено\n` : '\nВсе тесты прошли\n')

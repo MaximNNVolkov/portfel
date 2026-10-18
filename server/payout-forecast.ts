@@ -331,3 +331,9 @@ export function forecastPayouts(
   if (instrument.groupType === 'bond') return forecastBond(position, instrument, today)
   return []
 }
+
+// Полученная выплата — уже факт, а не прогноз (тестер Т38): оговорки прогноза
+// («(прогноз, в дату погашения)», «(амортизация не учтена в прогнозе)») из описания убираются.
+export function receivedDescription<T extends string | undefined>(description: T): T {
+  return description?.replace(/\s*\((?:прогноз[^)]*|[^)]*в прогнозе)\)\s*$/u, '') as T
+}

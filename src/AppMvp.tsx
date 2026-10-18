@@ -225,7 +225,11 @@ type OcrFailure = { filename: string; reason: string };
 type OcrItem = Product & { possibleDuplicate?: boolean };
 type OcrUploadResult = {
   // Документ очереди OCR — по нему сводка открывается по прямой ссылке (BUG-18).
+  // Несколько скриншотов за раз (Т37) — их id через запятую в одном адресе.
   documentId?: string;
+  // Сколько файлов в загрузке и какие из них уже загружались раньше (BUG-15).
+  fileCount?: number;
+  repeatedFiles?: string[];
   date: string;
   items: OcrItem[];
   failures: OcrFailure[];
@@ -1339,6 +1343,7 @@ function AppMvp() {
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
+    return product;
   }
   async function addPayment(payment: Payment) {
     if (apiOnline) {
@@ -1676,7 +1681,8 @@ function AppMvp() {
     setApiOnline(false);
     setOcrSummary(null);
     setUserEmail(null);
-    navigate("/portfolio");
+    // Экран входа после удаления подтверждает, что удаление прошло (тестер Т41).
+    navigate("/portfolio", { state: { accountDeleted: true } });
   }
 
   // Ссылка из письма восстановления пароля должна работать независимо от того, есть ли
@@ -1688,7 +1694,8 @@ function AppMvp() {
   if (location.pathname === "/reset-password") return <ResetPasswordPage />;
   if (!token) {
     if (location.pathname === "/forgot-password") return <ForgotPasswordPage />;
-    return <Login onSubmit={signIn} />;
+    const accountDeleted = Boolean((location.state as { accountDeleted?: boolean } | null)?.accountDeleted);
+    return <Login onSubmit={signIn} notice={accountDeleted ? "Аккаунт и все его данные удалены." : undefined} />;
   }
   if (loadError) {
     return (
@@ -2892,7 +2899,7 @@ function TransactionsPage({
   function renderTransaction(transaction: Transaction) {
     const expanded = expandedId === transaction.id;
     const position = transaction.positionId ? positionById.get(transaction.positionId) : undefined;
-    const typeLabel = transactionTypeLabels[transaction.type];
+    const typeLabel = transactionLabel(transaction, position);
     // Название строки — инструмент; для денежной операции — её описание, если оно
     // говорит больше, чем тип (иначе «Покупка» и ниже снова «Покупка»).
     const name = position?.name || (transaction.title && transaction.title !== typeLabel ? transaction.title : typeLabel);
@@ -3567,6 +3574,14 @@ function instrumentParams(product: Product): [string, React.ReactNode][] {
         : [["Дата", date(product.date)]];
   return rows.filter((row): row is [string, React.ReactNode] => row[1] !== undefined && row[1] !== "");
 }
+// Возврат тела вклада проводится операцией REDEMPTION, как погашение облигации, но
+// подписывается по смыслу (тестер Т39): у вклада «погашения» нет.
+function transactionLabel(transaction: Transaction, position?: Product) {
+  if (transaction.type === "REDEMPTION" && (position?.type === "Вклады" || transaction.title.startsWith("Возврат вклада"))) {
+    return "Возврат вклада";
+  }
+  return transactionTypeLabels[transaction.type];
+}
 // Направление денег операции для знака суммы в ленте: покупка и расходы уменьшают деньги.
 const OUTGOING_TRANSACTION_TYPES: TransactionType[] = ["BUY", "WITHDRAW", "FEE", "TAX"];
 function signedTransactionAmount(transaction: Transaction) {
@@ -3621,7 +3636,7 @@ function ProductDetailPage({
     ...relatedTransactions.map((transaction) => ({
       id: `t-${transaction.id}`,
       date: transaction.date,
-      label: transactionTypeLabels[transaction.type],
+      label: transactionLabel(transaction, product),
       color: transactionTypeColors[transaction.type],
       amount: signedTransactionAmount(transaction),
       to: `/transactions/${transaction.id}/edit`,
@@ -5431,8 +5446,10 @@ type LoginField = "email" | "password" | "inviteCode" | "form";
 type LoginError = { field: LoginField; message: string };
 function Login({
   onSubmit,
+  notice,
 }: {
   onSubmit: (form: FormData, mode: "login" | "register") => Promise<LoginError | null>;
+  notice?: string;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [error, setError] = useState<LoginError | null>(null);
@@ -5461,6 +5478,11 @@ function Login({
         </div>
         <p className="eyebrow">ЛИЧНЫЙ ИНВЕСТИЦИОННЫЙ ПОРТФЕЛЬ</p>
         <h1>{mode === "login" ? "Войдите в аккаунт" : "Создайте аккаунт"}</h1>
+        {notice && (
+          <p className="demo-note" role="status">
+            {notice}
+          </p>
+        )}
         <label>
           Email
           <input
@@ -5992,7 +6014,7 @@ function ProductFormPage({
 }: {
   token: string;
   onUnauthorized: () => void;
-  onSubmit: (product: Product) => Promise<void>;
+  onSubmit: (product: Product) => Promise<Product | void>;
   onOcrComplete: (result: OcrUploadResult) => void;
   onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
@@ -6039,18 +6061,21 @@ function ProductFormPage({
     else params.set("step", String(next));
     setSearchParams(params);
   };
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [recognizing, setRecognizing] = useState(false);
   // §34: статус асинхронной операции виден пользователю — очередь и распознавание
   // различаются, потому что документ может ждать освободившегося воркера.
   const [ocrStage, setOcrStage] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // Дата закрытия, если срок записи уже прошёл и сервер закрыл её при сохранении (Т40).
+  const [savedClosed, setSavedClosed] = useState<{ id: string; closedOn: string } | null>(null);
   const [error, setError] = useState("");
   const updateDetail = <K extends keyof ProductDetails>(key: K, value: ProductDetails[K]) =>
     setDetails((current) => ({ ...current, [key]: value }));
   const resetWizard = () => {
     setStep(1);
+    setSavedClosed(null);
     setType(null);
     setName("");
     setAmount("");
@@ -6119,7 +6144,8 @@ function ProductFormPage({
           ...(type === "Вклады" ? depositPayload(details) : {}),
         };
     try {
-      await onSubmit(payload as unknown as Product);
+      const created = await onSubmit(payload as unknown as Product);
+      setSavedClosed(created?.closedOn ? { id: created.id, closedOn: created.closedOn } : null);
       // Продукт куплен на пришедшие деньги — напоминание реинвестировать их больше не нужно.
       // Сбой отметки не отменяет сохранённый продукт: её можно поставить из ленты вручную.
       if (reinvestPayoutIds.length) await onMarkReinvested(reinvestPayoutIds).catch(() => undefined);
@@ -6132,37 +6158,60 @@ function ProductFormPage({
   };
   // §34: распознавание вынесено из HTTP-запроса в фоновый воркер, поэтому загрузка только
   // ставит документ в очередь и возвращает 202, а страница опрашивает его статус.
+  // Скриншоты обрабатываются по одному (§18 — «один или несколько», Т37): сбой одного
+  // файла не отменяет остальные, а попадает в сводку строкой «Не удалось распознать».
   async function recognizeScreenshot() {
-    if (!file) return;
+    if (!files.length) return;
     setRecognizing(true);
-    setOcrStage("Загружаем скриншот...");
     setError("");
+    const documentIds: string[] = [];
+    const combined: OcrUploadResult = { date: "", items: [], failures: [], fileCount: files.length, repeatedFiles: [] };
     try {
-      const uploadResponse = await apiFetch(`${apiUrl}/ocr/upload`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
-      });
-      if (uploadResponse.status === 401) {
-        onUnauthorized();
-        return;
+      for (const [index, file] of files.entries()) {
+        const prefix = files.length > 1 ? `${index + 1} из ${files.length}: ` : "";
+        setOcrStage(`${prefix}загружаем скриншот...`);
+        try {
+          const uploadResponse = await apiFetch(`${apiUrl}/ocr/upload`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: (() => { const formData = new FormData(); formData.append("image", file); return formData; })(),
+          });
+          if (uploadResponse.status === 401) {
+            onUnauthorized();
+            return;
+          }
+          const uploaded = (await uploadResponse.json()) as {
+            error?: string;
+            documentId?: string;
+            alreadyUploadedAt?: string;
+          };
+          if (!uploadResponse.ok || !uploaded.documentId) {
+            throw new Error(uploaded.error || "Не удалось загрузить изображение");
+          }
+          setOcrStage(`${prefix}в очереди на распознавание...`);
+          const result = await waitForOcrResult(uploaded.documentId, prefix);
+          documentIds.push(uploaded.documentId);
+          combined.date ||= result.date || "";
+          combined.items.push(...((result.items || []) as OcrItem[]));
+          combined.failures.push(...(result.failures || []));
+          if (uploaded.alreadyUploadedAt) {
+            combined.alreadyUploadedAt ||= uploaded.alreadyUploadedAt;
+            combined.repeatedFiles!.push(file.name);
+          }
+        } catch (fileError) {
+          // Единственный файл — ошибка остаётся на странице, как раньше: повторить можно сразу.
+          if (files.length === 1) throw fileError;
+          if (fileError instanceof Error && fileError.message === "Сессия истекла") return;
+          combined.failures.push({
+            filename: file.name,
+            reason: fileError instanceof NetworkError ? "Не удалось загрузить изображение" : errorText(fileError, "Не удалось распознать изображение"),
+          });
+        }
       }
-      const uploaded = (await uploadResponse.json()) as {
-        error?: string;
-        documentId?: string;
-        alreadyUploadedAt?: string;
-      };
-      if (!uploadResponse.ok || !uploaded.documentId) {
-        throw new Error(uploaded.error || "Не удалось загрузить изображение");
-      }
-      setOcrStage("В очереди на распознавание...");
-      const result = await waitForOcrResult(uploaded.documentId);
       onOcrComplete({
-        documentId: uploaded.documentId,
-        date: result.date || new Date().toISOString().slice(0, 10),
-        items: result.items || [],
-        failures: result.failures || [],
-        alreadyUploadedAt: uploaded.alreadyUploadedAt,
+        ...combined,
+        documentId: documentIds.length ? documentIds.join(",") : undefined,
+        date: combined.date || new Date().toISOString().slice(0, 10),
       });
     } catch (recognitionError) {
       setError(
@@ -6178,7 +6227,7 @@ function ProductFormPage({
   // Опрос статуса документа. Верхняя граница ожидания нужна, чтобы страница не висела
   // бесконечно, если воркер планировщика не запущен: пользователю честно говорим, что
   // обработка продолжается, а результат появится в портфеле сам.
-  async function waitForOcrResult(documentId: string) {
+  async function waitForOcrResult(documentId: string, prefix = "") {
     const deadline = Date.now() + OCR_WAIT_LIMIT_MS;
     for (;;) {
       await new Promise((wake) => setTimeout(wake, OCR_POLL_INTERVAL_MS));
@@ -6195,7 +6244,7 @@ function ProductFormPage({
         result?: { date?: string; items?: Product[]; failures?: OcrFailure[] };
       };
       if (!response.ok) throw new Error(status.error || "Не удалось получить статус распознавания");
-      if (status.status === "processing") setOcrStage("Распознаём изображение...");
+      if (status.status === "processing") setOcrStage(prefix ? `${prefix}распознаём изображение...` : "Распознаём изображение...");
       if (status.status === "failed") throw new Error(status.error || "Не удалось распознать изображение");
       if (status.status === "done") return status.result || {};
       if (Date.now() > deadline) {
@@ -6231,19 +6280,20 @@ function ProductFormPage({
       {mode === "screenshot" && (
         <div className="upload-box">
           <span>▧</span>
-          <strong>Загрузите скриншот</strong>
-          <small>PNG, JPG до 10 МБ. Распознанные данные сохранятся сразу, без подтверждения — отредактировать их можно будет на экране-сводке.</small>
+          <strong>Загрузите скриншоты</strong>
+          <small>Один или несколько файлов PNG, JPG до 10 МБ каждый. Распознанные данные сохранятся сразу, без подтверждения — отредактировать их можно будет на экране-сводке.</small>
           <input
             type="file"
             accept="image/png,image/jpeg"
+            multiple
             onChange={(event) => {
-              setFile(event.target.files?.[0] || null);
+              setFiles(Array.from(event.target.files ?? []));
               setError("");
             }}
           />
-          {file && (
+          {files.length > 0 && (
             <>
-              <p>{file.name}</p>
+              <p>{files.map((file) => file.name).join(", ")}</p>
               <button
                 className="outline-button"
                 onClick={() => void recognizeScreenshot()}
@@ -6510,6 +6560,14 @@ function ProductFormPage({
           <p>
             <strong>Продукт добавлен в портфель.</strong>
           </p>
+          {savedClosed && (
+            <p className="muted">
+              Срок уже прошёл, поэтому запись сразу закрыта {fullDate(savedClosed.closedOn)}: вложенное
+              и доход вернулись в свободные деньги. Закрытые записи в списке инструментов не
+              показываются — её <Link to={`/products/${savedClosed.id}`}>карточка</Link> открывается
+              по ссылке, а выплаты видны в «Выплатах» и «Операциях».
+            </p>
+          )}
           <div className="confirm-actions">
             <button type="button" className="outline-button" onClick={resetWizard}>
               Добавить ещё один актив
@@ -6837,16 +6895,31 @@ function useOcrSummary(current: OcrUploadResult | null, token: string) {
     if (inMemory || !documentId) return;
     let cancelled = false;
     setLoadState("loading");
+    // Загрузка из нескольких скриншотов (Т37): документы читаются по отдельности и
+    // складываются в одну сводку; не найденный документ из списка пропускается.
+    const ids = documentId.split(",").filter(Boolean);
     void (async () => {
       try {
-        const response = await apiFetch(`${apiUrl}/ocr/documents/${documentId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const body = (await response.json()) as { status?: string; result?: OcrUploadResult };
+        const bodies = await Promise.all(
+          ids.map(async (id) => {
+            const response = await apiFetch(`${apiUrl}/ocr/documents/${encodeURIComponent(id)}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const body = (await response.json().catch(() => ({}))) as { status?: string; result?: OcrUploadResult };
+            return response.ok ? body : { status: "failed" };
+          }),
+        );
         if (cancelled) return;
-        if (!response.ok || body.status === "failed") return setLoadState("missing");
-        if (body.status !== "done" || !body.result) return setLoadState("pending");
-        setLoaded({ ...body.result, documentId });
+        if (bodies.some((body) => body.status !== "done" && body.status !== "failed")) return setLoadState("pending");
+        const results = bodies.flatMap((body) => (body.status === "done" && body.result ? [body.result] : []));
+        if (!results.length) return setLoadState("missing");
+        setLoaded({
+          documentId,
+          date: results[0].date,
+          items: results.flatMap((result) => result.items || []),
+          failures: results.flatMap((result) => result.failures || []),
+          fileCount: ids.length,
+        });
         setLoadState("idle");
       } catch {
         if (!cancelled) setLoadState("missing");
@@ -6859,7 +6932,26 @@ function useOcrSummary(current: OcrUploadResult | null, token: string) {
   return { documentId, summary: inMemory ?? loaded, loadState };
 }
 function OcrSummaryPlaceholder({ documentId, loadState }: { documentId?: string; loadState: string }) {
-  if (!documentId || loadState === "missing") return <Navigate to="/products" replace />;
+  if (!documentId) return <Navigate to="/products" replace />;
+  // Неизвестный или чужой адрес сводки — честное «не найдено», а не молчаливый уход (Т42).
+  if (loadState === "missing") {
+    return (
+      <Page title="Загрузка не найдена" subtitle="Сводка распознавания" back>
+        <p className="muted">
+          Такой загрузки скриншота нет — возможно, ссылка устарела или в ней опечатка. Все
+          добавленные со скриншотов записи есть в списке инструментов.
+        </p>
+        <div className="confirm-actions">
+          <Link className="primary-button" to="/products">
+            К инструментам
+          </Link>
+          <Link className="outline-button" to="/products/new">
+            Загрузить скриншот
+          </Link>
+        </div>
+      </Page>
+    );
+  }
   return (
     <Page title="Добавлено со скриншота" subtitle="Сводка распознавания" back>
       <p className="muted">
@@ -6900,14 +6992,20 @@ function OcrSummaryPage({
   const removedCount = summary.items.length - items.length;
   return (
     <Page
-      title={`Добавлено со скриншота от ${formattedDate}`}
+      title={`Добавлено ${(summary.fileCount ?? 1) > 1 ? `со скриншотов (${summary.fileCount})` : "со скриншота"} от ${formattedDate}`}
       subtitle="Данные сохранены как распознаны. Проверьте каждую запись и поправьте при необходимости."
     >
-      {summary.alreadyUploadedAt && (
+      {summary.alreadyUploadedAt && (summary.fileCount ?? 1) <= 1 && (
         <div className="demo-note warn">
           ⚠ Этот скриншот уже загружался{" "}
           {formatDateTime(summary.alreadyUploadedAt)} — повторно
           он не обрабатывался, новые записи не созданы. Ниже — результат прошлой обработки.
+        </div>
+      )}
+      {(summary.fileCount ?? 1) > 1 && Boolean(summary.repeatedFiles?.length) && (
+        <div className="demo-note warn">
+          ⚠ Уже загружались раньше и повторно не обрабатывались: {summary.repeatedFiles!.join(", ")}.
+          Их записи ниже — из прошлой обработки, новых не создано.
         </div>
       )}
       {removedCount > 0 && (
@@ -6990,8 +7088,8 @@ function OcrSummaryPage({
       )}
       {summary.failures.length > 0 && (
         <div className="product-list ocr-failures">
-          {summary.failures.map((failure) => (
-            <div className="list-row" key={failure.filename}>
+          {summary.failures.map((failure, index) => (
+            <div className="list-row" key={`${failure.filename}-${index}`}>
               <div className="product-row-summary product-row-static">
                 <span className="product-row-line1">
                   <span className="product-row-name">

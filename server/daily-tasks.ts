@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { tinkoffConnector } from './brokers/tinkoff.ts'
 import { getCbrRateTable, getMoexQuote } from './market-data.ts'
 import { aggregateByGroup, calculateReturns, convertCurrency, sumInBase, type AssetGroup, type EngineContext, type PositionInput } from './portfolio-engine.ts'
-import { depositAccruedInterest, forecastPayouts } from './payout-forecast.ts'
+import { depositAccruedInterest, forecastPayouts, receivedDescription } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
   findTransaction, findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
@@ -260,7 +260,7 @@ export async function autoCloseMaturedPositions(client: Db, userId: string, toda
     const own = payouts.filter((payout) => payout.instrumentId === position.instrumentId && payout.accountId === position.accountId)
     for (const payout of own) {
       if (payout.status !== 'expected' || payout.date > today || payout.source === 'broker') continue
-      const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source }
+      const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source, description: receivedDescription(payout.description) }
       await syncTransactionForPayout(client, userId, received)
       await updatePayout(client, userId, received)
     }
@@ -316,7 +316,7 @@ export async function restoreReceivedPayouts(
   for (const payout of await listPayouts(client, userId)) {
     if (payout.instrumentId !== position.instrumentId || payout.accountId !== position.accountId) continue
     if (payout.status !== 'expected' || payout.date > today || !keys.has(`${payout.date}|${payout.type}`)) continue
-    const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source }
+    const received: Payout = { ...payout, status: 'received', source: payout.source === 'forecast' ? 'manual' : payout.source, description: receivedDescription(payout.description) }
     await syncTransactionForPayout(client, userId, received)
     await updatePayout(client, userId, received)
   }
