@@ -762,6 +762,86 @@ async function run() {
       assert.equal(json.invested, 0)
     })
 
+    await test('ключ Hermes: читает, добавляет вклад, больше ничего; отзыв ключа', async () => {
+      const created = await api('/api/integrations/hermes/keys', { method: 'POST', token: tokenA, body: { name: 'Hermes' } })
+      assert.equal(created.status, 201)
+      const key = created.json.key as string
+      assert.match(key, /^pfk_[0-9a-f]{64}$/)
+      assert.ok(!created.json.preview.includes(key.slice(4, 20)), 'в превью нет тела ключа')
+      // Ключ — без X-Requested-With: это внешний клиент, а не браузер.
+      const asKey = async (path: string, method = 'GET', body?: unknown) => {
+        const response = await fetch(`${BASE_URL}${path}`, {
+          method, headers: { Authorization: `Bearer ${key}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+        })
+        const text = await response.text()
+        return { status: response.status, json: text ? JSON.parse(text) : undefined }
+      }
+      assert.equal((await asKey('/api/portfolio/summary')).status, 200)
+      assert.equal((await asKey('/api/attention')).status, 200)
+      const deposit = await asKey('/api/positions', 'POST', {
+        type: 'deposit', name: 'Вклад от Hermes', institution: 'Альфа-Банк', amount: 100000, date: '2026-01-15',
+        rate: 18, termEndDate: '2027-01-15', interestPayoutFrequency: 'monthly',
+      })
+      assert.equal(deposit.status, 201, JSON.stringify(deposit.json))
+      assert.equal(deposit.json.institution, 'Альфа-Банк')
+      // Правка, удаление, настройки, управление ключами и выход — только из сессии.
+      for (const [path, method] of [
+        [`/api/positions/${deposit.json.id}`, 'DELETE'], [`/api/positions/${deposit.json.id}`, 'PATCH'],
+        ['/api/transactions', 'POST'], ['/api/settings', 'PATCH'], ['/api/integrations/hermes', 'GET'],
+        ['/api/integrations/hermes/keys', 'POST'], ['/api/auth/me', 'GET'], ['/api/auth/me', 'DELETE'],
+      ] as const) {
+        const { status } = await asKey(path, method, method === 'GET' || method === 'DELETE' ? undefined : {})
+        assert.equal(status, 403, `${method} ${path}`)
+      }
+      const list = await api('/api/integrations/hermes', { token: tokenA })
+      assert.equal(list.json.keys.length, 1)
+      assert.ok(list.json.keys[0].lastUsedAt, 'отмечено последнее использование')
+      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await api(`/api/integrations/hermes/keys/${created.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await asKey('/api/portfolio/summary')).status, 401)
+    })
+
+    await test('вебхук Hermes: подписанная проверка доходит, неверный адрес — понятная ошибка', async () => {
+      const { createServer } = await import('node:http')
+      const { createHmac } = await import('node:crypto')
+      const received: Array<{ headers: Record<string, string | string[] | undefined>; body: string }> = []
+      const hook = createServer((request, response) => {
+        let body = ''
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => { received.push({ headers: request.headers, body }); response.writeHead(202).end('{}') })
+      })
+      await new Promise<void>((resolve) => hook.listen(0, '127.0.0.1', resolve))
+      const port = (hook.address() as { port: number }).port
+      const secret = 'smoke-secret-0123456789'
+      try {
+        const noSecret = await api('/api/integrations/hermes/webhook', { method: 'PUT', token: tokenA, body: { url: `http://127.0.0.1:${port}/webhooks/portfel` } })
+        assert.equal(noSecret.status, 400)
+        const saved = await api('/api/integrations/hermes/webhook', { method: 'PUT', token: tokenA, body: { url: `http://127.0.0.1:${port}/webhooks/portfel`, secret } })
+        assert.equal(saved.status, 200, JSON.stringify(saved.json))
+        const sent = await api('/api/integrations/hermes/webhook/test', { method: 'POST', token: tokenA })
+        assert.equal(sent.status, 200, JSON.stringify(sent.json))
+        assert.equal(received.length, 1)
+        const { headers, body } = received[0]
+        const expected = createHmac('sha256', secret).update(`${headers['x-webhook-timestamp']}.${body}`).digest('hex')
+        assert.equal(headers['x-webhook-signature-v2'], expected)
+        assert.equal(JSON.parse(body).event, 'portfel.test')
+        const state = await api('/api/integrations/hermes', { token: tokenA })
+        assert.ok(state.json.webhook.lastSentAt)
+        assert.equal(state.json.webhook.lastError, null)
+        assert.equal(JSON.stringify(state.json).includes(secret), false, 'секрет наружу не отдаётся')
+        // Адрес без слушателя: ошибка по-русски и сохраняется для экрана.
+        await api('/api/integrations/hermes/webhook', { method: 'PUT', token: tokenA, body: { url: 'http://127.0.0.1:9/webhooks/portfel' } })
+        const failedSend = await api('/api/integrations/hermes/webhook/test', { method: 'POST', token: tokenA })
+        assert.equal(failedSend.status, 400)
+        assert.match(failedSend.json.error, /не отвечает/)
+        assert.equal((await api('/api/integrations/hermes/webhook', { method: 'DELETE', token: tokenA })).status, 204)
+        assert.equal((await api('/api/integrations/hermes', { token: tokenA })).json.webhook, null)
+      } finally {
+        hook.close()
+      }
+    })
+
     await test('удаление аккаунта пользователя A', async () => {
       const { status } = await api('/api/auth/me', { method: 'DELETE', token: tokenA })
       assert.equal(status, 204)
