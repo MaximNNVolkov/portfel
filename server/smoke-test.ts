@@ -230,10 +230,10 @@ async function run() {
       assert.equal(share.json.invested, 16800)
       assert.equal(share.json.averagePrice, 2800)
       let after = (await api('/api/portfolio/summary', { token: tokenA })).json
-      // 4 бумаги проданы по 3 500 при текущей 3 100: +400 × 4 к результату.
+      // 4 бумаги проданы по 3 500 при текущей 3 100: +400 × 4 к результату, а проданные
+      // бумаги (4 × 3 100 по текущей цене) из стоимости портфеля уходят.
       assert.equal(Math.round(after.financialResult), Math.round(before.financialResult + 1600))
-      assert.equal(Math.round(after.total), Math.round(before.total + 1600))
-      assert.equal(Math.round(after.contributed), Math.round(before.contributed))
+      assert.equal(Math.round(after.total), Math.round(before.total - 12400))
       await api(`/api/transactions/${sale.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 12400, quantity: 4, price: 3100 } })
       after = (await api('/api/portfolio/summary', { token: tokenA })).json
       assert.equal(Math.round(after.financialResult), Math.round(before.financialResult))
@@ -280,23 +280,6 @@ async function run() {
       assert.match(oversell.json.error, /Нельзя продать больше/)
     })
 
-    // Покупка без записанного пополнения оплачена деньгами извне: остаток не уходит в
-    // скрытый минус, и пришедший потом дивиденд виден в свободных деньгах.
-    await test('покупка без пополнения не съедает следующий доход', async () => {
-      const start = (await api('/api/portfolio/summary', { token: tokenA })).json.cash
-      const buy = await api('/api/transactions', {
-        method: 'POST', token: tokenA,
-        body: { type: 'BUY', amount: start + 3100, date: '2026-02-06', positionId: sharePositionId },
-      })
-      const dividend = await api('/api/transactions', {
-        method: 'POST', token: tokenA,
-        body: { type: 'DIVIDEND', amount: 500, date: '2026-02-07', positionId: sharePositionId },
-      })
-      assert.equal((await api('/api/portfolio/summary', { token: tokenA })).json.cash, 500)
-      for (const id of [dividend.json.id, buy.json.id]) await api(`/api/transactions/${id}`, { method: 'DELETE', token: tokenA })
-      assert.equal((await api('/api/portfolio/summary', { token: tokenA })).json.cash, start)
-    })
-
     // Купон, проведённый операцией, можно привязать к бумаге — выплата попадает в её карточку.
     await test('доходная операция привязывается к инструменту и отвязывается', async () => {
       const share = await api(`/api/positions/${sharePositionId}`, { token: tokenA })
@@ -321,60 +304,41 @@ async function run() {
       assert.equal((await api(`/api/transactions/${coupon.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
-    // Главный результат (§10.6) учитывает выплаты; «внесено своих» = итог − результат,
-    // пришедший дивиденд его не увеличивает.
-    await test('дивиденд увеличивает результат, но не «внесено своих»', async () => {
+    // Главный результат (§10.6) учитывает выплаты; пришедший дивиденд вложенное не меняет.
+    await test('дивиденд увеличивает результат, но не «вложено»', async () => {
       const before = (await api('/api/portfolio/summary', { token: tokenA })).json
-      assert.equal(before.contributed, Math.round((before.total - before.financialResult) * 100) / 100)
       const dividend = await api('/api/transactions', {
         method: 'POST', token: tokenA,
         body: { type: 'DIVIDEND', amount: 1000, date: '2026-02-11', positionId: sharePositionId },
       })
       const after = (await api('/api/portfolio/summary', { token: tokenA })).json
-      assert.equal(after.contributed, before.contributed)
+      assert.equal(after.invested, before.invested)
       assert.equal(after.financialResult, before.financialResult + 1000)
       assert.equal(after.valueChange, before.valueChange)
       assert.equal((await api(`/api/transactions/${dividend.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
-    // Критик К3/К4: полученная выплата — это пришедшие деньги, реинвестирование их тратит.
-    await test('выплата «получена» зачисляет деньги, реинвестирование их списывает', async () => {
-      const cashOf = async () => (await api('/api/portfolio/summary', { token: tokenA })).json
-      const start = await cashOf()
+    // Критик К3: полученная выплата — это пришедшие деньги: отметка «получена» заводит
+    // связанную операцию и попадает в «Получено выплат», снятие отметки всё возвращает.
+    await test('выплата «получена» заводит операцию и учитывается в полученных', async () => {
+      const summaryOf = async () => (await api('/api/portfolio/summary', { token: tokenA })).json
+      const start = await summaryOf()
       const payout = await api('/api/payouts', {
         method: 'POST', token: tokenA,
         body: { title: 'Смоук-тест купон', amount: 5000, date: '2026-03-02', type: 'COUPON', positionId: sharePositionId },
       })
-      assert.equal((await cashOf()).cash, start.cash, 'ожидаемая выплата денег не приносит')
+      assert.equal((await summaryOf()).paid, start.paid, 'ожидаемая выплата ещё не получена')
       await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'received' } })
-      assert.equal((await cashOf()).cash, start.cash + 5000)
+      assert.equal((await summaryOf()).paid, start.paid + 5000)
       await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { amount: 6000 } })
-      const received = await cashOf()
-      assert.equal(received.cash, start.cash + 6000)
-      assert.equal(received.contributed, start.contributed, 'пришедший купон — не свои вложения')
-
-      const tooMuch = await api('/api/positions', {
-        method: 'POST', token: tokenA,
-        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: received.cash + 100000, date: '2026-03-03', fromCash: true },
-      })
-      assert.equal(tooMuch.status, 400)
-      assert.match(tooMuch.json.error, /не хватает/)
-      const reinvested = await api('/api/positions', {
-        method: 'POST', token: tokenA,
-        body: { name: 'Смоук-тест реинвест', type: 'Вклады', amount: 6000, date: '2026-03-03', fromCash: true },
-      })
-      assert.equal(reinvested.status, 201)
-      const after = await cashOf()
-      assert.equal(after.cash, start.cash)
-      assert.equal(after.total, received.total, 'деньги превратились во вклад, итог не удвоился')
-      const buy = (await api('/api/transactions', { token: tokenA })).json
-        .find((item: { positionId?: string; type: string }) => item.type === 'BUY' && item.positionId === reinvested.json.id)
-      assert.ok(buy, 'покупка из свободных денег видна в операциях')
-      assert.equal((await api(`/api/transactions/${buy.id}`, { method: 'DELETE', token: tokenA })).status, 204)
-      assert.equal((await api(`/api/positions/${reinvested.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      const received = await summaryOf()
+      assert.equal(received.paid, start.paid + 6000)
+      assert.equal(received.invested, start.invested, 'пришедший купон — не вложения')
+      const linked = (await api('/api/payouts', { token: tokenA })).json.find((item: { id: string }) => item.id === payout.json.id)
+      assert.ok(linked.transactionId, 'полученная выплата видна в операциях')
 
       await api(`/api/payouts/${payout.json.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
-      assert.equal((await cashOf()).cash, start.cash, 'снятая отметка возвращает деньги назад')
+      assert.equal((await summaryOf()).paid, start.paid, 'снятая отметка убирает выплату из полученных')
       assert.equal((await api(`/api/payouts/${payout.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
     })
 
@@ -496,28 +460,6 @@ async function run() {
       assert.equal(status, 204)
     })
 
-    // BUG-05 (FIX_PLAN 2.4): пополнение — часть портфеля, покупка перекладывает деньги
-    // в бумагу, не меняя общую стоимость.
-    await test('пополнение попадает в свободные деньги и общую стоимость', async () => {
-      const deposit = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'DEPOSIT', amount: 500000, date: '2026-02-01' } })
-      assert.equal(deposit.status, 201)
-      let summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(summary.json.cash, 500000)
-      assert.equal(summary.json.total, 600000)
-      assert.ok(summary.json.groups.some((group: { group: string; value: number }) => group.group === 'Деньги' && group.value === 500000))
-      const buy = await api('/api/transactions', { method: 'POST', token: tokenA, body: { type: 'BUY', amount: 50000, date: '2026-02-02', positionId } })
-      assert.equal(buy.status, 201)
-      summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(summary.json.cash, 450000)
-      assert.equal(summary.json.total, 600000)
-      for (const id of [deposit.json.id, buy.json.id]) {
-        assert.equal((await api(`/api/transactions/${id}`, { method: 'DELETE', token: tokenA })).status, 204)
-      }
-      summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(summary.json.cash, 0)
-      assert.equal(summary.json.total, 100000)
-    })
-
     // BUG-20 (FIX_PLAN 2.7): облигация без «Даты выплаты купона» получает прогноз купонов.
     await test('купоны облигации прогнозируются без даты купона', async () => {
       const bond = await api('/api/positions', {
@@ -536,8 +478,7 @@ async function run() {
     })
 
     // П32 (решение владельца 15.10): вклад с истёкшим сроком закрывается сам — возврат тела
-    // и проценты отмечаются полученными, деньги уходят в свободные, позиция закрыта и не
-    // входит в стоимость портфеля; тело не считается доходом — в результат идут только проценты.
+    // и проценты отмечаются полученными, позиция закрыта и не входит в стоимость портфеля; тело не считается доходом — в результат идут только проценты.
     await test('вклад с истёкшим сроком закрывается сам без двойного счёта', async () => {
       const before = await api('/api/portfolio/summary', { token: tokenA })
       const deposit = await api('/api/positions', {
@@ -555,18 +496,15 @@ async function run() {
       assert.equal(closed.json.valuation.value, 0)
       assert.equal(closed.json.valuation.pnl, 0)
       const summary = await api('/api/portfolio/summary', { token: tokenA })
-      // Вклад закрыт, а тело и проценты вернулись в свободные деньги (критик К3):
-      // итог не теряет 200 000 ₽, а доход учитывается один раз.
-      assert.equal(Math.round(summary.json.total), Math.round(before.json.total + 200000 + interest))
-      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 200000 + interest))
+      // Вклад закрыт: в стоимость не входит, доход учитывается один раз.
+      assert.equal(Math.round(summary.json.total), Math.round(before.json.total))
       assert.equal(summary.json.paid, before.json.paid + interest)
       assert.equal(Math.round(summary.json.financialResult), Math.round(before.json.financialResult + interest))
-      assert.equal(Math.round(summary.json.contributed), Math.round(before.json.contributed + 200000))
-      // Повторный пересчёт (правка, суточный цикл) не задваивает выплаты и деньги.
+      // Повторный пересчёт (правка, суточный цикл) не задваивает выплаты.
       await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { rate: 10 } })
       const again = (await api('/api/payouts', { token: tokenA })).json.filter((payout: { instrumentId: string }) => payout.instrumentId === deposit.json.instrumentId)
       assert.equal(again.length, 2)
-      assert.equal(Math.round((await api('/api/portfolio/summary', { token: tokenA })).json.cash), Math.round(summary.json.cash))
+      assert.equal((await api('/api/portfolio/summary', { token: tokenA })).json.paid, summary.json.paid)
       for (const payout of own) {
         await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
       }
@@ -574,8 +512,8 @@ async function run() {
     })
 
     // Т29: правка закрытого вклада пересчитывает выплаты при закрытии из новых параметров,
-    // продление срока открывает его снова. Т28: удаление убирает его деньги из портфеля.
-    await test('правка и удаление закрытого вклада пересчитывают деньги', async () => {
+    // продление срока открывает его снова. Т28: удаление убирает его выплаты из результата.
+    await test('правка и удаление закрытого вклада пересчитывают выплаты', async () => {
       const before = (await api('/api/portfolio/summary', { token: tokenA })).json
       const deposit = await api('/api/positions', {
         method: 'POST', token: tokenA,
@@ -597,22 +535,21 @@ async function run() {
       assert.ok(Math.abs(recomputed[1][1] - interest * 2) < 0.05)
       let summary = (await api('/api/portfolio/summary', { token: tokenA })).json
       assert.equal(Math.round(summary.financialResult), Math.round(before.financialResult + interest * 2))
-      assert.equal(Math.round(summary.cash), Math.round(before.cash + 200000 + interest * 2))
+      assert.equal(Math.round(summary.paid), Math.round(before.paid + interest * 2))
 
       const extended = await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { termEndDate: '2099-01-01' } })
       assert.equal(extended.json.closedOn, undefined)
       assert.ok((await own()).every(([, , status]: [string, number, string]) => status === 'expected'))
       summary = (await api('/api/portfolio/summary', { token: tokenA })).json
-      assert.equal(Math.round(summary.cash), Math.round(before.cash))
+      assert.equal(Math.round(summary.paid), Math.round(before.paid))
 
       await api(`/api/positions/${deposit.json.id}`, { method: 'PATCH', token: tokenA, body: { termEndDate: '2021-01-01' } })
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { token: tokenA })).json.closedOn, '2021-01-01')
 
       assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
       summary = (await api('/api/portfolio/summary', { token: tokenA })).json
-      assert.equal(Math.round(summary.cash), Math.round(before.cash))
+      assert.equal(Math.round(summary.paid), Math.round(before.paid))
       assert.equal(Math.round(summary.financialResult), Math.round(before.financialResult))
-      assert.equal(Math.round(summary.contributed), Math.round(before.contributed))
       const left = (await api('/api/transactions', { token: tokenA })).json
         .filter((item: { instrumentId?: string }) => item.instrumentId === deposit.json.instrumentId)
       assert.equal(left.length, 0)
@@ -649,7 +586,7 @@ async function run() {
     })
 
     // П33 (решение владельца 15.10): облигация с прошедшим погашением закрывается сама —
-    // погашение отмечается полученным, номинал возвращается в свободные деньги. Без номинала
+    // погашение отмечается полученным. Без номинала
     // погашение заводится на сумму вложения.
     await test('погашенная облигация закрывается сама', async () => {
       const before = await api('/api/portfolio/summary', { token: tokenA })
@@ -671,7 +608,7 @@ async function run() {
       assert.equal((await api(`/api/positions/${bond.json.id}`, { token: tokenA })).json.closedOn, '2025-06-01')
       assert.equal((await api(`/api/positions/${bare.json.id}`, { token: tokenA })).json.closedOn, '2025-06-01')
       const summary = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(Math.round(summary.json.cash), Math.round(before.json.cash + 15000))
+      assert.equal(Math.round(summary.json.total), Math.round(before.json.total))
       for (const payout of [...own, ...bareOwn]) {
         await api(`/api/payouts/${payout.id}`, { method: 'PATCH', token: tokenA, body: { status: 'expected' } })
       }
@@ -734,7 +671,6 @@ async function run() {
       assert.match(batch, /^[0-9a-f]{8}$/)
       assert.deepEqual(importedCounts, { imported: 3, duplicates: 0, errors: 1, skipped: 0 })
       const after = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(Math.round((after.json.cash - before.json.cash) * 100) / 100, 48820.95)
       assert.equal(Math.round((after.json.paid - before.json.paid) * 100) / 100, 321.45)
       const again = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text } })
       assert.deepEqual({ ...again.json, batch: undefined }, { imported: 0, duplicates: 3, errors: 1, skipped: 0, batch: undefined })
@@ -745,15 +681,8 @@ async function run() {
       assert.equal(undone.status, 200)
       assert.deepEqual(undone.json, { deleted: 3 })
       const restored = await api('/api/portfolio/summary', { token: tokenA })
-      assert.equal(Math.round((restored.json.cash - before.json.cash) * 100) / 100, 0)
       assert.equal(Math.round((restored.json.paid - before.json.paid) * 100) / 100, 0)
       assert.equal((await api(`/api/imports/statement/${batch}`, { method: 'DELETE', token: tokenA })).status, 404)
-      // Расходов больше, чем денег (Т19): сводка говорит о минусе, а не молчит.
-      const overspend = await api('/api/imports/statement', { method: 'POST', token: tokenA, body: { text: 'Дата;Сумма;Описание\r\n12.03.2026;-999 999 999,00;Смоук-тест большой расход' } })
-      assert.equal(overspend.status, 201)
-      const short = await api('/api/portfolio/summary', { token: tokenA })
-      assert.ok(short.json.cashShortfall.some((item: { currency: string; amount: number }) => item.currency === 'RUB' && item.amount > 0))
-      assert.equal((await api(`/api/imports/statement/${overspend.json.batch}`, { method: 'DELETE', token: tokenA })).status, 200)
     })
 
     await test('доходность за периоды отдаётся списком (§23)', async () => {
@@ -794,7 +723,7 @@ async function run() {
       assert.equal(typeof listed.institution, 'string')
       const structure = await api('/api/portfolio/structure', { token: tokenA })
       assert.ok(Array.isArray(structure.json.byProvider))
-      // «Где хранится» складывается в итог портфеля: свободные деньги — отдельной строкой.
+      // «Где хранится» складывается в итог портфеля.
       const summary = (await api('/api/portfolio/summary', { token: tokenA })).json
       const stored = structure.json.byProvider.reduce((sum: number, row: { value: number }) => sum + row.value, 0)
       assert.equal(Math.round(stored), Math.round(summary.total))

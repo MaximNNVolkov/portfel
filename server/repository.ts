@@ -779,7 +779,7 @@ export async function deleteTransaction(db: Db, userId: string, id: string): Pro
 
 // Всё, что записано по удаляемой позиции, — её выплаты и операции (покупки, полученные
 // проценты и возврат тела, которые завела отметка «получено» или автозакрытие). Без этого
-// удалённый вклад оставлял свои деньги в свободных и в результате (тестер Т28). Брокерские
+// удалённый вклад оставлял свои выплаты в результате (тестер Т28). Брокерские
 // строки не трогаем: их приносит синхронизация.
 export async function deletePositionHistory(db: Db, userId: string, accountId: string, instrumentId: string): Promise<void> {
   await db.query(
@@ -827,46 +827,6 @@ export async function sumRealizedSales(db: Db, userId: string): Promise<MoneyRow
     [userId],
   )
   return result.rows.map((row) => ({ currency: row.currency as string, amount: Number(row.amount) }))
-}
-
-// Денежный остаток (§12, BUG-05): сальдо денежных движений по операциям, по валютам.
-// Пополнения, продажи и выплаты зачисляются, выводы, покупки, комиссии и налоги
-// списываются. Брокерские операции не учитываются: состояние брокерского счёта целиком
-// приходит из его позиций при синхронизации, и сальдо по ним посчитало бы деньги дважды.
-export async function sumCashBalances(db: Db, userId: string): Promise<{ currency: string; balance: number; shortfall: number }[]> {
-  // Покупка без записанного пополнения оплачена деньгами извне (тестер, P1): остаток не
-  // уходит в минус, который потом молча «съедал» бы следующие купоны и продажи. Остаток
-  // с отсечкой на нуле по ходу времени = итоговое сальдо − самый глубокий минус нарастающего
-  // итога (если он был) — одним проходом оконной функцией, без переноса строк в Node.
-  const result = await db.query(
-    `WITH moves AS (
-       SELECT t.currency,
-         CASE WHEN t.type IN ('DEPOSIT', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'REDEMPTION') THEN t.amount
-              WHEN t.type IN ('WITHDRAW', 'BUY', 'FEE', 'TAX') THEN -t.amount
-              ELSE 0 END - COALESCE(t.commission, 0) - COALESCE(t.tax, 0) AS delta,
-         t.type = 'BUY' AS is_buy, t.tx_date, t.created_at, t.id
-       FROM portfolio.transactions t
-       JOIN portfolio.accounts a ON a.id = t.account_id
-       JOIN portfolio.portfolios f ON f.id = a.portfolio_id
-       WHERE f.user_id = $1 AND t.source <> 'broker'
-     ), running AS (
-       SELECT currency, delta, SUM(delta) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total,
-         SUM(CASE WHEN is_buy THEN 0 ELSE delta END) OVER (PARTITION BY currency ORDER BY tx_date, created_at, id) AS total_without_buys
-       FROM moves
-     )
-     SELECT currency, SUM(delta) AS balance, MIN(total) AS lowest, MIN(total_without_buys) AS lowest_without_buys
-     FROM running
-     GROUP BY currency
-     ORDER BY currency`,
-    [userId],
-  )
-  return result.rows.map((row) => ({
-    currency: row.currency as string,
-    balance: Number(row.balance) - Math.min(0, Number(row.lowest)),
-    // Снятий и расходов больше, чем пришло денег (выписка по карте без начального остатка,
-    // тестировщик Т19). Покупки не считаются: купить на деньги «извне» — обычный ручной ввод.
-    shortfall: Math.max(0, -Number(row.lowest_without_buys)),
-  }))
 }
 
 // ---------------------------------------------------------------------------

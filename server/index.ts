@@ -33,7 +33,7 @@ import {
 import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
-  portfolioEngineInputs, isCashInput, closedPositionResult,
+  portfolioEngineInputs, closedPositionResult,
   performTinkoffSync, syncPayoutForTransaction, syncTransactionForPayout, refreshMarketPrices, regenerateForecastPayouts, resetClosedPositionPayouts, restoreReceivedPayouts, localDate, portfolioResult,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
@@ -47,7 +47,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumCashBalances, insertTransactions, deleteTransactionsByExternalPrefix, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  insertTransactions, deleteTransactionsByExternalPrefix, updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -667,7 +667,6 @@ app.post('/api/positions', async (request, response) => {
         await recordInstrumentPrice(client, created.instrumentId, localToday(), fill.price)
         created.priceUpdatedAt = new Date().toISOString()
       }
-      if (body.fromCash === true) await payFromCash(client, userId, created)
       await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       // Вклад или облигация с прошедшим сроком закрываются при пересчёте прогноза сразу —
@@ -678,35 +677,6 @@ app.post('/api/positions', async (request, response) => {
     response.status(201).json((await valuedPositions(userId, [position]))[0])
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
 })
-// Реинвестирование (критик К4): новый продукт покупается на пришедшие деньги, а не
-// появляется в портфеле поверх них. Покупка проводится операцией BUY — свободные деньги
-// уменьшаются на ту же сумму (sumCashBalances), итог портфеля не удваивается, а удаление
-// операции возвращает деньги и уменьшает продукт, как у любой покупки.
-async function payFromCash(client: Db, userId: string, position: Position) {
-  const amount = position.invested ?? position.value
-  if (!amount || amount <= 0) throw new Error('Не указана сумма покупки')
-  const currency = position.instrument.currency
-  const balance = (await sumCashBalances(client, userId)).find((row) => row.currency === currency)?.balance ?? 0
-  if (balance + 0.005 < amount) {
-    throw new Error(`Свободных денег в ${currency} не хватает: есть ${Math.max(0, Math.round(balance * 100) / 100)}, нужно ${amount}`)
-  }
-  await insertTransaction(client, {
-    id: randomUUID(),
-    accountId: position.accountId,
-    instrumentId: position.instrumentId,
-    type: 'BUY',
-    date: position.openedOn ?? localToday(),
-    amount,
-    currency,
-    commission: 0,
-    tax: 0,
-    quantity: position.quantity,
-    price: position.averagePrice,
-    source: 'manual',
-    description: 'Покупка из свободных денег',
-  })
-}
-
 app.patch('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -773,8 +743,8 @@ app.delete('/api/positions/:id', async (request, response) => {
   if (!existing) return response.status(404).json({ error: 'Инструмент не найден' })
   await withTransaction(db, async (client) => {
     await deletePosition(client, userId, existing.id)
-    // Вместе с позицией уходят её выплаты и операции — иначе деньги удалённого вклада
-    // оставались в свободных и в результате (Т28).
+    // Вместе с позицией уходят её выплаты и операции — иначе выплаты удалённого вклада
+    // оставались в результате (Т28).
     await deletePositionHistory(client, userId, existing.accountId, existing.instrumentId)
     // Порядок важен: сначала пересчёт (он убирает прогнозные выплаты удалённой позиции),
     // и только потом удаление инструмента — иначе оставшиеся ссылки из portfolio.payouts
@@ -848,26 +818,14 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const positions = await listPositions(db, userId)
   const baseCurrency = await resolveBaseCurrency(db, userId)
   const context = await engineContext(baseCurrency)
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const { payouts, received, commissions, taxes, returns, realized } = await portfolioResult(db, userId, positions, aggregate, context)
   const expected = sumInBase(payouts.expected, context)
   const expectedPrincipal = sumInBase(payouts.expectedPrincipal, context)
   const overdue = sumInBase(payouts.overdue, context)
   const unconverted = [...new Set([expected, expectedPrincipal, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
-  // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
-  // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
-  const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
-  const cash = cashValuations.some((item) => item.valueBase === null)
-    ? null
-    : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
   const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
-  // Расходов в операциях больше, чем поступлений (типично для выписки по карте, Т19):
-  // минус в стоимость не идёт, но и молчать о нём нельзя — экран просит начальный остаток.
-  const cashShortfall = (await sumCashBalances(db, userId))
-    .filter((item) => item.shortfall >= 0.005)
-    .map((item) => ({ currency: item.currency, amount: Math.round(item.shortfall * 100) / 100 }))
   response.json({
-    cashShortfall,
     total: aggregate.value,
     invested: aggregate.invested,
     profit: aggregate.pnl,
@@ -876,7 +834,6 @@ app.get('/api/portfolio/summary', async (request, response) => {
     expectedPrincipal: expectedPrincipal.total,
     overdue: overdue.total,
     paid: received.total,
-    cash,
     positions: positions.length,
     baseCurrency: aggregate.baseCurrency,
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
@@ -887,10 +844,6 @@ app.get('/api/portfolio/summary', async (request, response) => {
     // Реализованный результат (§10.2): продажи и погашения минус вложенное в них — без него
     // разбивка «цена · выплаты · комиссии · налоги» не сходилась с итогом (Т33).
     realized,
-    // «Внесено своих денег»: итог минус результат. Пришедшие купоны и дивиденды лежат в
-    // свободных деньгах, но своими вложениями не являются — иначе «вложено» росло бы от
-    // каждой выплаты, а результат их не показывал.
-    contributed: returns.financialResult !== null ? Math.round((aggregate.value - returns.financialResult) * 100) / 100 : null,
     returnMethod: returns.method,
     commissions: returns.commissions,
     taxes: returns.taxes,
@@ -945,8 +898,8 @@ const importCounts = (rows: ImportRow[]) => ({
   duplicates: rows.filter((row) => !row.error && row.duplicate).length,
   skipped: rows.filter((row) => !row.error && !row.duplicate && row.skipped).length,
   toImport: rows.filter(importable).length,
-  // Сколько придёт и уйдёт по загружаемым строкам, в рублях — чтобы было видно, что выписка
-  // по карте вот-вот обнулит свободные деньги.
+  // Сколько придёт и уйдёт по загружаемым строкам, в рублях — чтобы было видно, что в
+  // выписке по карте в основном обычные траты.
   incomeRub: rows.filter((row) => importable(row) && row.type !== 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
   expenseRub: rows.filter((row) => importable(row) && row.type === 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
 })
@@ -1059,12 +1012,7 @@ app.get('/api/portfolio/structure', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
   const context = await engineContext(await resolveBaseCurrency(db, userId))
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
-  // Денежный остаток не принадлежит ни брокеру, ни банку, ни эмитенту — входит
-  // только в разрезы по валютам и по инструментам (§12, §23).
-  const cashKeyed = (keyOf: (currency: string) => string): KeyedValuation[] => aggregate.positions
-    .filter((valuation) => isCashInput(valuation.id))
-    .map((valuation) => ({ key: keyOf(valuation.currency), investedBase: valuation.investedBase, valueBase: valuation.valueBase, priceUnavailable: valuation.priceUnavailable, estimated: valuation.estimated }))
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   // Закрытые позиции (погашенные, вклады с истёкшим сроком) в портфеле уже не лежат —
   // движок их не оценивает, и без фильтра они попадали в разрезы как «цена недоступна».
@@ -1083,15 +1031,13 @@ app.get('/api/portfolio/structure', async (request, response) => {
       }))
   const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf), aggregate.value)
   response.json({
-    byCurrency: aggregateByKey([...keyed((position) => position.instrument.currency || 'RUB'), ...cashKeyed((currency) => currency)]),
+    byCurrency: aggregateByKey(keyed((position) => position.instrument.currency || 'RUB')),
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
     // «Где хранится» (CLIENT_FLOW_PLAN §4.1): банки и брокеры одним списком, включая
-    // записи без банка («Ручной ввод»). Свободные деньги — отдельной строкой (критик К5):
-    // к банку они не привязаны (пополнение вводится без счёта), но без них строки не
-    // складывались в итог портфеля.
-    byProvider: aggregateByKey([...keyed((position) => position.account.provider), ...cashKeyed(() => 'Свободные деньги')], aggregate.value),
-    byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
+    // записи без банка («Ручной ввод»).
+    byProvider: breakdown((position) => position.account.provider),
+    byInstrument: aggregateByKey(keyed((position) => position.instrument.name)),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
 })
@@ -1100,10 +1046,9 @@ app.get('/api/portfolio/structure', async (request, response) => {
 // портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
 async function recommendationsFor(userId: string, positions: Position[], payouts: Payout[]) {
   const baseCurrency = await resolveBaseCurrency(db, userId)
-  // Доли считаются от всего портфеля, включая свободные деньги (§12); правила
-  // применяются к инструментам — сам денежный остаток инструментом не является.
+  // Доли считаются от всего портфеля.
   const context = await engineContext(baseCurrency)
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   // Сумма к погашению — из календаря: всё ожидаемое по бумаге в дату погашения (номинал и
   // последний купон), в базовой валюте. Так правило, «Требует внимания» и календарь называют
@@ -1318,7 +1263,7 @@ app.delete('/api/payouts/:id', async (request, response) => {
   const existing = await findPayout(db, userId, request.params.id)
   if (!existing) return response.status(404).json({ error: 'Выплата не найдена' })
   // Выплата и её операция — одни и те же деньги (как в syncPayoutForTransaction):
-  // удалённая выплата не оставляет в свободных деньгах сумму, которой больше нет.
+  // удалённая выплата не оставляет в результате сумму, которой больше нет.
   await withTransaction(db, async (client) => {
     await deletePayout(client, userId, existing.id)
     if (existing.transactionId && existing.source !== 'broker') await deleteTransaction(client, userId, existing.transactionId)
@@ -1331,11 +1276,9 @@ app.delete('/api/payouts/:id', async (request, response) => {
 // ---------------------------------------------------------------------------
 
 const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRAW', 'COUPON', 'DIVIDEND', 'INTEREST', 'FEE', 'TAX', 'REDEMPTION', 'OTHER']
-// Денежные операции позиции не меняют: остаток считается из самих операций
-// (sumCashBalances → portfolioEngineInputs, §12, BUG-05).
+// Денежные операции позиции не меняют.
 const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
 // Доход можно привязать к инструменту (необязательно): выплата попадёт в его карточку (§9).
-// На денежный остаток привязка не влияет — он считается по валюте, а не по счёту (§12).
 const INCOME_TYPES: TransactionType[] = ['COUPON', 'DIVIDEND', 'INTEREST']
 
 function transactionType(value: unknown): TransactionType {
@@ -1465,8 +1408,7 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
   const price = POSITION_TYPES.includes(type)
     ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
     : undefined
-  // Пополнение и вывод без инструмента могут быть в USD или CNY (§12, Т36): валюта операции
-  // и есть валюта свободных денег, на которые она ложится.
+  // Пополнение и вывод без инструмента могут быть в USD или CNY (§12, Т36).
   const requested = optionalText(body.currency)?.toUpperCase()
   if (requested && !SUPPORTED_CURRENCIES.includes(requested)) {
     throw new Error(`Валюта ${requested} пока не поддерживается: доступны ${SUPPORTED_CURRENCIES.join(', ')}`)

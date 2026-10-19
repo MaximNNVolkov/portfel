@@ -10,7 +10,7 @@ import { aggregateByGroup, calculateReturns, convertCurrency, sumInBase, type As
 import { depositAccruedInterest, forecastPayouts, receivedDescription } from './payout-forecast.ts'
 import {
   deleteEmptyLegacyBrokerAccounts, deleteStaleBrokerPositions, ensureBrokerAccount, ensurePortfolio, moveTransactionToAccount, findInstrumentByKey, findPortfolio, findPositionByAccountInstrument,
-  findTransaction, findTransactionByExternalId, insertInstrument, updateInstrument, sumCashBalances, insertPayout, insertPosition, insertTransaction,
+  findTransaction, findTransactionByExternalId, insertInstrument, updateInstrument, insertPayout, insertPosition, insertTransaction,
   deleteForecastPayouts, deletePayout, deletePayoutsForTransaction, deleteTransaction, listPayouts, PRINCIPAL_PAYOUT_TYPES, listPositions, updatePayout, updatePosition, updateTransaction,
   recordInstrumentPrice, updatePositionMarketPrice, upsertSnapshot, sumPayouts, sumRealizedSales, sumTransactionCosts,
   type AssetGroupType, type Db, type Payout, type PayoutType, type Position, type PositionRecord, type Transaction, type TransactionType,
@@ -58,40 +58,11 @@ export function localDate(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
 
-// Свободные деньги (§12, §7.1, BUG-05; решение Р-2 в docs/FIX_PLAN.md) — часть портфеля:
-// сальдо денежных операций подаётся в Portfolio Engine отдельной позицией группы «Деньги»
-// на каждую валюту, поэтому входит в общую стоимость, структуру и снимки истории наравне
-// с остальными активами. Вложено = остатку: сами деньги не приносят P&L, а доход, который
-// в них превратился, уже учтён в финансовом результате как полученные выплаты (§10.3).
-export const CASH_POSITION_PREFIX = 'cash:'
-export const CASH_POSITION_NAME = 'Денежные средства'
-export function isCashInput(id: string): boolean {
-  return id.startsWith(CASH_POSITION_PREFIX)
-}
-// решено автономно: отрицательное сальдо (покупки записаны, а пополнения — нет) → в портфель
-// не попадает → такие покупки оплачены деньгами, о которых система не знает; «минус» в
-// свободных деньгах уменьшил бы стоимость портфеля на сумму, которой пользователь не должен.
-export function cashEngineInputs(balances: { currency: string; balance: number }[]): PositionInput[] {
-  return balances
-    .filter((item) => item.balance >= 0.005)
-    .map((item) => ({
-      id: `${CASH_POSITION_PREFIX}${item.currency}`,
-      name: CASH_POSITION_NAME,
-      type: GROUP_LABELS.cash,
-      currency: item.currency,
-      value: item.balance,
-      invested: item.balance,
-    }))
-}
-// Полный вход движка: позиции плюс денежный остаток. Все расчёты портфеля целиком
+// Вход движка: позиции, которые сейчас в портфеле. Все расчёты портфеля целиком
 // (сводка, структура, рекомендации, снимки) идут через эту функцию.
-// Закрытая позиция (тело вклада вернулось, бумага погашена) в текущий портфель не входит:
-// иначе вернувшиеся деньги считались бы дважды — стоимостью позиции и выплатой.
-export async function portfolioEngineInputs(client: Db, userId: string, positions: Position[]): Promise<PositionInput[]> {
-  return [
-    ...positions.filter((position) => !position.closedOn).map(toEngineInput),
-    ...cashEngineInputs(await sumCashBalances(client, userId)),
-  ]
+// Закрытая позиция (тело вклада вернулось, бумага погашена) в текущий портфель не входит.
+export function portfolioEngineInputs(positions: Position[]): PositionInput[] {
+  return positions.filter((position) => !position.closedOn).map(toEngineInput)
 }
 
 // Реализованный результат закрытых позиций (§10.2): вернувшееся тело минус вложенное.
@@ -137,7 +108,7 @@ export async function recordSnapshot(client: Db, userId: string, date = new Date
   const portfolio = await findPortfolio(client, userId)
   if (!portfolio) return
   const positions = await listPositions(client, userId)
-  const inputs = await portfolioEngineInputs(client, userId, positions)
+  const inputs = portfolioEngineInputs(positions)
   if (!inputs.length) return
   const context = await engineContext(portfolio.baseCurrency)
   const aggregate = aggregateByGroup(inputs, context)
@@ -185,8 +156,7 @@ export async function syncPayoutForTransaction(client: Db, transaction: Transact
 }
 
 // Полученная выплата — это пришедшие деньги (критик К3): отметка «получена» заводит
-// связанную операцию, и сумма попадает в свободные деньги. Без неё погашение закрывало
-// позицию, а деньги не появлялись нигде — портфель «терял» всю сумму. Снятие отметки
+// связанную операцию, и сумма видна в «Операциях». Снятие отметки
 // операцию удаляет, правка суммы и даты — переносит в неё. Брокерские выплаты не трогаем:
 // их деньги приходят синхронизацией.
 const TRANSACTION_BY_PAYOUT: Partial<Record<PayoutType, TransactionType>> = {
@@ -230,8 +200,7 @@ export async function syncTransactionForPayout(client: Db, userId: string, payou
 // Вклад и облигация закрываются сами в дату окончания/погашения (П32, П33 — решения
 // владельца 15.10): банк и эмитент возвращают деньги без участия пользователя, поэтому
 // прошедшие ожидаемые выплаты по такой позиции (проценты, купоны, тело, номинал)
-// отмечаются полученными — деньги уходят в свободные (через ту же связанную операцию, что
-// и ручная отметка), позиция закрывается (closed_on) и пропадает из списка инструментов.
+// отмечаются полученными (через ту же связанную операцию, что и ручная отметка), позиция закрывается (closed_on) и пропадает из списка инструментов.
 // Без прогноза (у вклада нет ставки, у облигации номинала или количества) возврат
 // заводится на сумму номинала, а если он неизвестен — на сумму вложения. Автопролонгация
 // продлевает вклад — такой не закрываем; облигацию, купленную уже после даты погашения,

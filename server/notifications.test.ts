@@ -92,7 +92,7 @@ test('вклад, закрытый на этой неделе, — событи�
   })
   assert.equal(items.length, 1)
   assert.equal(items[0].key, 'closed:d')
-  assert.equal(items[0].text, 'Вклад Надёжный: вклад закрыт 15.10.2026, 312 500 ₽ — в свободных деньгах')
+  assert.equal(items[0].text, 'Вклад Надёжный: вклад закрыт 15.10.2026, вернулось 312 500 ₽')
 })
 test('ошибка брокера — одно событие в день', () => {
   const items = buildNotificationItems({ today, positions: [], payouts: [], broker: { name: 'Т-Инвестиции', status: 'error' } })

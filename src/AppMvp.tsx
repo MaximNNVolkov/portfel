@@ -55,8 +55,6 @@ type Product = {
   forecastNote?: string;
   // Тело вклада вернулось / бумага погашена: позиция закрыта и в стоимость не входит.
   closedOn?: string;
-  // Только при создании: купить на свободные деньги (реинвестирование, критик К4).
-  fromCash?: boolean;
 };
 type ProductValuation = {
   value: number | null;
@@ -262,16 +260,10 @@ type PortfolioSummary = {
   realized?: number;
   commissions?: number;
   taxes?: number;
-  /** Внесено своих денег: итог минус результат. */
-  contributed?: number | null;
   expected: number;
   // Ожидались, но дата прошла — в «Ожидается» не входят (BUG-22).
   overdue: number;
   paid: number;
-  // Свободные деньги (§7.1, §12) — сальдо денежных операций, посчитанное на бэкенде.
-  // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
-  cash: number | null;
-  cashShortfall?: { currency: string; amount: number }[];
   groups: GroupSummary[];
   /** Целевая структура: цель, текущая доля и сумма до цели по категориям. Пусто — цель не задана. */
   rebalance?: RebalanceRow[];
@@ -324,9 +316,6 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     paid: payments
       .filter((item) => item.status === "received")
       .reduce((sum, item) => sum + item.amount, 0),
-    cash: products
-      .filter((product) => product.type === "Деньги")
-      .reduce((sum, product) => sum + product.amount, 0),
     groups: Object.entries(groupTotals)
       .sort((a, b) => b[1] - a[1])
       .map(([group, value]) => ({
@@ -696,7 +685,7 @@ function portfolioResult(summary: PortfolioSummary) {
   const result = summary.financialResult ?? summary.profit;
   const percent = summary.financialResult !== undefined ? summary.returnPercent ?? null : summary.profitPercent;
   const tone = Math.round(result) > 0 ? "positive" : Math.round(result) < 0 ? "negative" : "neutral";
-  return { result, percent, tone, contributed: summary.contributed ?? summary.invested };
+  return { result, percent, tone, invested: summary.invested };
 }
 // Разрез, в котором ни одна позиция не оценена (например, только валюта без курса ЦБ),
 // стоит «Оценка недоступна», а не «₽ 0 · 0% портфеля» (§7.3).
@@ -980,17 +969,14 @@ function AttentionList({
   );
 }
 // Разрез «Где хранится» (CLIENT_FLOW_PLAN §4.1) — byProvider из /api/portfolio/structure.
-const CASH_STORAGE_KEY = "Свободные деньги";
 function StorageList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
   return (
     <div className="product-list">
       {items.map((item) => {
         const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-        // Свободные деньги — не банк: ведут к операциям, где видно, откуда они взялись.
-        const isCash = item.key === CASH_STORAGE_KEY;
         return (
           <div className="list-row" key={item.key}>
-            <Link className="product-row-summary" to={isCash ? "/transactions" : `/products?bank=${encodeURIComponent(item.key)}`}>
+            <Link className="product-row-summary" to={`/products?bank=${encodeURIComponent(item.key)}`}>
               <span className="product-row-line1">
                 <span className="product-row-name">
                   <strong>{item.key}</strong>
@@ -999,11 +985,11 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
               </span>
               <span className="product-row-line2 product-row-line2-flush">
                 <span className="muted product-row-meta">
-                  {isCash ? "пополнения, выплаты и продажи" : `${item.positions} ${pluralInstruments(item.positions)}`}
+                  {`${item.positions} ${pluralInstruments(item.positions)}`}
                   {!unvalued(item) && ` · ${Math.round(item.share ?? 0)}% портфеля`}
                   {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
                 </span>
-                {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
+                <span className={pnl.className}>{pnl.percentText}</span>
               </span>
             </Link>
           </div>
@@ -1334,12 +1320,10 @@ function AppMvp() {
         const result = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(result.error || "Не удалось сохранить продукт");
       }
-      const paidFromCash = Boolean((product as { fromCash?: boolean }).fromCash);
       product = (await response.json()) as Product;
       // Сервер при сохранении строит прогноз выплат (проценты и возврат вклада, купоны) —
       // без перечитывания «Выплаты» показывали старый список до перезагрузки страницы.
-      // Оплата из свободных денег заводит покупку — её видно в «Операциях».
-      await Promise.all([refreshSummary(), refreshPayments(), paidFromCash ? refreshTransactions() : undefined]);
+      await Promise.all([refreshSummary(), refreshPayments()]);
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
@@ -2091,7 +2075,7 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, profit, paid, overdue, cash, groups, valuation, rebalance = [] } =
+  const { total, profit, paid, overdue, groups, valuation, rebalance = [] } =
     summary ?? localSummary(products, payments);
   const rebalanceByGroup = new Map(rebalance.map((row) => [row.group, row]));
   const result = portfolioResult(summary ?? localSummary(products, payments));
@@ -2117,11 +2101,7 @@ function Dashboard({
       </div>
     );
   }
-  // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
-  // cash === null — деньги есть, но курса их валюты нет (Т18); минус по операциям (Т19)
-  // тоже не «пустой портфель».
-  const cashShortfall = summary?.cashShortfall ?? [];
-  if (products.length === 0 && cash === 0 && cashShortfall.length === 0) {
+  if (products.length === 0) {
     return (
       <div className="content-wrap">
         <section className="empty-portfolio">
@@ -2205,17 +2185,13 @@ function Dashboard({
         {summaryBreakdown && <p className="muted result-breakdown">{summaryBreakdown}</p>}
         <div className="total-stats">
           <div>
-            <span>Внесено своих</span>
-            <strong>{display(result.contributed)}</strong>
+            <span>Вложено</span>
+            <strong>{display(result.invested)}</strong>
           </div>
           <div>
             <span>Получено выплат</span>
             <strong>{display(paid)}</strong>
           </div>
-          <Link to="/transactions">
-            <span>Свободные деньги</span>
-            <strong>{cash === null ? "Оценка недоступна" : display(cash)}</strong>
-          </Link>
         </div>
         {brokerHasCache && (
           <div className="demo-note warn">
@@ -2228,16 +2204,6 @@ function Dashboard({
           <div className="demo-note warn">
             ⚠ Не удалось загрузить данные от брокера «Т-Инвестиции». Показана только доступная
             часть портфеля. <Link to="/integrations">Повторить подключение</Link>
-          </div>
-        )}
-        {cashShortfall.length > 0 && (
-          <div className="demo-note warn">
-            ⚠ Расходов в операциях больше, чем поступлений:{" "}
-            {cashShortfall
-              .map((item) => `−${item.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${currencySigns[item.currency] ?? item.currency}`)
-              .join(", ")}. В свободные деньги
-            минус не идёт — добавьте начальный остаток или пополнения.{" "}
-            <Link to="/transactions/new">Добавить пополнение</Link>
           </div>
         )}
         {valuation.incomplete && (
@@ -2306,12 +2272,11 @@ function Dashboard({
             <div className="product-list category-list">
               {groups.map((groupSummary) => {
                 const pnl = pnlDisplay(groupSummary.pnl, groupSummary.pnlPercent);
-                const isCash = groupSummary.group === "Деньги";
                 return (
                   <div className="list-row" key={groupSummary.group}>
                     <Link
                       className="product-row-summary"
-                      to={isCash ? "/transactions" : `/products?group=${encodeURIComponent(groupSummary.group)}`}
+                      to={`/products?group=${encodeURIComponent(groupSummary.group)}`}
                     >
                       <span className="product-row-line1">
                         <span className="product-row-name">
@@ -2322,11 +2287,9 @@ function Dashboard({
                       </span>
                       <span className="product-row-line2">
                         <span className="muted product-row-meta">
-                          {isCash
-                            ? `${Math.round(groupSummary.share ?? 0)}% портфеля`
-                            : `${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
+                          {`${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
                         </span>
-                        {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
+                        <span className={pnl.className}>{pnl.percentText}</span>
                       </span>
                       {rebalanceByGroup.has(groupSummary.group) && (
                         <span className="product-row-line2">
@@ -2588,37 +2551,16 @@ function ProductRow({
   );
 }
 
-function FreeCashRow({ cash }: { cash: number | null }) {
-  return (
-    <div className="list-row">
-      <Link className="product-row-summary" to="/transactions">
-        <span className="product-row-line1">
-          <span className="product-row-name">
-            <i className={`legend type-dot ${typeColors["Деньги"]}`} title="Деньги" />
-            <strong>Свободные деньги</strong>
-          </span>
-          <span className="product-row-sum">{cash === null ? "Оценка недоступна" : money(cash)}</span>
-        </span>
-        <span className="product-row-line2">
-          <span className="muted product-row-meta">пополнения, выплаты и продажи</span>
-        </span>
-      </Link>
-    </div>
-  );
-}
-
 // Строки одного блока «Инструментов» со своей пагинацией: свёрнутый соседний блок
 // не должен съедать первые 20 строк этого (П29).
 function ProductSectionList({
   items,
   nearestPayoutByInstrument,
   showInstitution,
-  cash,
 }: {
   items: Product[];
   nearestPayoutByInstrument: Map<string, NearestPayout>;
   showInstitution: boolean;
-  cash?: number | null;
 }) {
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
   return (
@@ -2632,7 +2574,6 @@ function ProductSectionList({
             showInstitution={showInstitution}
           />
         ))}
-        {cash !== undefined && <FreeCashRow cash={cash} />}
       </div>
       <ListPagination hasMore={hasMore} onLoadMore={loadMore} pageSize={pageSize} onPageSizeChange={setPageSize} />
     </>
@@ -2679,12 +2620,7 @@ function ProductsPage({
   // Закрытые вклады и погашенные бумаги в списке не показываем (П32, решение владельца):
   // в портфель они уже не входят, карточка открывается из операций и выплат.
   const active = products.filter((product) => !product.closedOn);
-  // Свободные деньги — не инструмент, но входят в категорию «Деньги» на главной и в
-  // «Аналитике»: без этой строки категория здесь не сходилась с итогом (П8). К банку их
-  // не привязать (пополнение вводится без счёта), поэтому при фильтре по банку строки нет.
-  const cash = summary?.cash;
-  const showCash = cash !== undefined && cash !== 0 && !bank && (!group || group === "Деньги");
-  const productTypes = Array.from(new Set([...active.map((product) => product.type), ...(showCash ? ["Деньги" as AssetType] : [])]));
+  const productTypes = Array.from(new Set(active.map((product) => product.type)));
   const banks = Array.from(new Set(active.map((product) => product.institution).filter(Boolean))).sort();
   const filtered = active.filter(
     (product) => (!group || product.type === group) && (!bank || product.institution === bank),
@@ -2705,10 +2641,6 @@ function ProductsPage({
     if (section) section.items.push(product);
     else sections.push({ type: product.type, items: [product] });
   }
-  if (showCash && !sections.some((section) => section.type === "Деньги")) {
-    const at = group ? 0 : sections.findIndex((section) => rank(section.type) > rank("Деньги"));
-    sections.splice(at === -1 ? sections.length : at, 0, { type: "Деньги", items: [] });
-  }
   // Итоги среза — готовые цифры бэкенда (§8, §10): категория из сводки, банк из структуры.
   const groupTotals = group ? summary?.groups.find((item) => item.group === group) : undefined;
   const bankTotals = bank && !group ? storage?.find((item) => item.key === bank) : undefined;
@@ -2719,7 +2651,7 @@ function ProductsPage({
       : undefined;
   const totalsPnl = totals ? pnlDisplay(totals.pnl, totals.pnlPercent) : null;
   // Сумма в заголовке блока: без фильтра по банку — итог категории из сводки Portfolio
-  // Engine (в «Деньгах» он уже со свободными деньгами); со срезом по банку сводки по
+  // Engine; со срезом по банку сводки по
   // категории внутри банка нет — складываем оценки строк, а бумаги без оценки называем.
   function sectionTotal(type: AssetType, items: Product[]) {
     const fromSummary = !bank ? summary?.groups.find((item) => item.group === type) : undefined;
@@ -2829,7 +2761,7 @@ function ProductsPage({
           </ul>
         </div>
       )}
-      {ordered.length === 0 && !showCash ? (
+      {ordered.length === 0 ? (
         <p className="muted">
           {active.length === 0
             ? "Пока нет добавленных инструментов."
@@ -2842,12 +2774,11 @@ function ProductsPage({
               items={section.items}
               nearestPayoutByInstrument={nearestPayoutByInstrument}
               showInstitution={!bank}
-              cash={section.type === "Деньги" && showCash ? cash : undefined}
             />
           );
           // На странице категории заголовок блока повторил бы заголовок страницы.
           if (group) return <div key={section.type}>{list}</div>;
-          const count = section.items.length + (section.type === "Деньги" && showCash ? 1 : 0);
+          const count = section.items.length;
           return (
             <FoldSection
               key={section.type}
@@ -4387,8 +4318,8 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
             <input className="visually-hidden" type="file" accept=".csv,.xlsx,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => chooseFile(event.target.files?.[0])} />
           </label>
           <p className="muted small-note">
-            В интернет-банке выгрузите выписку по счёту или карте в CSV или Excel (.xlsx). Каждая строка станет операцией
-            со свободными деньгами: приход — пополнением, расход — снятием, начисленные проценты — доходом.
+            В интернет-банке выгрузите выписку по счёту или карте в CSV или Excel (.xlsx). Каждая строка станет операцией:
+            приход — пополнением, расход — снятием, начисленные проценты — доходом.
           </p>
         </>
       )}
@@ -4446,7 +4377,7 @@ function StatementImportPage({ token, onImported }: { token: string; onImported:
           {preview.counts.expenseRub > 0 && (
             <div className="demo-note warn">
               ⚠ Снятий на {preview.counts.expenseRub.toLocaleString("ru-RU")} ₽ при поступлениях на{" "}
-              {preview.counts.incomeRub.toLocaleString("ru-RU")} ₽ — они уменьшат свободные деньги. Если это выписка по
+              {preview.counts.incomeRub.toLocaleString("ru-RU")} ₽. Если это выписка по
               карте с обычными тратами, выберите «Только поступления и проценты» или снимите лишние строки.
             </div>
           )}
@@ -6030,9 +5961,6 @@ function ProductFormPage({
   const reinvestFrom = searchParams.get("reinvest");
   const reinvestPayoutIds = (searchParams.get("payouts") ?? "").split(",").filter(Boolean);
   const [amount, setAmount] = useState(() => searchParams.get("amount") ?? "");
-  // Реинвестируются уже пришедшие деньги: покупка списывает их из свободных, иначе
-  // одна и та же сумма окажется в портфеле дважды — деньгами и новым продуктом.
-  const [fromCash, setFromCash] = useState(() => Boolean(reinvestFrom));
   const [date, setDate] = useState(todayIsoDate);
   // Бумага (§17, §20): тикер с биржи и количество; цена покупки необязательна.
   const [security, setSecurity] = useState<MoexSecurity | null>(null);
@@ -6079,7 +6007,6 @@ function ProductFormPage({
     setType(null);
     setName("");
     setAmount("");
-    setFromCash(false);
     setDate(todayIsoDate());
     setSecurity(null);
     setQuantity("");
@@ -6113,7 +6040,7 @@ function ProductFormPage({
     if (!type) return;
     setSaving(true);
     setError("");
-    const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual", ...(fromCash ? { fromCash: true } : {}) };
+    const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual" };
     // Бумага уходит без суммы: название, параметры выпуска и цену сервер берёт с MOEX.
     // У вклада и прочего одна сумма — она же вложенная.
     const payload = isSecurity && security && !security.unlisted
@@ -6484,13 +6411,6 @@ function ProductFormPage({
                   />
                 </label>
               )}
-              <label className="checkbox-label">
-                <input type="checkbox" checked={fromCash} onChange={(event) => setFromCash(event.target.checked)} />
-                Оплатить из свободных денег
-              </label>
-              {fromCash && (
-                <p className="muted">Сумма спишется со свободных денег — итог портфеля не вырастет дважды.</p>
-              )}
               <details className="details-block">
                 <summary>Добавить дополнительные детали</summary>
                 <div className="details-fields">
@@ -6563,7 +6483,7 @@ function ProductFormPage({
           {savedClosed && (
             <p className="muted">
               Срок уже прошёл, поэтому запись сразу закрыта {fullDate(savedClosed.closedOn)}: вложенное
-              и доход вернулись в свободные деньги. Закрытые записи в списке инструментов не
+              и доход отмечены полученными. Закрытые записи в списке инструментов не
               показываются — её <Link to={`/products/${savedClosed.id}`}>карточка</Link> открывается
               по ссылке, а выплаты видны в «Выплатах» и «Операциях».
             </p>
@@ -6828,7 +6748,7 @@ function DeleteProductPage({
   const product = products.find((item) => item.id === id);
   if (!product || !id) return <MissingRecord to={returnTo} />;
   // Сервер удаляет вместе с продуктом его операции и выплаты (Т28) — пользователь должен
-  // знать, что свободные деньги и результат изменятся.
+  // знать, что результат изменится.
   const operations = transactions.filter((item) => item.positionId === id && item.source !== "broker").length;
   return (
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
@@ -6840,8 +6760,8 @@ function DeleteProductPage({
         </p>
         {operations > 0 && (
           <p className="muted">
-            Вместе с ним удалятся его операции ({operations}) и выплаты — свободные деньги
-            и финансовый результат пересчитаются, как будто продукта не было.
+            Вместе с ним удалятся его операции ({operations}) и выплаты — финансовый
+            результат пересчитается, как будто продукта не было.
           </p>
         )}
         <div className="confirm-actions">
@@ -7511,8 +7431,8 @@ function TransactionInstrumentSelect({
     </label>
   );
 }
-// Пополнение, вывод и выплата без инструмента бывают в USD и CNY (§12, Т36): по валюте
-// операции сервер ведёт свободные деньги. У операции с инструментом валюта — его.
+// Пополнение, вывод и выплата без инструмента бывают в USD и CNY (§12, Т36).
+// У операции с инструментом валюта — его.
 function TransactionCurrencySelect({
   type,
   positionId,

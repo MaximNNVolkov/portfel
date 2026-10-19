@@ -122,7 +122,7 @@ export function buildNotificationItems(input: {
   }
 
   // Закрытые автоматически вклады и погашенные облигации (autoCloseMaturedPositions):
-  // деньги ушли в свободные — повод решить, куда их вложить.
+  // деньги вернулись — повод решить, куда их вложить.
   for (const position of input.positions) {
     if (!position.closedOn || position.source === 'broker') continue
     if (position.closedOn > today || position.closedOn < addDays(today, -CLOSED_LOOKBACK_DAYS)) continue
@@ -134,7 +134,7 @@ export function buildNotificationItems(input: {
     items.push({
       key: `closed:${position.id}`,
       kind: 'position_closed',
-      text: `${position.instrument.name}: ${what.toLowerCase()} ${formatDate(position.closedOn)}${amounts.size ? `, ${amountsText(amounts)} — в свободных деньгах` : ''}`,
+      text: `${position.instrument.name}: ${what.toLowerCase()} ${formatDate(position.closedOn)}${amounts.size ? `, вернулось ${amountsText(amounts)}` : ''}`,
       date: position.closedOn,
       ...singleAmount(amounts),
     })

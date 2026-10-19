@@ -219,7 +219,7 @@ export function buildAttention(
     })
   }
 
-  // Пришедшие недавно: деньги лежат свободными — пора решить, куда их вложить.
+  // Пришедшие недавно: пора решить, куда вложить деньги.
   for (const group of groupPayouts(input.payouts.filter((payout) => payout.status === 'received' && !payout.reinvested && payout.date >= reinvestStart && payout.date <= today))) {
     const { name, position } = payoutSubject(group, positionOf)
     items.push({
