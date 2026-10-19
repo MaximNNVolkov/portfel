@@ -1568,7 +1568,8 @@ function AppMvp() {
         </div>
       </aside>
       <main className="main-content">
-        <header className="topbar">
+        {/* На десктопе без статуса брокера шапка пустая — скрываем; на мобильном в ней меню. */}
+        <header className={`topbar${apiOnline && brokerStatus?.status !== "connected" && brokerStatus?.status !== "error" ? " topbar-empty" : ""}`}>
           <div className="mobile-brand">
             <span className="brand-mark">✳</span> Капитал
           </div>
@@ -3747,7 +3748,7 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
           })}
         </div>
       )}
-      <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Пополнения и покупки ростом не считаются, процент — к среднему вложенному за период.</p>
+      <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Покупки ростом не считаются, процент — к среднему вложенному за период.</p>
     </section>
   );
 }
@@ -6507,7 +6508,7 @@ function TransactionFormPage({
     if (total > 0) setAmount(String(Math.round(total * 100) / 100));
   };
   return (
-    <Page title="Новая операция" subtitle="Покупка, продажа, пополнение или выплата" back>
+    <Page title="Новая операция" subtitle="Покупка, продажа, комиссия или выплата" back>
       <form className="modal-form" onSubmit={submit}>
         <label>
           Тип операции
