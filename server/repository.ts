@@ -371,14 +371,6 @@ export async function listInstruments(db: Db, userId: string, options?: ListOpti
   return result.rows.map(mapInstrument)
 }
 
-export async function findInstrument(db: Db, userId: string, id: string): Promise<Instrument | undefined> {
-  const result = await db.query(
-    `SELECT ${INSTRUMENT_FIELDS} ${INSTRUMENT_FROM} WHERE i.id = $1 AND i.owner_user_id = $2`,
-    [id, userId],
-  )
-  return result.rows[0] ? mapInstrument(result.rows[0]) : undefined
-}
-
 // Сопоставление инструмента брокера с уже существующим у пользователя — по ISIN, затем
 // по тикеру (ISIN однозначнее и не пересекается между инструментами разных типов).
 export async function findInstrumentByKey(
