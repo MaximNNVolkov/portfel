@@ -3926,7 +3926,7 @@ function AnalyticsPage({
   const byGroup: StructureBreakdown[] = groups.map((group) => ({ ...group, key: group.group }));
   const [structure, setStructure] = useState<PortfolioStructure | null>(null);
   const [structureError, setStructureError] = useState("");
-  const topInstrument = structure?.byInstrument.find((item) => !item.key.startsWith("Денежные средства"));
+  const topInstrument = structure?.byInstrument[0];
   const [returns, setReturns] = useState<PeriodReturn[] | null>(null);
   const isEmpty = groups.length === 0;
 
