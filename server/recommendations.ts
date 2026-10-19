@@ -17,7 +17,7 @@
 
 import type { AssetGroup } from './portfolio-engine.ts'
 
-export type RecommendationRuleType = 'concentration' | 'maturity' | 'drawdown' | 'payout_gap' | 'rebalance'
+export type RecommendationRuleType = 'concentration' | 'maturity' | 'drawdown' | 'payout_gap'
 
 export type Recommendation = {
   ruleType: RecommendationRuleType
@@ -159,7 +159,7 @@ export function detectConcentration(
     const share = (value / totalValue) * 100
     if (share <= rules.concentrationThresholdPercent) continue
     // Бумага с прошедшей датой погашения ждёт отметки «деньги пришли» — совет про её долю
-    // бессмыслен (тестировщик Т26): после отметки она уйдёт в свободные деньги.
+    // бессмыслен (тестировщик Т26): после отметки позиция закроется.
     if (position.maturityDate && position.maturityDate < todayIso) continue
     if (position.issuer) flaggedByIssuer.set(position.issuer, (flaggedByIssuer.get(position.issuer) ?? 0) + value)
     flaggedByGroup.set(position.group, (flaggedByGroup.get(position.group) ?? 0) + value)

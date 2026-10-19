@@ -96,8 +96,7 @@ def cmd_summary(args) -> None:
     lines = [
         f"Стоимость портфеля: {money(summary.get('total'), base)}{' (оценка неполная)' if incomplete else ''}",
         f"Финансовый результат: {money(summary.get('financialResult'), base)} ({percent(summary.get('returnPercent'))})",
-        f"Вложено своих: {money(summary.get('contributed'), base)}",
-        f"Свободные деньги: {money(summary.get('cash'), base)}",
+        f"Вложено: {money(summary.get('invested'), base)}",
         f"Получено выплат: {money(summary.get('paid'), base)}",
         f"Ожидается дохода: {money(summary.get('expected'), base)}, возврат вложений: {money(summary.get('expectedPrincipal'), base)}",
     ]
@@ -155,20 +154,14 @@ def cmd_payouts(args) -> None:
         print(f"\nНе отмечено полученным: {len(overdue)} выплат(ы) на {money(sum(p.get('amountBase') or 0 for p in overdue))}")
 
 
-def cmd_attention(args) -> None:
-    items = api("GET", "/attention")
+def cmd_recommendations(args) -> None:
+    items = api("GET", "/recommendations")
     if args.json:
         return print(json.dumps(items, ensure_ascii=False, indent=2))
     if not items:
-        return print("Ничего не требует внимания.")
-    labels = {1: "Срочно", 2: "Важно", 3: "К сведению"}
-    for severity in (1, 2, 3):
-        section = [item for item in items if item.get("severity") == severity]
-        if not section:
-            continue
-        print(f"{labels[severity]}:")
-        for item in section:
-            print(f"• {item.get('title')}: {item.get('text')}")
+        return print("Замечаний по портфелю нет.")
+    for item in items:
+        print(f"• {item.get('text')}")
 
 
 def cmd_add_deposit(args) -> None:
@@ -193,8 +186,6 @@ def cmd_add_deposit(args) -> None:
         body["termEndDate"] = args.end
     if args.frequency:
         body["interestPayoutFrequency"] = FREQUENCIES[args.frequency]
-    if args.from_cash:
-        body["fromCash"] = True
     if args.dry_run:
         return print(json.dumps(body, ensure_ascii=False, indent=2))
     created = api("POST", "/positions", body)
@@ -223,9 +214,9 @@ def main() -> None:
     payouts.add_argument("--json", action="store_true")
     payouts.set_defaults(handler=cmd_payouts)
 
-    attention = sub.add_parser("attention", help="что требует внимания")
-    attention.add_argument("--json", action="store_true")
-    attention.set_defaults(handler=cmd_attention)
+    recommendations = sub.add_parser("recommendations", help="аналитические замечания по портфелю")
+    recommendations.add_argument("--json", action="store_true")
+    recommendations.set_defaults(handler=cmd_recommendations)
 
     deposit = sub.add_parser("add-deposit", help="добавить вклад")
     deposit.add_argument("--name", required=True, help="название вклада")
@@ -238,7 +229,6 @@ def main() -> None:
     deposit.add_argument("--capitalization", action="store_true", help="проценты капитализируются")
     deposit.add_argument("--auto-prolongation", action="store_true", help="вклад продлевается автоматически")
     deposit.add_argument("--currency", default="RUB")
-    deposit.add_argument("--from-cash", action="store_true", help="оплатить из свободных денег портфеля")
     deposit.add_argument("--dry-run", action="store_true", help="показать, что будет отправлено, без сохранения")
     deposit.set_defaults(handler=cmd_add_deposit)
 

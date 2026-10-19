@@ -12,7 +12,6 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import "./App.css";
-import { xlsxToText } from "./xlsx-reader";
 import "./client-flow.css";
 
 type AssetType =
@@ -55,8 +54,6 @@ type Product = {
   forecastNote?: string;
   // Тело вклада вернулось / бумага погашена: позиция закрыта и в стоимость не входит.
   closedOn?: string;
-  // Только при создании: купить на свободные деньги (реинвестирование, критик К4).
-  fromCash?: boolean;
 };
 type ProductValuation = {
   value: number | null;
@@ -184,8 +181,6 @@ type Payment = {
   institution?: string;
   /** Сумма в базовой валюте портфеля по курсу ЦБ (§13); null — курса нет. */
   amountBase?: number | null;
-  /** Пришедшие деньги уже вложены — напоминание «Реинвестировать» снято. */
-  reinvested?: boolean;
 };
 type TransactionType =
   | "BUY"
@@ -262,19 +257,11 @@ type PortfolioSummary = {
   realized?: number;
   commissions?: number;
   taxes?: number;
-  /** Внесено своих денег: итог минус результат. */
-  contributed?: number | null;
   expected: number;
   // Ожидались, но дата прошла — в «Ожидается» не входят (BUG-22).
   overdue: number;
   paid: number;
-  // Свободные деньги (§7.1, §12) — сальдо денежных операций, посчитанное на бэкенде.
-  // null — остаток есть, но оценить его в базовой валюте нельзя (нет курса, §7.3).
-  cash: number | null;
-  cashShortfall?: { currency: string; amount: number }[];
   groups: GroupSummary[];
-  /** Целевая структура: цель, текущая доля и сумма до цели по категориям. Пусто — цель не задана. */
-  rebalance?: RebalanceRow[];
   valuation: {
     incomplete: boolean;
     unavailable: { id: string; name: string; group: string; reason: string }[];
@@ -284,17 +271,6 @@ type PortfolioSummary = {
     unconvertedCurrencies?: string[];
   };
 };
-type RebalanceRow = { group: string; target: number; actual: number; deviation: number; toTarget: number };
-const TARGET_GROUPS = ["Вклады", "Облигации", "Акции", "Фонды", "Деньги", "Прочее"];
-const targetsToInputs = (allocation?: Record<string, number>) =>
-  Object.fromEntries(Object.entries(allocation ?? {}).map(([group, share]) => [group, String(share)]));
-// «Докупить на ₽ 45 000» / «выше цели на ₽ 20 000»; расхождение меньше 1 п. п. — в пределах цели.
-function rebalanceText(row: RebalanceRow, display: (value: number) => string) {
-  if (Math.abs(row.deviation) < 1) return `цель ${Math.round(row.target)}% · в пределах цели`;
-  return row.toTarget > 0
-    ? `цель ${Math.round(row.target)}% · докупить на ${display(row.toTarget)}`
-    : `цель ${Math.round(row.target)}% · выше цели на ${display(-row.toTarget)}`;
-}
 type BrokerStatus = {
   status: string;
   lastSyncAt?: string;
@@ -324,9 +300,6 @@ function localSummary(products: Product[], payments: Payment[]): PortfolioSummar
     paid: payments
       .filter((item) => item.status === "received")
       .reduce((sum, item) => sum + item.amount, 0),
-    cash: products
-      .filter((product) => product.type === "Деньги")
-      .reduce((sum, product) => sum + product.amount, 0),
     groups: Object.entries(groupTotals)
       .sort((a, b) => b[1] - a[1])
       .map(([group, value]) => ({
@@ -406,7 +379,7 @@ const navItems = [
   ["Рекомендации", "✦", "/recommendations", false],
   ["Отчёты", "▤", "/reports", true],
   ["Интеграции", "⇄", "/integrations", false],
-  ["Импорт", "⇩", "/import", false],
+  ["Импорт", "⇩", "/import", true],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -496,17 +469,27 @@ const transactionTypeColors: Record<TransactionType, string> = {
   TAX: "pink",
   OTHER: "slate",
 };
+// Пополнения и снятия больше не заводятся (docs/CLAUDE.md): старые записи этих типов
+// показываются и удаляются, но в выборе типа новой операции их нет.
+const LEGACY_TRANSACTION_TYPES: TransactionType[] = ["DEPOSIT", "WITHDRAW"];
+const transactionTypeOptions = (current?: TransactionType) =>
+  Object.entries(transactionTypeLabels)
+    .filter(([value]) => value === current || !LEGACY_TRANSACTION_TYPES.includes(value as TransactionType))
+    .map(([value, label]) => (
+      <option value={value} key={value}>
+        {label}
+      </option>
+    ));
 const POSITION_TRANSACTION_TYPES: TransactionType[] = ["BUY", "SELL"];
 // Доход можно (но не обязательно) привязать к инструменту — тогда он виден в его карточке.
 const INCOME_TRANSACTION_TYPES: TransactionType[] = ["COUPON", "DIVIDEND", "INTEREST"];
 const CASH_CREDIT_TYPES: TransactionType[] = [
-  "DEPOSIT",
   "COUPON",
   "DIVIDEND",
   "INTEREST",
   "REDEMPTION",
 ];
-const CASH_DEBIT_TYPES: TransactionType[] = ["WITHDRAW", "FEE", "TAX"];
+const CASH_DEBIT_TYPES: TransactionType[] = ["FEE", "TAX"];
 function applyLocalTransactionEffect(
   products: Product[],
   transaction: Transaction,
@@ -696,7 +679,7 @@ function portfolioResult(summary: PortfolioSummary) {
   const result = summary.financialResult ?? summary.profit;
   const percent = summary.financialResult !== undefined ? summary.returnPercent ?? null : summary.profitPercent;
   const tone = Math.round(result) > 0 ? "positive" : Math.round(result) < 0 ? "negative" : "neutral";
-  return { result, percent, tone, contributed: summary.contributed ?? summary.invested };
+  return { result, percent, tone, invested: summary.invested };
 }
 // Разрез, в котором ни одна позиция не оценена (например, только валюта без курса ЦБ),
 // стоит «Оценка недоступна», а не «₽ 0 · 0% портфеля» (§7.3).
@@ -824,173 +807,15 @@ function FoldSection({
     </section>
   );
 }
-// «Требует внимания» (CLIENT_FLOW_PLAN §4.4) — лента собирается на бэкенде
-// (server/attention.ts, GET /api/attention); фронт только показывает и ведёт к действию.
-type AttentionItem = {
-  id: string;
-  kind: string;
-  severity: 1 | 2 | 3;
-  title: string;
-  text: string;
-  action:
-    | "mark_received"
-    | "reinvest"
-    | "open_position"
-    | "edit_position"
-    | "refresh_prices"
-    | "open_integrations"
-    | "open_payments"
-    | "open_analytics";
-  date?: string;
-  amount?: number;
-  currency?: string;
-  institution?: string;
-  positionId?: string;
-  payoutIds?: string[];
-};
-const attentionSeverityLabels: Record<AttentionItem["severity"], string> = {
-  1: "Срочно",
-  2: "Важно",
-  3: "К сведению",
-};
-const attentionSeverityColors: Record<AttentionItem["severity"], string> = {
-  1: "coral",
-  2: "amber",
-  3: "slate",
-};
-// Реинвестирование на MVP — переход к добавлению продукта с подставленной суммой и
-// банком, без отдельной сущности «деньги к вложению» (CLIENT_FLOW_PLAN §6, вопрос 1).
-// payoutIds — выплаты, чьи деньги вкладываются: после сохранения продукта они отмечаются
-// реинвестированными, и напоминание в «Требует внимания» уходит само.
-function reinvestLink(amount: number | undefined, institution: string | undefined, from: string, currency?: string, payoutIds?: string[]) {
-  const params = new URLSearchParams();
-  if (amount) params.set("amount", String(Math.round(amount * 100) / 100));
-  // Сумма передаётся в валюте выплаты: купон в USD не должен лечь в форму как рубли.
-  if (currency && currency !== "RUB") params.set("currency", currency);
-  if (institution && institution !== "Ручной ввод") params.set("institution", institution);
-  params.set("reinvest", from);
-  if (payoutIds?.length) params.set("payouts", payoutIds.join(","));
-  return `/products/new?${params.toString()}`;
-}
-function attentionLink(item: AttentionItem): { to: string; label: string } | null {
-  switch (item.action) {
-    case "reinvest":
-      return { to: reinvestLink(item.amount, item.institution, item.title, item.currency, item.payoutIds), label: "Реинвестировать" };
-    case "open_position":
-      return item.positionId ? { to: `/products/${item.positionId}`, label: "Открыть" } : null;
-    case "edit_position":
-      return item.positionId ? { to: `/products/${item.positionId}/edit`, label: "Заполнить" } : null;
-    case "refresh_prices":
-      return { to: "/products", label: "Обновить цены" };
-    case "open_integrations":
-      return { to: "/integrations", label: "Повторить" };
-    case "open_payments":
-      return { to: "/payments", label: "Выплаты" };
-    case "open_analytics":
-      return { to: "/analytics", label: "Аналитика" };
-    default:
-      return null;
-  }
-}
-function AttentionList({
-  items,
-  payments,
-  onMarkReceived,
-  onMarkReinvested,
-}: {
-  items: AttentionItem[];
-  payments: Payment[];
-  onMarkReceived: (payment: Payment) => Promise<void>;
-  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
-}) {
-  const [markingId, setMarkingId] = useState<string | null>(null);
-  async function markReceived(item: AttentionItem) {
-    setMarkingId(item.id);
-    try {
-      for (const id of item.payoutIds ?? []) {
-        const payment = payments.find((entry) => entry.id === id);
-        if (payment) await onMarkReceived(payment);
-      }
-    } finally {
-      setMarkingId(null);
-    }
-  }
-  // Деньги уже вложены (здесь или в другом приложении) — снимаем напоминание без
-  // добавления продукта.
-  async function markReinvested(item: AttentionItem) {
-    setMarkingId(item.id);
-    try {
-      await onMarkReinvested(item.payoutIds ?? []);
-    } finally {
-      setMarkingId(null);
-    }
-  }
-  return (
-    <div className="product-list attention-list">
-      {items.map((item) => {
-        const link = attentionLink(item);
-        const meta = [item.institution, item.date ? dateLabel(item.date) : null].filter(Boolean).join(" · ");
-        return (
-          <div className="list-row attention-row" key={item.id}>
-            <div className="product-row-summary product-row-static">
-              <span className="product-row-line1">
-                <span className="product-row-name">
-                  <i
-                    className={`legend type-dot ${attentionSeverityColors[item.severity]}`}
-                    title={attentionSeverityLabels[item.severity]}
-                  />
-                  <strong>{item.title}</strong>
-                </span>
-                {meta && <span className="muted attention-meta">{meta}</span>}
-              </span>
-              <span className="attention-text">{item.text}</span>
-            </div>
-            <div className="attention-actions">
-              {item.action === "mark_received" ? (
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={markingId !== null}
-                  onClick={() => void markReceived(item)}
-                >
-                  {markingId === item.id ? "Сохраняем..." : "Отметить полученной"}
-                </button>
-              ) : (
-                link && (
-                  <Link className="outline-button" to={link.to}>
-                    {link.label}
-                  </Link>
-                )
-              )}
-              {item.action === "reinvest" && item.payoutIds?.length ? (
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={markingId !== null}
-                  onClick={() => void markReinvested(item)}
-                >
-                  {markingId === item.id ? "Сохраняем..." : "Уже реинвестировано"}
-                </button>
-              ) : null}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 // Разрез «Где хранится» (CLIENT_FLOW_PLAN §4.1) — byProvider из /api/portfolio/structure.
-const CASH_STORAGE_KEY = "Свободные деньги";
 function StorageList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
   return (
     <div className="product-list">
       {items.map((item) => {
         const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-        // Свободные деньги — не банк: ведут к операциям, где видно, откуда они взялись.
-        const isCash = item.key === CASH_STORAGE_KEY;
         return (
           <div className="list-row" key={item.key}>
-            <Link className="product-row-summary" to={isCash ? "/transactions" : `/products?bank=${encodeURIComponent(item.key)}`}>
+            <Link className="product-row-summary" to={`/products?bank=${encodeURIComponent(item.key)}`}>
               <span className="product-row-line1">
                 <span className="product-row-name">
                   <strong>{item.key}</strong>
@@ -999,11 +824,11 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
               </span>
               <span className="product-row-line2 product-row-line2-flush">
                 <span className="muted product-row-meta">
-                  {isCash ? "пополнения, выплаты и продажи" : `${item.positions} ${pluralInstruments(item.positions)}`}
+                  {`${item.positions} ${pluralInstruments(item.positions)}`}
                   {!unvalued(item) && ` · ${Math.round(item.share ?? 0)}% портфеля`}
                   {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
                 </span>
-                {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
+                <span className={pnl.className}>{pnl.percentText}</span>
               </span>
             </Link>
           </div>
@@ -1122,11 +947,9 @@ function AppMvp() {
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [brokerStatus, setBrokerStatus] = useState<BrokerStatus | null>(null);
-  // Лента «Требует внимания» и разрез «Где хранится» считаются на бэкенде; null — ещё не
-  // загружены или нет связи (тогда блоки на главной не показываются, а не врут пустотой).
-  const [loadedAttention, setAttention] = useState<AttentionItem[] | null>(null);
+  // Разрез «Где хранится» считается на бэкенде; null — ещё не загружен или нет связи
+  // (тогда блок на главной не показывается, а не врёт пустотой).
   const [loadedStructure, setStructure] = useState<PortfolioStructure | null>(null);
-  const attention = apiOnline ? loadedAttention : null;
   const structure = apiOnline ? loadedStructure : null;
   const storage = structure?.byProvider ?? null;
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -1235,25 +1058,18 @@ function AppMvp() {
     const timer = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
-  // Любая правка позиций, выплат или статуса брокера меняет ленту внимания и разрез по
-  // банкам — перезапрашиваем их вслед за основными данными.
+  // Любая правка позиций, выплат или статуса брокера меняет разрез по банкам —
+  // перезапрашиваем его вслед за основными данными.
   useEffect(() => {
     if (!apiOnline || !token) return;
     let cancelled = false;
-    const headers = { Authorization: `Bearer ${token}` };
-    void Promise.all([
-      apiFetch(`${apiUrl}/attention`, { headers }),
-      apiFetch(`${apiUrl}/portfolio/structure`, { headers }),
-    ])
-      .then(async ([attentionResponse, structureResponse]) => {
+    void apiFetch(`${apiUrl}/portfolio/structure`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(async (structureResponse) => {
         if (cancelled) return;
-        setAttention(attentionResponse.ok ? ((await attentionResponse.json()) as AttentionItem[]) : null);
         setStructure(structureResponse.ok ? ((await structureResponse.json()) as PortfolioStructure) : null);
       })
       .catch(() => {
-        if (cancelled) return;
-        setAttention(null);
-        setStructure(null);
+        if (!cancelled) setStructure(null);
       });
     return () => {
       cancelled = true;
@@ -1334,12 +1150,10 @@ function AppMvp() {
         const result = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(result.error || "Не удалось сохранить продукт");
       }
-      const paidFromCash = Boolean((product as { fromCash?: boolean }).fromCash);
       product = (await response.json()) as Product;
       // Сервер при сохранении строит прогноз выплат (проценты и возврат вклада, купоны) —
       // без перечитывания «Выплаты» показывали старый список до перезагрузки страницы.
-      // Оплата из свободных денег заводит покупку — её видно в «Операциях».
-      await Promise.all([refreshSummary(), refreshPayments(), paidFromCash ? refreshTransactions() : undefined]);
+      await Promise.all([refreshSummary(), refreshPayments()]);
     }
     setProducts((current) => [...current, product]);
     setToast("Продукт добавлен в портфель");
@@ -1400,27 +1214,6 @@ function AppMvp() {
       current.map((item) => (item.id === payment.id ? updated : item)),
     );
     setToast("Выплата отмечена полученной");
-  }
-  // «Уже реинвестировано» (из ленты внимания или после добавления продукта на эти деньги):
-  // отметка снимает напоминание; лента перезапрашивается вслед за изменением выплат.
-  async function markPaymentsReinvested(ids: string[], quiet = false) {
-    const updated = new Map<string, Payment>();
-    for (const id of ids) {
-      if (apiOnline) {
-        const response = await apiFetch(`${apiUrl}/payouts/${id}`, {
-          method: "PATCH",
-          headers: authHeaders,
-          body: JSON.stringify({ reinvested: true }),
-        });
-        if (!response.ok) throw new Error("Не удалось отметить выплату реинвестированной");
-        updated.set(id, (await response.json()) as Payment);
-      } else {
-        const payment = payments.find((item) => item.id === id);
-        if (payment) updated.set(id, { ...payment, reinvested: true });
-      }
-    }
-    setPayments((current) => current.map((item) => updated.get(item.id) ?? item));
-    if (!quiet) setToast("Отмечено: деньги реинвестированы");
   }
   async function removePayment(id: string) {
     if (apiOnline) {
@@ -1688,8 +1481,6 @@ function AppMvp() {
   // Ссылка из письма восстановления пароля должна работать независимо от того, есть ли
   // в этом браузере ещё активная сессия (например, письмо открыто на другом устройстве),
   // поэтому маршрут проверяется до проверки токена, а не только в неавторизованной ветке.
-  // Бейдж у колокольчика — только срочное и важное: «к сведению» не должно висеть вечно.
-  const urgentCount = attention?.filter((item) => item.severity <= 2).length ?? 0;
   setBaseCurrencySign(summary?.baseCurrency);
   if (location.pathname === "/reset-password") return <ResetPasswordPage />;
   if (!token) {
@@ -1798,25 +1589,6 @@ function AppMvp() {
                     : "Т-Инвестиции подключены"}
               </Link>
             ) : null}
-            <Link
-              className="icon-button"
-              aria-label={
-                urgentCount > 0 ? `Требует внимания: ${urgentCount}` : "Требует внимания"
-              }
-              to="/attention"
-            >
-              <svg className="bell-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                <path
-                  d="M12 3a6 6 0 0 0-6 6v3.6l-1.6 2.9A1 1 0 0 0 5.3 17h13.4a1 1 0 0 0 .9-1.5L18 12.6V9a6 6 0 0 0-6-6Zm-2.3 15.5a2.4 2.4 0 0 0 4.6 0"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              {urgentCount > 0 && <span className="attention-badge">{urgentCount}</span>}
-            </Link>
             <button
               className="mobile-menu"
               aria-label={menuOpen ? "Закрыть меню" : "Открыть меню"}
@@ -1843,11 +1615,8 @@ function AppMvp() {
                 onHide={() => setHideAmounts(!hideAmounts)}
                 apiOnline={apiOnline}
                 brokerStatus={brokerStatus}
-                attention={attention}
                 storage={storage}
                 currencies={structure?.byCurrency ?? null}
-                onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
-                onMarkReinvested={withErrorToast(markPaymentsReinvested, "Не удалось отметить выплату реинвестированной")}
               />
             }
           />
@@ -1874,7 +1643,6 @@ function AppMvp() {
                 onUnauthorized={expireSession}
                 onSubmit={addProduct}
                 onOcrComplete={applyOcrResult}
-                onMarkReinvested={(ids) => markPaymentsReinvested(ids, true)}
               />
             }
           />
@@ -1956,21 +1724,9 @@ function AppMvp() {
               <AnalyticsPage summary={summary} token={token} />
             }
           />
-          <Route path="/analytics/taxes" element={<TaxPage token={token} />} />
           <Route
             path="/recommendations"
             element={<Recommendations token={token} />}
-          />
-          <Route
-            path="/attention"
-            element={
-              <AttentionPage
-                attention={attention}
-                payments={payments}
-                onMarkReceived={withErrorToast(markPaymentReceived, "Не удалось отметить выплату полученной")}
-                onMarkReinvested={withErrorToast(markPaymentsReinvested, "Не удалось отметить выплату реинвестированной")}
-              />
-            }
           />
           <Route
             path="/integrations"
@@ -1989,11 +1745,12 @@ function AppMvp() {
           />
           <Route
             path="/import"
-            element={<StatementImportPage token={token} onImported={() => setReloadKey((key) => key + 1)} />}
-          />
-          <Route
-            path="/import/undo/:batch"
-            element={<ImportUndoPage token={token} onUndone={() => setReloadKey((key) => key + 1)} />}
+            element={
+              <ComingSoonPage
+                title="Импорт"
+                text="Импорт выписок CSV и Excel появится в следующей версии приложения."
+              />
+            }
           />
           <Route
             path="/settings"
@@ -2002,7 +1759,6 @@ function AppMvp() {
                 token={token}
                 themePreference={themePreference}
                 onThemeChange={setThemePreference}
-                onTargetsSaved={() => void refreshSummary()}
               />
             }
           />
@@ -2049,11 +1805,8 @@ function Dashboard({
   onHide,
   apiOnline,
   brokerStatus,
-  attention,
   storage,
   currencies,
-  onMarkReceived,
-  onMarkReinvested,
 }: {
   summary: PortfolioSummary | null;
   products: Product[];
@@ -2063,11 +1816,8 @@ function Dashboard({
   onHide: () => void;
   apiOnline: boolean;
   brokerStatus: BrokerStatus | null;
-  attention: AttentionItem[] | null;
   storage: StructureBreakdown[] | null;
   currencies: StructureBreakdown[] | null;
-  onMarkReceived: (payment: Payment) => Promise<void>;
-  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const dataLoaded = useContext(DataLoadedContext);
   // Разрез структуры (П31): «Категории» и «Где хранится» — один блок с переключателем.
@@ -2091,9 +1841,8 @@ function Dashboard({
   const lastSnapshot = history.at(-1);
   // Кратковременный зазор до первого ответа /api/portfolio/summary (или офлайн-эффекта) —
   // не пересчитываем показатели порталу целиком, просто не даём странице упасть.
-  const { total, profit, paid, overdue, cash, groups, valuation, rebalance = [] } =
+  const { total, profit, paid, overdue, groups, valuation } =
     summary ?? localSummary(products, payments);
-  const rebalanceByGroup = new Map(rebalance.map((row) => [row.group, row]));
   const result = portfolioResult(summary ?? localSummary(products, payments));
   // Из чего сложился результат: цена, выплаты, комиссии и налоги — одной строкой.
   const summaryBreakdown = summary?.financialResult !== undefined && summary.financialResult !== null
@@ -2106,8 +1855,6 @@ function Dashboard({
         summary.taxes ? `налоги ${signedMoney(-summary.taxes, display)}` : null,
       ].filter(Boolean).join(" · ")
     : "";
-  // Категория с целью, которой в портфеле ещё нет, — отдельной строкой «докупить».
-  const missingTargets = rebalance.filter((row) => !groups.some((group) => group.group === row.group));
   const brokerDegraded = brokerStatus?.status === "error";
   const brokerHasCache = brokerDegraded && Boolean(brokerStatus?.lastSyncAt);
   if (!dataLoaded) {
@@ -2117,11 +1864,7 @@ function Dashboard({
       </div>
     );
   }
-  // Портфель из одних свободных денег (пополнение без покупок) не пуст (§12, BUG-05).
-  // cash === null — деньги есть, но курса их валюты нет (Т18); минус по операциям (Т19)
-  // тоже не «пустой портфель».
-  const cashShortfall = summary?.cashShortfall ?? [];
-  if (products.length === 0 && cash === 0 && cashShortfall.length === 0) {
+  if (products.length === 0) {
     return (
       <div className="content-wrap">
         <section className="empty-portfolio">
@@ -2149,22 +1892,11 @@ function Dashboard({
                 <small>Если у вас нет скриншота под рукой</small>
               </div>
             </Link>
-            <Link className="empty-option" to="/import">
-              <span className="empty-option-icon">⇩</span>
-              <div>
-                <strong>
-                  Загрузить выписку из банка
-                </strong>
-                <small>CSV из интернет-банка: пополнения, снятия и проценты</small>
-              </div>
-            </Link>
           </div>
         </section>
       </div>
     );
   }
-  const topAttention = attention?.slice(0, 4) ?? [];
-  const urgentAttention = attention?.filter((item) => item.severity <= 2).length ?? 0;
   return (
     <div className="content-wrap">
       <section className="page-heading">
@@ -2205,17 +1937,13 @@ function Dashboard({
         {summaryBreakdown && <p className="muted result-breakdown">{summaryBreakdown}</p>}
         <div className="total-stats">
           <div>
-            <span>Внесено своих</span>
-            <strong>{display(result.contributed)}</strong>
+            <span>Вложено</span>
+            <strong>{display(result.invested)}</strong>
           </div>
           <div>
             <span>Получено выплат</span>
             <strong>{display(paid)}</strong>
           </div>
-          <Link to="/transactions">
-            <span>Свободные деньги</span>
-            <strong>{cash === null ? "Оценка недоступна" : display(cash)}</strong>
-          </Link>
         </div>
         {brokerHasCache && (
           <div className="demo-note warn">
@@ -2228,16 +1956,6 @@ function Dashboard({
           <div className="demo-note warn">
             ⚠ Не удалось загрузить данные от брокера «Т-Инвестиции». Показана только доступная
             часть портфеля. <Link to="/integrations">Повторить подключение</Link>
-          </div>
-        )}
-        {cashShortfall.length > 0 && (
-          <div className="demo-note warn">
-            ⚠ Расходов в операциях больше, чем поступлений:{" "}
-            {cashShortfall
-              .map((item) => `−${item.amount.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${currencySigns[item.currency] ?? item.currency}`)
-              .join(", ")}. В свободные деньги
-            минус не идёт — добавьте начальный остаток или пополнения.{" "}
-            <Link to="/transactions/new">Добавить пополнение</Link>
           </div>
         )}
         {valuation.incomplete && (
@@ -2259,7 +1977,7 @@ function Dashboard({
             для них нет.
           </div>
         )}
-        {!attention && overdue > 0 && (
+        {overdue > 0 && (
           <div className="demo-note warn">
             ⚠ Не отмечено полученными {display(overdue)}. <Link to="/payments">Отметить</Link>
           </div>
@@ -2306,12 +2024,11 @@ function Dashboard({
             <div className="product-list category-list">
               {groups.map((groupSummary) => {
                 const pnl = pnlDisplay(groupSummary.pnl, groupSummary.pnlPercent);
-                const isCash = groupSummary.group === "Деньги";
                 return (
                   <div className="list-row" key={groupSummary.group}>
                     <Link
                       className="product-row-summary"
-                      to={isCash ? "/transactions" : `/products?group=${encodeURIComponent(groupSummary.group)}`}
+                      to={`/products?group=${encodeURIComponent(groupSummary.group)}`}
                     >
                       <span className="product-row-line1">
                         <span className="product-row-name">
@@ -2322,46 +2039,16 @@ function Dashboard({
                       </span>
                       <span className="product-row-line2">
                         <span className="muted product-row-meta">
-                          {isCash
-                            ? `${Math.round(groupSummary.share ?? 0)}% портфеля`
-                            : `${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
+                          {`${groupSummary.positions} ${pluralInstruments(groupSummary.positions)} · ${Math.round(groupSummary.share ?? 0)}% портфеля`}
                         </span>
-                        {!isCash && <span className={pnl.className}>{pnl.percentText}</span>}
+                        <span className={pnl.className}>{pnl.percentText}</span>
                       </span>
-                      {rebalanceByGroup.has(groupSummary.group) && (
-                        <span className="product-row-line2">
-                          <span className={`product-row-meta ${Math.abs(rebalanceByGroup.get(groupSummary.group)!.deviation) >= 5 ? "warning-text" : "muted"}`}>
-                            {rebalanceText(rebalanceByGroup.get(groupSummary.group)!, display)}
-                          </span>
-                        </span>
-                      )}
                     </Link>
                   </div>
                 );
               })}
-              {missingTargets.map((row) => (
-                <div className="list-row" key={row.group}>
-                  <Link className="product-row-summary" to="/products/new">
-                    <span className="product-row-line1">
-                      <span className="product-row-name">
-                        <i className={`legend type-dot ${typeColors[row.group as AssetType] ?? "slate"}`} />
-                        <strong>{row.group}</strong>
-                      </span>
-                      <span className="product-row-sum muted">нет в портфеле</span>
-                    </span>
-                    <span className="product-row-line2">
-                      <span className="product-row-meta warning-text">{rebalanceText(row, display)}</span>
-                    </span>
-                  </Link>
-                </div>
-              ))}
             </div>
           </div>
-          {apiOnline && rebalance.length === 0 && groups.length > 1 && (
-            <p className="muted target-hint">
-              <Link to="/settings#target">Задать целевую структуру</Link> — и приложение подскажет, что докупить.
-            </p>
-          )}
         </>
       )}
       <section className="section-heading">
@@ -2411,32 +2098,6 @@ function Dashboard({
           </div>
         )}
       </article>
-      {/* Внимание — внизу экрана: список длинный и оттеснял структуру портфеля (П30). */}
-      {attention && (
-        <>
-          <section className="section-heading">
-            <div>
-              {/* Число в заголовке — то же, что на колокольчике (критик К9): срочное и важное.
-                  «К сведению» считается отдельно, чтобы два счётчика не спорили. */}
-              {/* Срочного нет — заголовок «К сведению», а не повисшее «и N к сведению» (Т22). */}
-              <h2>{urgentAttention > 0 ? `Требует внимания · ${urgentAttention}` : attention.length > 0 ? `К сведению · ${attention.length}` : "Требует внимания"}</h2>
-              {urgentAttention > 0 && attention.length > urgentAttention && (
-                <p className="muted">и {attention.length - urgentAttention} к сведению</p>
-              )}
-            </div>
-            {attention.length > topAttention.length && (
-              <Link className="outline-button" to="/attention">
-                Все <span>→</span>
-              </Link>
-            )}
-          </section>
-          {topAttention.length === 0 ? (
-            <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
-          ) : (
-            <AttentionList items={topAttention} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
-          )}
-        </>
-      )}
       {!apiOnline && (
         <div className="demo-note">
           <span>✦</span> Нет связи с сервером — данные сохраняются только
@@ -2588,37 +2249,16 @@ function ProductRow({
   );
 }
 
-function FreeCashRow({ cash }: { cash: number | null }) {
-  return (
-    <div className="list-row">
-      <Link className="product-row-summary" to="/transactions">
-        <span className="product-row-line1">
-          <span className="product-row-name">
-            <i className={`legend type-dot ${typeColors["Деньги"]}`} title="Деньги" />
-            <strong>Свободные деньги</strong>
-          </span>
-          <span className="product-row-sum">{cash === null ? "Оценка недоступна" : money(cash)}</span>
-        </span>
-        <span className="product-row-line2">
-          <span className="muted product-row-meta">пополнения, выплаты и продажи</span>
-        </span>
-      </Link>
-    </div>
-  );
-}
-
 // Строки одного блока «Инструментов» со своей пагинацией: свёрнутый соседний блок
 // не должен съедать первые 20 строк этого (П29).
 function ProductSectionList({
   items,
   nearestPayoutByInstrument,
   showInstitution,
-  cash,
 }: {
   items: Product[];
   nearestPayoutByInstrument: Map<string, NearestPayout>;
   showInstitution: boolean;
-  cash?: number | null;
 }) {
   const { visible, hasMore, loadMore, pageSize, setPageSize } = usePagedList(items);
   return (
@@ -2632,7 +2272,6 @@ function ProductSectionList({
             showInstitution={showInstitution}
           />
         ))}
-        {cash !== undefined && <FreeCashRow cash={cash} />}
       </div>
       <ListPagination hasMore={hasMore} onLoadMore={loadMore} pageSize={pageSize} onPageSizeChange={setPageSize} />
     </>
@@ -2679,12 +2318,7 @@ function ProductsPage({
   // Закрытые вклады и погашенные бумаги в списке не показываем (П32, решение владельца):
   // в портфель они уже не входят, карточка открывается из операций и выплат.
   const active = products.filter((product) => !product.closedOn);
-  // Свободные деньги — не инструмент, но входят в категорию «Деньги» на главной и в
-  // «Аналитике»: без этой строки категория здесь не сходилась с итогом (П8). К банку их
-  // не привязать (пополнение вводится без счёта), поэтому при фильтре по банку строки нет.
-  const cash = summary?.cash;
-  const showCash = cash !== undefined && cash !== 0 && !bank && (!group || group === "Деньги");
-  const productTypes = Array.from(new Set([...active.map((product) => product.type), ...(showCash ? ["Деньги" as AssetType] : [])]));
+  const productTypes = Array.from(new Set(active.map((product) => product.type)));
   const banks = Array.from(new Set(active.map((product) => product.institution).filter(Boolean))).sort();
   const filtered = active.filter(
     (product) => (!group || product.type === group) && (!bank || product.institution === bank),
@@ -2705,10 +2339,6 @@ function ProductsPage({
     if (section) section.items.push(product);
     else sections.push({ type: product.type, items: [product] });
   }
-  if (showCash && !sections.some((section) => section.type === "Деньги")) {
-    const at = group ? 0 : sections.findIndex((section) => rank(section.type) > rank("Деньги"));
-    sections.splice(at === -1 ? sections.length : at, 0, { type: "Деньги", items: [] });
-  }
   // Итоги среза — готовые цифры бэкенда (§8, §10): категория из сводки, банк из структуры.
   const groupTotals = group ? summary?.groups.find((item) => item.group === group) : undefined;
   const bankTotals = bank && !group ? storage?.find((item) => item.key === bank) : undefined;
@@ -2719,7 +2349,7 @@ function ProductsPage({
       : undefined;
   const totalsPnl = totals ? pnlDisplay(totals.pnl, totals.pnlPercent) : null;
   // Сумма в заголовке блока: без фильтра по банку — итог категории из сводки Portfolio
-  // Engine (в «Деньгах» он уже со свободными деньгами); со срезом по банку сводки по
+  // Engine; со срезом по банку сводки по
   // категории внутри банка нет — складываем оценки строк, а бумаги без оценки называем.
   function sectionTotal(type: AssetType, items: Product[]) {
     const fromSummary = !bank ? summary?.groups.find((item) => item.group === type) : undefined;
@@ -2829,7 +2459,7 @@ function ProductsPage({
           </ul>
         </div>
       )}
-      {ordered.length === 0 && !showCash ? (
+      {ordered.length === 0 ? (
         <p className="muted">
           {active.length === 0
             ? "Пока нет добавленных инструментов."
@@ -2842,12 +2472,11 @@ function ProductsPage({
               items={section.items}
               nearestPayoutByInstrument={nearestPayoutByInstrument}
               showInstitution={!bank}
-              cash={section.type === "Деньги" && showCash ? cash : undefined}
             />
           );
           // На странице категории заголовок блока повторил бы заголовок страницы.
           if (group) return <div key={section.type}>{list}</div>;
-          const count = section.items.length + (section.type === "Деньги" && showCash ? 1 : 0);
+          const count = section.items.length;
           return (
             <FoldSection
               key={section.type}
@@ -3061,7 +2690,7 @@ function PaymentRow({
     product ? (payment.type === "DEPOSIT_PRINCIPAL" ? "Возврат вклада" : typeLabel) : title !== typeLabel ? typeLabel : null,
     institution,
     payment.source === "forecast" && payment.status === "expected" ? "прогноз" : null,
-    payment.status === "received" ? (payment.reinvested ? "реинвестировано" : "получено") : null,
+    payment.status === "received" ? "получено" : null,
   ].filter(Boolean);
   return (
     <div className="list-row">
@@ -3104,11 +2733,6 @@ function PaymentRow({
               <button type="button" className="outline-button" disabled={marking} onClick={() => onMarkReceived(payment)}>
                 {marking ? "Сохраняем..." : "Отметить полученной"}
               </button>
-            )}
-            {payment.status === "received" && !payment.reinvested && (
-              <Link className="outline-button" to={reinvestLink(payment.amount, institution, title, payment.currency, [payment.id])}>
-                Реинвестировать
-              </Link>
             )}
             {product && (
               <Link className="outline-button" to={`/products/${product.id}`}>
@@ -3995,7 +3619,7 @@ function AnalyticsPage({
   const byGroup: StructureBreakdown[] = groups.map((group) => ({ ...group, key: group.group }));
   const [structure, setStructure] = useState<PortfolioStructure | null>(null);
   const [structureError, setStructureError] = useState("");
-  const topInstrument = structure?.byInstrument.find((item) => !item.key.startsWith("Денежные средства"));
+  const topInstrument = structure?.byInstrument[0];
   const [returns, setReturns] = useState<PeriodReturn[] | null>(null);
   const isEmpty = groups.length === 0;
 
@@ -4062,9 +3686,6 @@ function AnalyticsPage({
         </article>
       </div>
       <PeriodReturns rows={returns} />
-      <p className="target-hint muted">
-        <Link to="/analytics/taxes">Оценка НДФЛ и доходы для 3-НДФЛ</Link> — сколько налога набегает за год.
-      </p>
       <BreakdownList
         title="По категориям"
         items={byGroup}
@@ -4130,543 +3751,11 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
     </section>
   );
 }
-type StatementMapping = {
-  date: number | null;
-  amount: number | null;
-  income: number | null;
-  expense: number | null;
-  description: number | null;
-  currency: number | null;
-  status: number | null;
-};
-type StatementPreviewRow = {
-  line: number;
-  date?: string;
-  amount?: number;
-  type?: "DEPOSIT" | "WITHDRAW" | "INTEREST";
-  currency: string;
-  description: string;
-  error?: string;
-  duplicate: boolean;
-  skipped: boolean;
-};
-type StatementCounts = {
-  found: number;
-  errors: number;
-  duplicates: number;
-  skipped: number;
-  toImport: number;
-  incomeRub: number;
-  expenseRub: number;
-};
-type StatementPreview = {
-  headers: string[];
-  mapping: StatementMapping;
-  rows: StatementPreviewRow[];
-  counts: StatementCounts;
-};
-const MAPPING_FIELDS: [keyof StatementMapping, string][] = [
-  ["date", "Дата"],
-  ["amount", "Сумма (со знаком)"],
-  ["income", "Приход"],
-  ["expense", "Расход"],
-  ["description", "Описание"],
-  ["currency", "Валюта"],
-  ["status", "Статус"],
-];
-const STATEMENT_TYPE_LABELS: Record<NonNullable<StatementPreviewRow["type"]>, string> = {
-  DEPOSIT: "Пополнение",
-  WITHDRAW: "Снятие",
-  INTEREST: "Проценты",
-};
-// Отмена загрузки выписки — отдельная страница подтверждения, как любое удаление (§40.7).
-function ImportUndoPage({ token, onUndone }: { token: string; onUndone: () => void }) {
-  const { batch } = useParams();
-  const navigate = useNavigate();
-  const [state, setState] = useState<"confirm" | "busy" | "done">("confirm");
-  const [deleted, setDeleted] = useState(0);
-  const [error, setError] = useState("");
-  async function undo() {
-    setState("busy");
-    setError("");
-    try {
-      const response = await apiFetch(`${apiUrl}/imports/statement/${batch}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Не удалось отменить загрузку");
-      setDeleted(result.deleted);
-      setState("done");
-      onUndone();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось отменить загрузку");
-      setState("confirm");
-    }
-  }
-  return (
-    <Page title="Отменить загрузку выписки" subtitle="Операции этой загрузки будут удалены вместе с их выплатами" back>
-      {state === "done" ? (
-        <div className="empty-state">
-          <p>Удалено операций: <strong>{deleted}</strong></p>
-          <Link className="primary-button" to="/import">К импорту</Link>
-        </div>
-      ) : (
-        <div className="confirm-card">
-          <p>Удалятся все операции, добавленные этой загрузкой выписки. Операции, введённые вручную или загруженные другим файлом, останутся.</p>
-          <div className="confirm-actions">
-            <button type="button" className="delete-button primary" disabled={state === "busy"} onClick={undo}>
-              Удалить операции загрузки
-            </button>
-            <button type="button" className="outline-button" onClick={() => navigate(-1)}>
-              Не удалять
-            </button>
-          </div>
-        </div>
-      )}
-      {error && <p className="form-error">{error}</p>}
-    </Page>
-  );
-}
-const STATEMENT_MAX_BYTES = 6 * 1024 * 1024;
-function importErrorText(status: number, fallback: string) {
-  if (status === 413) return "Файл выписки слишком большой. Выгрузите выписку за более короткий период.";
-  if (status === 502 || status === 504) {
-    return "Сервер не дождался конца загрузки. Проверьте раздел «Операции»: повторная загрузка того же файла ничего не задвоит.";
-  }
-  return fallback;
-}
-function operationsWord(count: number) {
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return "операцию";
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "операции";
-  return "операций";
-}
-// Файлы из интернет-банков бывают в UTF-8 и в Windows-1251: сначала строгий UTF-8,
-// при ошибке — кириллическая кодировка, иначе вместо заголовков была бы каша.
-// Excel «Текст в Юникоде» — UTF-16 с BOM (тестировщик Т17): узнаём по первым байтам.
-async function readStatementFile(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  // Excel-выписка (ВТБ, Альфа, Т-Банк): первый лист переводится в текст и идёт тем же разбором.
-  const signature = new Uint8Array(buffer.slice(0, 2));
-  if (/\.xlsx$/i.test(file.name) || (signature[0] === 0x50 && signature[1] === 0x4b)) return xlsxToText(buffer);
-  const head = new Uint8Array(buffer.slice(0, 2));
-  if (head[0] === 0xff && head[1] === 0xfe) return new TextDecoder("utf-16le").decode(buffer);
-  if (head[0] === 0xfe && head[1] === 0xff) return new TextDecoder("utf-16be").decode(buffer);
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
-  } catch {
-    return new TextDecoder("windows-1251").decode(buffer);
-  }
-}
-// Импорт банковской выписки (§27): файл → предпросмотр с найденными колонками и счётчиками
-// (найдено, ошибки, уже загружено) → загрузка. Разбор и проверки — на бэкенде; страница
-// только показывает результат и даёт поправить колонки. Все шаги — на одной странице
-// со своим URL, без модальных окон (§40.7).
-function StatementImportPage({ token, onImported }: { token: string; onImported: () => void }) {
-  const [fileName, setFileName] = useState("");
-  const [text, setText] = useState("");
-  const [preview, setPreview] = useState<StatementPreview | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"" | "reading" | "saving">("");
-  const [done, setDone] = useState<{ imported: number; duplicates: number; errors: number; skipped: number; batch?: string } | null>(null);
-  const [visible, setVisible] = useState(20);
-  const [pageSize, setPageSize] = useState(20);
-  const [institution, setInstitution] = useState("");
-  // Выписка по карте — это ещё и бытовые траты (критик К22): строки можно снять галочками
-  // или взять только поступления и проценты.
-  const [only, setOnly] = useState<"all" | "income">("all");
-  const [excluded, setExcluded] = useState<number[]>([]);
-
-  async function requestPreview(content: string, mapping?: StatementMapping, options?: { only?: "all" | "income"; exclude?: number[] }) {
-    setBusy("reading");
-    setError("");
-    try {
-      const response = await apiFetch(`${apiUrl}/imports/statement/preview`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text: content, mapping, only: options?.only ?? only, exclude: options?.exclude ?? excluded }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? importErrorText(response.status, "Не удалось прочитать выписку"));
-      setPreview(result as StatementPreview);
-    } catch (reason) {
-      setPreview(null);
-      setError(reason instanceof Error ? reason.message : "Не удалось прочитать выписку");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function chooseFile(file: File | undefined) {
-    if (!file) return;
-    setDone(null);
-    setVisible(pageSize);
-    setExcluded([]);
-    setFileName(file.name);
-    // Сбер и ВТБ отдают выписки и в PDF/XLS (критик К31): такие файлы не читаем, но говорим
-    // об этом прямо, а не показываем «нет строк с операциями».
-    if (/\.(pdf|xls|docx?)$/i.test(file.name)) {
-      setPreview(null);
-      setError(/\.xls$/i.test(file.name)
-        ? "Старый формат Excel (.xls) не читается. Откройте файл в Excel и сохраните как .xlsx или CSV."
-        : "Нужен CSV или Excel (.xlsx). В интернет-банке выберите выгрузку выписки в одном из этих форматов; PDF пока не читается.");
-      return;
-    }
-    if (file.size > STATEMENT_MAX_BYTES) {
-      setPreview(null);
-      setError("Файл выписки слишком большой. Выгрузите выписку за более короткий период — например, по полугодиям.");
-      return;
-    }
-    let content: string;
-    try {
-      content = await readStatementFile(file);
-    } catch (reason) {
-      setPreview(null);
-      setError(reason instanceof Error ? reason.message : "Не удалось прочитать файл");
-      return;
-    }
-    // Excel сжат: после распаковки текст может не пройти лимит сервера.
-    if (new Blob([content]).size > 9 * 1024 * 1024) {
-      setPreview(null);
-      setError("Файл выписки слишком большой. Выгрузите выписку за более короткий период — например, по полугодиям.");
-      return;
-    }
-    setText(content);
-    await requestPreview(content);
-  }
-
-  async function commit() {
-    if (!preview) return;
-    setBusy("saving");
-    setError("");
-    try {
-      const response = await apiFetch(`${apiUrl}/imports/statement`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mapping: preview.mapping, only, exclude: excluded, institution }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? importErrorText(response.status, "Не удалось загрузить выписку"));
-      setDone(result);
-      setPreview(null);
-      onImported();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось загрузить выписку");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  return (
-    <Page title="Импорт выписки" subtitle="Пополнения, снятия и проценты из выписки банка (CSV или Excel)">
-      {done ? (
-        <div className="empty-state">
-          <p>
-            Загружено операций: <strong>{done.imported}</strong>
-            {done.duplicates > 0 ? ` · уже были раньше: ${done.duplicates}` : ""}
-            {done.errors > 0 ? ` · пропущено с ошибкой: ${done.errors}` : ""}
-            {done.skipped > 0 ? ` · не выбрано: ${done.skipped}` : ""}
-          </p>
-          <div className="tax-controls">
-            <Link className="primary-button" to="/transactions">К операциям</Link>
-            {done.batch && done.imported > 0 && (
-              <Link className="outline-button" to={`/import/undo/${done.batch}`}>Отменить эту загрузку</Link>
-            )}
-            <button type="button" className="outline-button" onClick={() => { setDone(null); setFileName(""); setText(""); }}>
-              Загрузить ещё файл
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <label className="file-picker">
-            <span className="outline-button">Выбрать файл</span>
-            <span className="muted">{fileName || "CSV или Excel (.xlsx) — выписка из интернет-банка"}</span>
-            <input className="visually-hidden" type="file" accept=".csv,.xlsx,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => chooseFile(event.target.files?.[0])} />
-          </label>
-          <p className="muted small-note">
-            В интернет-банке выгрузите выписку по счёту или карте в CSV или Excel (.xlsx). Каждая строка станет операцией
-            со свободными деньгами: приход — пополнением, расход — снятием, начисленные проценты — доходом.
-          </p>
-        </>
-      )}
-      {error && <p className="form-error">{error}</p>}
-      {busy && <p>{busy === "saving" ? `Загружаем ${preview?.counts.toImport ?? ""} ${operationsWord(preview?.counts.toImport ?? 0)}…` : "Читаем файл…"}</p>}
-      {preview && !busy && (
-        <>
-          <section className="import-mapping">
-            <h2>Колонки</h2>
-            <div className="import-mapping-grid">
-              {MAPPING_FIELDS.map(([field, label]) => (
-                <label key={field}>
-                  {label}
-                  <select
-                    value={preview.mapping[field] ?? ""}
-                    onChange={(event) => {
-                      const value = event.target.value === "" ? null : Number(event.target.value);
-                      const next = { ...preview.mapping, [field]: value };
-                      // Сумма со знаком и пара «приход/расход» — два разных способа: выбор одного
-                      // сбрасывает другой, иначе выбранное молча игнорировалось (Т24).
-                      if (value !== null && field === "amount") Object.assign(next, { income: null, expense: null });
-                      if (value !== null && (field === "income" || field === "expense")) next.amount = null;
-                      requestPreview(text, next);
-                    }}
-                  >
-                    <option value="">— не использовать</option>
-                    {preview.headers.map((header, index) => (
-                      <option key={index} value={index}>{header || `Колонка ${index + 1}`}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
-            </div>
-          </section>
-          <div className="import-options">
-            <label>
-              Что загрузить
-              <select
-                value={only}
-                onChange={(event) => {
-                  const next = event.target.value === "income" ? "income" : "all";
-                  setOnly(next);
-                  requestPreview(text, preview.mapping, { only: next });
-                }}
-              >
-                <option value="all">Все операции</option>
-                <option value="income">Только поступления и проценты</option>
-              </select>
-            </label>
-            <label>
-              Банк (необязательно)
-              <input value={institution} onChange={(event) => setInstitution(event.target.value)} placeholder="Например, Сбербанк" />
-            </label>
-          </div>
-          {preview.counts.expenseRub > 0 && (
-            <div className="demo-note warn">
-              ⚠ Снятий на {preview.counts.expenseRub.toLocaleString("ru-RU")} ₽ при поступлениях на{" "}
-              {preview.counts.incomeRub.toLocaleString("ru-RU")} ₽ — они уменьшат свободные деньги. Если это выписка по
-              карте с обычными тратами, выберите «Только поступления и проценты» или снимите лишние строки.
-            </div>
-          )}
-          <div className="stat-strip">
-            <article className="stat-card"><span>Найдено строк</span><strong>{preview.counts.found}</strong></article>
-            <article className="stat-card"><span>Будет загружено</span><strong className="teal-text">{preview.counts.toImport}</strong></article>
-            <article className="stat-card">
-              <span>Пропустим</span>
-              <strong className={preview.counts.errors + preview.counts.duplicates + preview.counts.skipped > 0 ? "warning-text" : "muted"}>
-                {preview.counts.errors + preview.counts.duplicates + preview.counts.skipped}
-              </strong>
-              <small>
-                ошибки: {preview.counts.errors} · уже загружены: {preview.counts.duplicates} · не выбраны: {preview.counts.skipped}
-              </small>
-            </article>
-          </div>
-          <div className="product-list">
-            {preview.rows.slice(0, visible).map((row) => (
-              <article className="list-row" key={row.line}>
-                <div className="product-row-summary product-row-static tax-row import-row">
-                  {!row.error && !row.duplicate && (
-                    <input
-                      type="checkbox"
-                      aria-label="Загрузить строку"
-                      checked={!row.skipped}
-                      disabled={only === "income" && row.type === "WITHDRAW"}
-                      onChange={() => {
-                        const next = excluded.includes(row.line) ? excluded.filter((line) => line !== row.line) : [...excluded, row.line];
-                        setExcluded(next);
-                        requestPreview(text, preview.mapping, { exclude: next });
-                      }}
-                    />
-                  )}
-                  <span className="product-row-line1">
-                    <strong>{row.description || (row.type ? STATEMENT_TYPE_LABELS[row.type] : `Строка ${row.line}`)}</strong>
-                    <span className={row.type === "WITHDRAW" ? "danger-text" : row.type ? "teal-text" : "muted"}>
-                      {row.amount !== undefined
-                        ? `${row.type === "WITHDRAW" ? "−" : "+"}${row.amount.toLocaleString("ru-RU")} ${row.currency}`
-                        : "—"}
-                    </span>
-                  </span>
-                  <small className={row.error ? "warning-text" : "muted"}>
-                    {row.error
-                      ? `Строка ${row.line}: ${row.error}`
-                      : `${row.date ? dateLabel(row.date) : ""} · ${row.type ? STATEMENT_TYPE_LABELS[row.type] : ""}${row.duplicate ? " · уже загружено" : ""}`}
-                  </small>
-                </div>
-              </article>
-            ))}
-          </div>
-          <div className="tax-controls">
-            {preview.rows.length > visible && (
-              <button type="button" className="outline-button" onClick={() => setVisible((count) => count + pageSize)}>
-                Загрузить ещё
-              </button>
-            )}
-            <label className="muted">
-              Строк на странице{" "}
-              <select
-                value={pageSize}
-                onChange={(event) => {
-                  const size = Number(event.target.value);
-                  setPageSize(size);
-                  setVisible(size);
-                }}
-              >
-                {[20, 50, 100].map((size) => (
-                  <option key={size} value={size}>{size}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="tax-controls">
-            <button type="button" className="primary-button" disabled={preview.counts.toImport === 0} onClick={commit}>
-              Загрузить {preview.counts.toImport} {operationsWord(preview.counts.toImport)}
-            </button>
-          </div>
-        </>
-      )}
-    </Page>
-  );
-}
-type TaxLine = { key: string; label: string; income: number; exempt: number; taxBase: number; how: string };
-type TaxEstimate = {
-  year: number;
-  lines: TaxLine[];
-  taxBase: number;
-  tax: number;
-  withheld: number;
-  toPay: number;
-  keyRate: number;
-  keyRateAssumed: boolean;
-  unconverted: string[];
-  salesWithoutCost: number;
-};
-// Оценка НДФЛ считается на бэкенде; страница только показывает строки и скачивает CSV.
-// Налог всегда в рублях, поэтому суммы — рублёвые, а не в базовой валюте портфеля.
-function TaxPage({ token }: { token: string }) {
-  const currentYear = new Date().getFullYear();
-  const [year, setYear] = useState(currentYear);
-  const [estimate, setEstimate] = useState<TaxEstimate | null>(null);
-  const [error, setError] = useState("");
-  const rub = (value: number) => `${Math.round(value).toLocaleString("ru-RU")} ₽`;
-
-  useEffect(() => {
-    let cancelled = false;
-    apiFetch(`${apiUrl}/tax/estimate?year=${year}`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(async (response) => {
-        if (!response.ok) throw new Error();
-        const result = (await response.json()) as TaxEstimate;
-        if (!cancelled) { setEstimate(result); setError(""); }
-      })
-      .catch(() => { if (!cancelled) setError("Не удалось посчитать налог"); });
-    return () => {
-      cancelled = true;
-    };
-  }, [token, year]);
-
-  async function download() {
-    try {
-      const response = await apiFetch(`${apiUrl}/tax/export?year=${year}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!response.ok) throw new Error();
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `dohody-${year}.csv`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      setError("Не удалось выгрузить доходы");
-    }
-  }
-
-  const years = [currentYear, currentYear - 1, currentYear - 2, currentYear - 3];
-  return (
-    <Page title="Налоги" subtitle="Оценка НДФЛ с инвестиционных доходов за год" back>
-      <div className="tax-controls">
-        <label>
-          Год{" "}
-          <select value={year} onChange={(event) => setYear(Number(event.target.value))}>
-            {years.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
-        </label>
-        <button type="button" className="outline-button" onClick={download}>
-          Скачать доходы для 3-НДФЛ (CSV)
-        </button>
-      </div>
-      {error && <p className="form-error">{error}</p>}
-      {!error && !estimate && <p>Считаем…</p>}
-      {estimate && (
-        <>
-          <div className="stat-strip">
-            <article className="stat-card">
-              <span>Налог за {estimate.year}</span>
-              <strong>{rub(estimate.tax)}</strong>
-              <small>с базы {rub(estimate.taxBase)}</small>
-            </article>
-            <article className="stat-card">
-              <span>Уже удержано</span>
-              <strong>{rub(estimate.withheld)}</strong>
-              <small>по налогу, указанному в операциях</small>
-            </article>
-            <article className="stat-card">
-              <span>Остаётся</span>
-              <strong className={estimate.toPay > 0 ? "warning-text" : "muted"}>{rub(estimate.toPay)}</strong>
-              <small>если не удержано — сверьте со справкой брокера</small>
-            </article>
-          </div>
-          <div className="product-list">
-            {estimate.lines.map((line) => (
-              <article className="list-row" key={line.key}>
-                <div className="product-row-summary product-row-static tax-row">
-                  <span className="product-row-line1">
-                    <strong>{line.label}</strong>
-                    <span className={line.taxBase < 0 ? "teal-text" : undefined}>
-                      {line.taxBase < 0 ? `−${rub(-line.taxBase)}` : rub(line.taxBase)}
-                    </span>
-                  </span>
-                  <small className="muted">
-                    {line.income < 0 ? `Убыток ${rub(-line.income)}` : `Доход ${rub(line.income)}`}
-                    {line.exempt > 0 ? ` · не облагается ${rub(line.exempt)}` : ""}
-                  </small>
-                  <small className="muted">{line.how}</small>
-                </div>
-              </article>
-            ))}
-          </div>
-          {estimate.salesWithoutCost > 0 && (
-            <div className="demo-note warn">
-              ⚠ Продаж без себестоимости: {estimate.salesWithoutCost} — их результат в оценку не вошёл. Сверьтесь со
-              справкой брокера.
-            </div>
-          )}
-          {estimate.unconverted.length > 0 && (
-            <div className="demo-note warn">
-              ⚠ Суммы в {estimate.unconverted.join(", ")} не вошли: курса ЦБ для них нет.
-            </div>
-          )}
-          <p className="muted small-note">
-            Это оценка, а не расчёт налогового агента.{" "}
-            {estimate.keyRate > 0
-              ? `Необлагаемый процент по вкладам — 1 млн ₽ × ${estimate.keyRate}%${estimate.keyRateAssumed ? " (год не закончился — лимит может вырасти вместе с ключевой ставкой)" : ""}.`
-              : ""}{" "}
-            Шкала
-            13%, сверх {estimate.year >= 2025 ? "2,4" : "5"} млн ₽ — 15%. Валюта — по текущему курсу ЦБ; убытки прошлых
-            лет, ИИС и льгота долгосрочного владения не учитываются.
-          </p>
-        </>
-      )}
-    </Page>
-  );
-}
 type RecommendationRuleType =
   | "concentration"
   | "maturity"
   | "drawdown"
-  | "payout_gap"
-  | "rebalance";
+  | "payout_gap";
 type RecommendationItem = {
   ruleType: RecommendationRuleType;
   text: string;
@@ -4682,7 +3771,6 @@ const RECOMMENDATION_STYLE: Record<
   maturity: { label: "Погашение", color: "amber", warning: true },
   drawdown: { label: "Просадка", color: "pink", warning: true },
   payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
-  rebalance: { label: "Целевая структура", color: "indigo", warning: false },
 };
 
 function Recommendations({ token }: { token: string }) {
@@ -4753,12 +3841,10 @@ function Settings({
   token,
   themePreference,
   onThemeChange,
-  onTargetsSaved,
 }: {
   token: string;
   themePreference: ThemePreference;
   onThemeChange: (value: ThemePreference) => void;
-  onTargetsSaved: () => void;
 }) {
   const [portfolioName, setPortfolioName] = useState("");
   const [baseCurrency, setBaseCurrency] = useState("RUB");
@@ -4769,47 +3855,6 @@ function Settings({
   ]);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
-  const [targets, setTargets] = useState<Record<string, string>>({});
-  const [targetMessage, setTargetMessage] = useState("");
-  const [targetSaved, setTargetSaved] = useState(false);
-  const [savingTargets, setSavingTargets] = useState(false);
-  const targetSum = TARGET_GROUPS.reduce((sum, group) => sum + (Number(targets[group]) || 0), 0);
-  const location = useLocation();
-  const targetRef = useRef<HTMLFormElement>(null);
-  useEffect(() => {
-    if (location.hash === "#target") targetRef.current?.scrollIntoView({ block: "start" });
-  }, [location.hash]);
-
-  const saveTargets = async (event: FormEvent, clear = false) => {
-    event.preventDefault();
-    setSavingTargets(true);
-    setTargetMessage("");
-    setTargetSaved(false);
-    try {
-      const targetAllocation = clear
-        ? {}
-        : Object.fromEntries(TARGET_GROUPS.filter((group) => targets[group]).map((group) => [group, Number(targets[group])]));
-      const response = await apiFetch(`${apiUrl}/settings`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ targetAllocation }),
-      });
-      const result = (await response.json()) as { targetAllocation?: Record<string, number>; error?: string };
-      if (!response.ok) {
-        setTargetMessage(result.error || "Не удалось сохранить целевую структуру");
-        return;
-      }
-      setTargets(targetsToInputs(result.targetAllocation));
-      setTargetMessage(clear ? "Целевая структура снята" : "Целевая структура сохранена");
-      setTargetSaved(true);
-      onTargetsSaved();
-    } catch (error) {
-      setTargetMessage(errorText(error, "Не удалось сохранить целевую структуру"));
-    } finally {
-      setSavingTargets(false);
-    }
-  };
-
   useEffect(() => {
     (async () => {
       const response = await apiFetch(`${apiUrl}/settings`, {
@@ -4820,11 +3865,9 @@ function Settings({
         portfolioName?: string;
         baseCurrency?: string;
         availableCurrencies?: string[];
-        targetAllocation?: Record<string, number>;
       };
       setPortfolioName(result.portfolioName || "");
       setBaseCurrency(result.baseCurrency || "RUB");
-      setTargets(targetsToInputs(result.targetAllocation));
       if (result.availableCurrencies) {
         setAvailableCurrencies(result.availableCurrencies);
       }
@@ -4907,44 +3950,6 @@ function Settings({
         <Link className="delete-button" to="/settings/delete-account">
           Удалить аккаунт
         </Link>
-      </form>
-      <form className="settings-card target-card" id="target" ref={targetRef} onSubmit={(event) => saveTargets(event)}>
-        <div>
-          <h2>Целевая структура</h2>
-          <p className="muted">
-            Какую долю портфеля вы хотите держать в каждой категории. На главной появится,
-            сколько докупить до цели, а сильное отклонение — в «Требует внимания».
-          </p>
-        </div>
-        <div className="target-grid">
-          {TARGET_GROUPS.map((group) => (
-            <label key={group}>
-              {group}, %
-              <input
-                type="number"
-                inputMode="decimal"
-                min="0"
-                max="100"
-                step="any"
-                value={targets[group] ?? ""}
-                onChange={(event) => setTargets((current) => ({ ...current, [group]: event.target.value }))}
-                placeholder="0"
-              />
-            </label>
-          ))}
-        </div>
-        <p className={Math.abs(targetSum - 100) <= 0.5 || targetSum === 0 ? "muted" : "form-error"}>
-          Сумма: {String(Math.round(targetSum * 10) / 10).replace(".", ",")}% из 100%
-        </p>
-        {targetMessage && <p className={targetSaved ? "teal-text" : "form-error"}>{targetMessage}</p>}
-        <div className="form-actions">
-          <button className="primary-button" type="submit" disabled={savingTargets}>
-            {savingTargets ? "Сохранение…" : "Сохранить цель"}
-          </button>
-          <button className="outline-button" type="button" disabled={savingTargets} onClick={(event) => saveTargets(event, true)}>
-            Снять цель
-          </button>
-        </div>
       </form>
     </Page>
   );
@@ -5330,48 +4335,6 @@ function HermesIntegration() {
       )}
       {message && <div className="demo-note">{message}</div>}
     </div>
-  );
-}
-function AttentionPage({
-  attention,
-  payments,
-  onMarkReceived,
-  onMarkReinvested,
-}: {
-  attention: AttentionItem[] | null;
-  payments: Payment[];
-  onMarkReceived: (payment: Payment) => Promise<void>;
-  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
-}) {
-  const loaded = useContext(DataLoadedContext);
-  const { isFolded, toggle } = useFolded();
-  const sections = ([1, 2, 3] as const)
-    .map((severity) => ({ severity, items: (attention ?? []).filter((item) => item.severity === severity) }))
-    .filter((section) => section.items.length > 0);
-  return (
-    <Page title="Требует внимания" subtitle="Выплаты, сроки и данные, которые стоит проверить" back>
-      {attention === null ? (
-        <p className="muted">
-          {loaded ? "Список недоступен без связи с сервером." : "Загружаем…"}
-        </p>
-      ) : sections.length === 0 ? (
-        <p className="muted">Всё в порядке: ни выплат к отметке, ни сроков на ближайшие недели.</p>
-      ) : (
-        sections.map((section) => (
-          <FoldSection
-            key={section.severity}
-            className="attention-section"
-            title={attentionSeverityLabels[section.severity]}
-            dot={attentionSeverityColors[section.severity]}
-            count={section.items.length}
-            folded={isFolded(String(section.severity))}
-            onToggle={() => toggle(String(section.severity))}
-          >
-            <AttentionList items={section.items} payments={payments} onMarkReceived={onMarkReceived} onMarkReinvested={onMarkReinvested} />
-          </FoldSection>
-        ))
-      )}
-    </Page>
   );
 }
 function ComingSoonPage({ title, text }: { title: string; text: string }) {
@@ -6010,13 +4973,11 @@ function ProductFormPage({
   onUnauthorized,
   onSubmit,
   onOcrComplete,
-  onMarkReinvested,
 }: {
   token: string;
   onUnauthorized: () => void;
   onSubmit: (product: Product) => Promise<Product | void>;
   onOcrComplete: (result: OcrUploadResult) => void;
-  onMarkReinvested: (payoutIds: string[]) => Promise<void>;
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -6025,24 +4986,14 @@ function ProductFormPage({
   );
   const [type, setType] = useState<AssetType | null>(null);
   const [name, setName] = useState("");
-  // Реинвестирование (CLIENT_FLOW_PLAN §4.4): форма открывается с суммой пришедших денег
-  // и банком, куда они пришли.
-  const reinvestFrom = searchParams.get("reinvest");
-  const reinvestPayoutIds = (searchParams.get("payouts") ?? "").split(",").filter(Boolean);
-  const [amount, setAmount] = useState(() => searchParams.get("amount") ?? "");
-  // Реинвестируются уже пришедшие деньги: покупка списывает их из свободных, иначе
-  // одна и та же сумма окажется в портфеле дважды — деньгами и новым продуктом.
-  const [fromCash, setFromCash] = useState(() => Boolean(reinvestFrom));
+  const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayIsoDate);
   // Бумага (§17, §20): тикер с биржи и количество; цена покупки необязательна.
   const [security, setSecurity] = useState<MoexSecurity | null>(null);
   const [quantity, setQuantity] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
-  const [institution, setInstitution] = useState(() => searchParams.get("institution") ?? "");
-  const [currency, setCurrency] = useState(() => {
-    const fromQuery = searchParams.get("currency");
-    return fromQuery && ["RUB", "USD", "CNY"].includes(fromQuery) ? fromQuery : "RUB";
-  });
+  const [institution, setInstitution] = useState("");
+  const [currency, setCurrency] = useState("RUB");
   const [details, setDetails] = useState<ProductDetails>(emptyProductDetails);
   // Шаг мастера живёт в адресе (?step=2), а не только в памяти (тестировщик Т13, §40.7):
   // «Назад» в браузере возвращает на предыдущий шаг с уже введёнными данными, а не
@@ -6079,7 +5030,6 @@ function ProductFormPage({
     setType(null);
     setName("");
     setAmount("");
-    setFromCash(false);
     setDate(todayIsoDate());
     setSecurity(null);
     setQuantity("");
@@ -6113,7 +5063,7 @@ function ProductFormPage({
     if (!type) return;
     setSaving(true);
     setError("");
-    const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual", ...(fromCash ? { fromCash: true } : {}) };
+    const common = { id: crypto.randomUUID(), type, date, institution: institution || "Ручной ввод", source: "manual" };
     // Бумага уходит без суммы: название, параметры выпуска и цену сервер берёт с MOEX.
     // У вклада и прочего одна сумма — она же вложенная.
     const payload = isSecurity && security && !security.unlisted
@@ -6146,9 +5096,6 @@ function ProductFormPage({
     try {
       const created = await onSubmit(payload as unknown as Product);
       setSavedClosed(created?.closedOn ? { id: created.id, closedOn: created.closedOn } : null);
-      // Продукт куплен на пришедшие деньги — напоминание реинвестировать их больше не нужно.
-      // Сбой отметки не отменяет сохранённый продукт: её можно поставить из ленты вручную.
-      if (reinvestPayoutIds.length) await onMarkReinvested(reinvestPayoutIds).catch(() => undefined);
       setSaved(true);
     } catch (submitError) {
       setError(errorText(submitError, "Не удалось сохранить продукт"));
@@ -6254,13 +5201,6 @@ function ProductFormPage({
   }
   return (
     <Page title="Добавить продукт" subtitle="Ручной ввод или распознавание скриншота" back>
-      {reinvestFrom && (
-        <div className="demo-note">
-          Реинвестирование: «{reinvestFrom}»
-          {amount ? ` · ${money(Number(amount))}` : ""}
-          {institution ? ` · ${institution}` : ""}. Сумма и банк уже подставлены.
-        </div>
-      )}
       <div className="mode-switch">
         <button
           className={mode === "manual" ? "selected" : ""}
@@ -6484,13 +5424,6 @@ function ProductFormPage({
                   />
                 </label>
               )}
-              <label className="checkbox-label">
-                <input type="checkbox" checked={fromCash} onChange={(event) => setFromCash(event.target.checked)} />
-                Оплатить из свободных денег
-              </label>
-              {fromCash && (
-                <p className="muted">Сумма спишется со свободных денег — итог портфеля не вырастет дважды.</p>
-              )}
               <details className="details-block">
                 <summary>Добавить дополнительные детали</summary>
                 <div className="details-fields">
@@ -6563,7 +5496,7 @@ function ProductFormPage({
           {savedClosed && (
             <p className="muted">
               Срок уже прошёл, поэтому запись сразу закрыта {fullDate(savedClosed.closedOn)}: вложенное
-              и доход вернулись в свободные деньги. Закрытые записи в списке инструментов не
+              и доход отмечены полученными. Закрытые записи в списке инструментов не
               показываются — её <Link to={`/products/${savedClosed.id}`}>карточка</Link> открывается
               по ссылке, а выплаты видны в «Выплатах» и «Операциях».
             </p>
@@ -6828,7 +5761,7 @@ function DeleteProductPage({
   const product = products.find((item) => item.id === id);
   if (!product || !id) return <MissingRecord to={returnTo} />;
   // Сервер удаляет вместе с продуктом его операции и выплаты (Т28) — пользователь должен
-  // знать, что свободные деньги и результат изменятся.
+  // знать, что результат изменится.
   const operations = transactions.filter((item) => item.positionId === id && item.source !== "broker").length;
   return (
     <Page title="Удалить инструмент" subtitle="Это действие нельзя отменить" back>
@@ -6840,8 +5773,8 @@ function DeleteProductPage({
         </p>
         {operations > 0 && (
           <p className="muted">
-            Вместе с ним удалятся его операции ({operations}) и выплаты — свободные деньги
-            и финансовый результат пересчитаются, как будто продукта не было.
+            Вместе с ним удалятся его операции ({operations}) и выплаты — финансовый
+            результат пересчитается, как будто продукта не было.
           </p>
         )}
         <div className="confirm-actions">
@@ -7511,8 +6444,8 @@ function TransactionInstrumentSelect({
     </label>
   );
 }
-// Пополнение, вывод и выплата без инструмента бывают в USD и CNY (§12, Т36): по валюте
-// операции сервер ведёт свободные деньги. У операции с инструментом валюта — его.
+// Пополнение, вывод и выплата без инструмента бывают в USD и CNY (§12, Т36).
+// У операции с инструментом валюта — его.
 function TransactionCurrencySelect({
   type,
   positionId,
@@ -7584,11 +6517,7 @@ function TransactionFormPage({
               setType(event.target.value as TransactionType)
             }
           >
-            {Object.entries(transactionTypeLabels).map(([value, label]) => (
-              <option value={value} key={value}>
-                {label}
-              </option>
-            ))}
+            {transactionTypeOptions()}
           </select>
         </label>
         <TransactionInstrumentSelect
@@ -7720,11 +6649,7 @@ function EditTransactionPage({
               setType(event.target.value as TransactionType)
             }
           >
-            {Object.entries(transactionTypeLabels).map(([value, label]) => (
-              <option value={value} key={value}>
-                {label}
-              </option>
-            ))}
+            {transactionTypeOptions(type)}
           </select>
         </label>
         <TransactionInstrumentSelect

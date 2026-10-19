@@ -1,5 +1,5 @@
 // Ad-hoc проверка уведомлений для Hermes (docs/HERMES.md). Тот же паттерн, что и
-// attention.test.ts: без фреймворка — `npx tsx server/notifications.test.ts`.
+// у остальных server/*.test.ts: без фреймворка — `npx tsx server/notifications.test.ts`.
 
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
@@ -92,7 +92,7 @@ test('вклад, закрытый на этой неделе, — событи�
   })
   assert.equal(items.length, 1)
   assert.equal(items[0].key, 'closed:d')
-  assert.equal(items[0].text, 'Вклад Надёжный: вклад закрыт 15.10.2026, 312 500 ₽ — в свободных деньгах')
+  assert.equal(items[0].text, 'Вклад Надёжный: вклад закрыт 15.10.2026, вернулось 312 500 ₽')
 })
 test('ошибка брокера — одно событие в день', () => {
   const items = buildNotificationItems({ today, positions: [], payouts: [], broker: { name: 'Т-Инвестиции', status: 'error' } })

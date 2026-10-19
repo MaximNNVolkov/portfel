@@ -1,7 +1,7 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs'
 import { login, WEB } from './auth.mjs'
 const label = process.argv[3]
-const routes = ['/','/portfolio','/products','/attention','/transactions','/payments','/analytics','/recommendations','/integrations','/settings','/reports','/import','/products/new','/transactions/new','/payments/new','/ocr-summary','/nonexistent']
+const routes = ['/','/portfolio','/products','/transactions','/payments','/analytics','/recommendations','/integrations','/settings','/reports','/import','/products/new','/transactions/new','/payments/new','/ocr-summary','/nonexistent']
 const browser = await chromium.launch()
 for (const [w,h] of [[390,844],[1440,900]]) {
   const ctx = await browser.newContext({ viewport:{width:w,height:h} })

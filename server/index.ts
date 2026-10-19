@@ -23,22 +23,18 @@ import {
   type Breakdown, type EngineContext, type KeyedValuation,
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
-import { buildAttention } from './attention.ts'
 import { sendTestNotification, validateWebhookUrl } from './notifications.ts'
-import { couponForecastGap, receivedDescription } from './payout-forecast.ts'
+import { receivedDescription } from './payout-forecast.ts'
 import {
   accountTypeFor, createPosition, mergeInstrument, optionalNumber, optionalText,
   checkNonNegative, notInFuture, positionToWire, positiveNumber, reconcileInvested, requiredDate, requiredText, validateHolding, MANUAL_PROVIDER, SUPPORTED_CURRENCIES, type PositionBody,
 } from './positions.ts'
-import { buildRebalance, parseTargetAllocation, rebalanceRecommendations } from './rebalance.ts'
 import {
   DEFAULT_BASE_CURRENCY, GROUP_LABELS, engineContext, toEngineInput, recordSnapshot,
-  portfolioEngineInputs, isCashInput, closedPositionResult,
+  portfolioEngineInputs, closedPositionResult,
   performTinkoffSync, syncPayoutForTransaction, syncTransactionForPayout, refreshMarketPrices, regenerateForecastPayouts, resetClosedPositionPayouts, restoreReceivedPayouts, localDate, portfolioResult,
 } from './daily-tasks.ts'
 import { periodReturns } from './period-returns.ts'
-import { estimateTax, taxIncomeRows, taxRowsToCsv } from './tax-estimate.ts'
-import { parseCsv, parseMapping, statementRows, type StatementRow } from './statement-import.ts'
 import {
   deleteOrphanInstrument, deletePayout, deletePayoutsForTransaction, deletePosition, deletePositionHistory,
   deleteTransaction, deleteUserData, ensureAccount, ensurePortfolio, findBrokerConnection,
@@ -47,7 +43,7 @@ import {
   findProcessedDocumentByHash, findUploadedDocument, insertUploadedDocument,
   insertPayout, insertTransaction,
   listAccounts, listInstruments, listPayouts, listPositions, listSnapshots, listTransactions,
-  sumCashBalances, insertTransactions, deleteTransactionsByExternalPrefix, updateBrokerConnectionSync, updateInstrument, updatePayout,
+  updateBrokerConnectionSync, updateInstrument, updatePayout,
   updatePortfolio, updatePosition, updatePositionValue, updateTransaction, upsertBrokerConnection,
   withTransaction,
   type Db, type Instrument,
@@ -99,15 +95,7 @@ const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHe
 const forgotPasswordEmailLimiter = new EmailRateLimiter()
 
 app.use(helmet())
-// Выписка из банка приходит текстом в JSON и бывает больше стандартных 100 КБ — лимит
-// поднят только для импорта, остальным запросам большие тела не нужны.
-const STATEMENT_IMPORT_PATH = /^\/api\/imports\/statement/
-const defaultJson = express.json()
-// 10 МБ: выписка в windows-1251 после перекодировки и упаковки в JSON растёт в ~1,4 раза,
-// а nginx пропускает тело до 12 МБ.
-const STATEMENT_LIMIT_MB = 10
-const statementJson = express.json({ limit: `${STATEMENT_LIMIT_MB}mb` })
-app.use((request, response, next) => (STATEMENT_IMPORT_PATH.test(request.path) ? statementJson : defaultJson)(request, response, next))
+app.use(express.json())
 app.use('/api', apiLimiter)
 // CSRF (§28): cookie браузер прикладывает сам, поэтому изменяющий запрос без Bearer обязан
 // нести заголовок X-Requested-With. Чужой сайт не может выставить его без CORS-preflight,
@@ -168,7 +156,7 @@ function clientError(error: unknown, fallback: string): string {
   return error.message
 }
 
-// Операция без описания хранит в нём код типа («DEPOSIT»), и он показывался в списке
+// Операция без описания хранит в нём код типа («COUPON»), и он показывался в списке
 // как есть (П21): наружу отдаём русское название типа.
 const TRANSACTION_TITLES: Record<string, string> = {
   BUY: 'Покупка', SELL: 'Продажа', DEPOSIT: 'Пополнение', WITHDRAW: 'Вывод средств', COUPON: 'Купон',
@@ -225,8 +213,6 @@ function payoutToWire(payout: Payout, context?: EngineContext, today = localToda
     institution: payout.institution,
     // Ожидалась, но дата уже прошла (§22, BUG-22) — отдельная группа «Просрочено».
     overdue: payout.status === 'expected' && payout.date < today,
-    // Пришедшие деньги уже вложены — напоминание «Реинвестировать» не показывается.
-    reinvested: Boolean(payout.reinvestedAt),
   }
 }
 
@@ -408,7 +394,6 @@ app.get('/api/settings', async (request, response) => {
     portfolioName: portfolio?.name ?? 'Основной портфель',
     baseCurrency: portfolio?.baseCurrency ?? DEFAULT_BASE_CURRENCY,
     availableCurrencies: SUPPORTED_BASE_CURRENCIES,
-    targetAllocation: portfolio?.targetAllocation ?? {},
   })
 })
 app.patch('/api/settings', async (request, response) => {
@@ -418,15 +403,9 @@ app.patch('/api/settings', async (request, response) => {
   if (baseCurrencyRaw && !SUPPORTED_BASE_CURRENCIES.includes(baseCurrencyRaw)) {
     return response.status(400).json({ error: 'Неподдерживаемая базовая валюта' })
   }
-  let targetAllocation: Record<string, number> | undefined
-  try {
-    if (request.body?.targetAllocation !== undefined) targetAllocation = parseTargetAllocation(request.body.targetAllocation)
-  } catch (error) {
-    return response.status(400).json({ error: clientError(error, 'Неверная целевая структура'), field: 'targetAllocation' })
-  }
   const portfolio = await ensurePortfolio(db, userId, randomUUID())
-  const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw, targetAllocation })
-  response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES, targetAllocation: updated.targetAllocation })
+  const updated = await updatePortfolio(db, userId, portfolio.id, { name, baseCurrency: baseCurrencyRaw })
+  response.json({ portfolioName: updated.name, baseCurrency: updated.baseCurrency, availableCurrencies: SUPPORTED_BASE_CURRENCIES })
 })
 
 // Интеграция с Hermes (docs/HERMES.md): ключи, по которым агент читает портфель и
@@ -667,7 +646,6 @@ app.post('/api/positions', async (request, response) => {
         await recordInstrumentPrice(client, created.instrumentId, localToday(), fill.price)
         created.priceUpdatedAt = new Date().toISOString()
       }
-      if (body.fromCash === true) await payFromCash(client, userId, created)
       await regenerateForecastPayouts(client, userId)
       await recordSnapshot(client, userId)
       // Вклад или облигация с прошедшим сроком закрываются при пересчёте прогноза сразу —
@@ -678,35 +656,6 @@ app.post('/api/positions', async (request, response) => {
     response.status(201).json((await valuedPositions(userId, [position]))[0])
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить инструмент') }) }
 })
-// Реинвестирование (критик К4): новый продукт покупается на пришедшие деньги, а не
-// появляется в портфеле поверх них. Покупка проводится операцией BUY — свободные деньги
-// уменьшаются на ту же сумму (sumCashBalances), итог портфеля не удваивается, а удаление
-// операции возвращает деньги и уменьшает продукт, как у любой покупки.
-async function payFromCash(client: Db, userId: string, position: Position) {
-  const amount = position.invested ?? position.value
-  if (!amount || amount <= 0) throw new Error('Не указана сумма покупки')
-  const currency = position.instrument.currency
-  const balance = (await sumCashBalances(client, userId)).find((row) => row.currency === currency)?.balance ?? 0
-  if (balance + 0.005 < amount) {
-    throw new Error(`Свободных денег в ${currency} не хватает: есть ${Math.max(0, Math.round(balance * 100) / 100)}, нужно ${amount}`)
-  }
-  await insertTransaction(client, {
-    id: randomUUID(),
-    accountId: position.accountId,
-    instrumentId: position.instrumentId,
-    type: 'BUY',
-    date: position.openedOn ?? localToday(),
-    amount,
-    currency,
-    commission: 0,
-    tax: 0,
-    quantity: position.quantity,
-    price: position.averagePrice,
-    source: 'manual',
-    description: 'Покупка из свободных денег',
-  })
-}
-
 app.patch('/api/positions/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -773,8 +722,8 @@ app.delete('/api/positions/:id', async (request, response) => {
   if (!existing) return response.status(404).json({ error: 'Инструмент не найден' })
   await withTransaction(db, async (client) => {
     await deletePosition(client, userId, existing.id)
-    // Вместе с позицией уходят её выплаты и операции — иначе деньги удалённого вклада
-    // оставались в свободных и в результате (Т28).
+    // Вместе с позицией уходят её выплаты и операции — иначе выплаты удалённого вклада
+    // оставались в результате (Т28).
     await deletePositionHistory(client, userId, existing.accountId, existing.instrumentId)
     // Порядок важен: сначала пересчёт (он убирает прогнозные выплаты удалённой позиции),
     // и только потом удаление инструмента — иначе оставшиеся ссылки из portfolio.payouts
@@ -848,26 +797,13 @@ app.get('/api/portfolio/summary', async (request, response) => {
   const positions = await listPositions(db, userId)
   const baseCurrency = await resolveBaseCurrency(db, userId)
   const context = await engineContext(baseCurrency)
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const { payouts, received, commissions, taxes, returns, realized } = await portfolioResult(db, userId, positions, aggregate, context)
   const expected = sumInBase(payouts.expected, context)
   const expectedPrincipal = sumInBase(payouts.expectedPrincipal, context)
   const overdue = sumInBase(payouts.overdue, context)
   const unconverted = [...new Set([expected, expectedPrincipal, overdue, received, commissions, taxes].flatMap((sum) => sum.unconverted))].sort()
-  // «Свободные деньги» (§7.1, §12) — оценка движком денежного остатка в базовой валюте.
-  // null — остаток есть, но курса его валюты нет: не ноль (§7.3).
-  const cashValuations = aggregate.positions.filter((item) => isCashInput(item.id))
-  const cash = cashValuations.some((item) => item.valueBase === null)
-    ? null
-    : cashValuations.reduce((sum, item) => sum + (item.valueBase ?? 0), 0)
-  const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
-  // Расходов в операциях больше, чем поступлений (типично для выписки по карте, Т19):
-  // минус в стоимость не идёт, но и молчать о нём нельзя — экран просит начальный остаток.
-  const cashShortfall = (await sumCashBalances(db, userId))
-    .filter((item) => item.shortfall >= 0.005)
-    .map((item) => ({ currency: item.currency, amount: Math.round(item.shortfall * 100) / 100 }))
   response.json({
-    cashShortfall,
     total: aggregate.value,
     invested: aggregate.invested,
     profit: aggregate.pnl,
@@ -876,7 +812,6 @@ app.get('/api/portfolio/summary', async (request, response) => {
     expectedPrincipal: expectedPrincipal.total,
     overdue: overdue.total,
     paid: received.total,
-    cash,
     positions: positions.length,
     baseCurrency: aggregate.baseCurrency,
     // §10.6: изменение стоимости + выплаты − комиссии − налоги, и простая доходность к нему.
@@ -887,16 +822,10 @@ app.get('/api/portfolio/summary', async (request, response) => {
     // Реализованный результат (§10.2): продажи и погашения минус вложенное в них — без него
     // разбивка «цена · выплаты · комиссии · налоги» не сходилась с итогом (Т33).
     realized,
-    // «Внесено своих денег»: итог минус результат. Пришедшие купоны и дивиденды лежат в
-    // свободных деньгах, но своими вложениями не являются — иначе «вложено» росло бы от
-    // каждой выплаты, а результат их не показывал.
-    contributed: returns.financialResult !== null ? Math.round((aggregate.value - returns.financialResult) * 100) / 100 : null,
     returnMethod: returns.method,
     commissions: returns.commissions,
     taxes: returns.taxes,
     groups: aggregate.groups,
-    // Целевая структура: по категории — цель, текущая доля и сумма до цели. [] — цель не задана.
-    rebalance: buildRebalance(aggregate.groups, aggregate.value, targets),
     // §7.3 / §40.2: итог неполный — UI обязан пометить это, а не показывать цифру как точную.
     valuation: {
       incomplete: aggregate.valuationIncomplete,
@@ -913,137 +842,6 @@ app.get('/api/portfolio/history', async (request, response) => {
   const snapshots: Snapshot[] = await listSnapshots(db, userId)
   response.json(snapshots)
 })
-// Импорт банковской выписки (§27): предпросмотр показывает, что найдено, что с ошибкой и
-// что уже загружалось, — и ничего не пишет; загрузка заводит денежные операции
-// (пополнение, снятие, проценты) с ключом повторной загрузки, так что тот же файл
-// второй раз ничего не задваивает.
-async function statementInputs(client: Db, userId: string, body: unknown) {
-  const { text, mapping, exclude, only } = (body ?? {}) as { text?: unknown; mapping?: unknown; exclude?: unknown; only?: unknown }
-  if (typeof text !== 'string' || !text.trim()) throw new Error('Файл выписки пустой')
-  const parsed = parseCsv(text)
-  if (!parsed.headers.length || !parsed.records.length) throw new Error('В файле нет строк с операциями')
-  const chosen = parseMapping(mapping, parsed.headers)
-  // Выписка по карте — это ещё и бытовые траты (критик К22): их можно снять галочками или
-  // загрузить только поступления и проценты.
-  const excluded = new Set(Array.isArray(exclude) ? exclude.map(Number).filter(Number.isInteger) : [])
-  const incomeOnly = only === 'income'
-  // Ключ импорта — «import:<загрузка>:<строка>» (старые — «import:<строка>»): дубликат ищется
-  // по последней части, чтобы загрузку можно было отменить целиком (критик К28).
-  const known = new Set((await listTransactions(client, userId)).map((item) => item.externalId?.split(':').pop()).filter(Boolean))
-  const rows = statementRows(parsed, chosen).map((row) => ({
-    ...row,
-    duplicate: Boolean(row.externalId && known.has(row.externalId.split(':').pop())),
-    skipped: excluded.has(row.line) || (incomeOnly && row.type === 'WITHDRAW'),
-  }))
-  return { headers: parsed.headers, mapping: chosen, rows }
-}
-type ImportRow = StatementRow & { duplicate: boolean; skipped: boolean }
-const importable = (row: ImportRow) => !row.error && !row.duplicate && !row.skipped
-const importCounts = (rows: ImportRow[]) => ({
-  found: rows.length,
-  errors: rows.filter((row) => row.error).length,
-  duplicates: rows.filter((row) => !row.error && row.duplicate).length,
-  skipped: rows.filter((row) => !row.error && !row.duplicate && row.skipped).length,
-  toImport: rows.filter(importable).length,
-  // Сколько придёт и уйдёт по загружаемым строкам, в рублях — чтобы было видно, что выписка
-  // по карте вот-вот обнулит свободные деньги.
-  incomeRub: rows.filter((row) => importable(row) && row.type !== 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
-  expenseRub: rows.filter((row) => importable(row) && row.type === 'WITHDRAW' && row.currency === 'RUB').reduce((sum, row) => sum + (row.amount ?? 0), 0),
-})
-app.post('/api/imports/statement/preview', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const result = await statementInputs(db, userId, request.body)
-    response.json({ ...result, counts: importCounts(result.rows) })
-  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось прочитать выписку') }) }
-})
-app.post('/api/imports/statement', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const counts = await withTransaction(db, async (client) => {
-      // Два одновременных импорта одного файла не должны оба пройти проверку дубликатов
-      // (критик К30): импорт одного пользователя выполняется по очереди.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`statement-import:${userId}`])
-      const { rows } = await statementInputs(client, userId, request.body)
-      // Банк из выписки — отдельный счёт, чтобы «Где хранится» показывал, откуда деньги.
-      const institution = optionalText((request.body as { institution?: unknown } | undefined)?.institution)
-      const accountId = institution
-        ? (await ensureAccount(client, (await ensurePortfolio(client, userId, randomUUID())).id, randomUUID(), { type: 'bank', provider: institution, currency: 'RUB' })).id
-        : await defaultAccountId(client, userId)
-      const batch = randomUUID().slice(0, 8)
-      const transactions: Transaction[] = []
-      for (const row of rows) {
-        if (!importable(row) || !row.type || !row.date || row.amount === undefined || !row.externalId) continue
-        transactions.push({
-          id: randomUUID(), accountId, type: row.type, date: row.date, amount: row.amount, currency: row.currency,
-          commission: 0, tax: 0, source: 'manual', externalId: `import:${batch}:${row.externalId.split(':').pop()}`,
-          description: row.description || (row.type === 'WITHDRAW' ? 'Списание по выписке' : row.type === 'INTEREST' ? 'Проценты по выписке' : 'Зачисление по выписке'),
-        })
-      }
-      await insertTransactions(client, transactions)
-      // Выплата нужна только процентам; пополнения и снятия её не порождают.
-      for (const transaction of transactions) {
-        if (transaction.type === 'INTEREST') await syncPayoutForTransaction(client, transaction)
-      }
-      await recordSnapshot(client, userId)
-      return { ...importCounts(rows), batch }
-    })
-    response.status(201).json({ imported: counts.toImport, duplicates: counts.duplicates, errors: counts.errors, skipped: counts.skipped, batch: counts.batch })
-  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось загрузить выписку') }) }
-})
-
-// Отмена загрузки целиком: удаляются операции этой загрузки и их выплаты.
-app.delete('/api/imports/statement/:batch', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  const batch = String(request.params.batch)
-  if (!/^[0-9a-f]{8}$/.test(batch)) return response.status(404).json({ error: 'Загрузка не найдена' })
-  const deleted = await withTransaction(db, async (client) => {
-    const count = await deleteTransactionsByExternalPrefix(client, userId, `import:${batch}:`)
-    if (count) await recordSnapshot(client, userId)
-    return count
-  })
-  if (!deleted) return response.status(404).json({ error: 'Загрузка не найдена' })
-  response.json({ deleted })
-})
-
-// Оценка НДФЛ за год и доходы для 3-НДФЛ. Налог считается в рублях при любой базовой
-// валюте портфеля; валюта пересчитывается по текущему курсу ЦБ (исторические — v2).
-async function taxInputs(request: Request, userId: string) {
-  const current = new Date().getFullYear()
-  const year = Number(request.query.year ?? current)
-  if (!Number.isInteger(year) || year < 2000 || year > current) throw new Error('Год указан неверно')
-  const [transactions, positions, context] = await Promise.all([listTransactions(db, userId), listPositions(db, userId), engineContext('RUB')])
-  const names = new Map(positions.map((position) => [position.instrumentId, position.instrument.name]))
-  const toRub = (amount: number, currency: string) => convertCurrency(amount, currency, 'RUB', context.rates)
-  const nameOf = (transaction: Transaction) =>
-    (transaction.instrumentId && names.get(transaction.instrumentId))
-    || (transaction.description !== transaction.type ? transaction.description : undefined)
-    || transaction.institution || '—'
-  // Себестоимость погашенной облигации — вложенное в позицию (§10.2): погашение выше цены
-  // покупки облагается как доход по бумагам. Возврат тела вклада доходом не является.
-  const bondInvested = new Map(positions.filter((position) => position.instrument.groupType === 'bond')
-    .map((position) => [`${position.accountId}|${position.instrumentId}`, position.invested]))
-  const redemptionCost = (transaction: Transaction) =>
-    transaction.instrumentId ? bondInvested.get(`${transaction.accountId}|${transaction.instrumentId}`) : undefined
-  return { year, transactions, toRub, nameOf, redemptionCost }
-}
-app.get('/api/tax/estimate', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const { year, transactions, toRub, redemptionCost } = await taxInputs(request, userId)
-    response.json(estimateTax(transactions, year, toRub, redemptionCost, localDate()))
-  } catch (error) { response.status(400).json({ error: clientError(error, 'Некорректный запрос') }) }
-})
-app.get('/api/tax/export', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  try {
-    const { year, transactions, toRub, nameOf, redemptionCost } = await taxInputs(request, userId)
-    response.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    response.setHeader('Content-Disposition', `attachment; filename="dohody-${year}.csv"`)
-    response.send(taxRowsToCsv(taxIncomeRows(transactions, year, toRub, nameOf, redemptionCost)))
-  } catch (error) { response.status(400).json({ error: clientError(error, 'Некорректный запрос') }) }
-})
-
 // §23: доходность за день, месяц, год и всё время — по тем же снимкам, что и график.
 app.get('/api/portfolio/returns', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -1059,12 +857,7 @@ app.get('/api/portfolio/structure', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const positions = await listPositions(db, userId)
   const context = await engineContext(await resolveBaseCurrency(db, userId))
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
-  // Денежный остаток не принадлежит ни брокеру, ни банку, ни эмитенту — входит
-  // только в разрезы по валютам и по инструментам (§12, §23).
-  const cashKeyed = (keyOf: (currency: string) => string): KeyedValuation[] => aggregate.positions
-    .filter((valuation) => isCashInput(valuation.id))
-    .map((valuation) => ({ key: keyOf(valuation.currency), investedBase: valuation.investedBase, valueBase: valuation.valueBase, priceUnavailable: valuation.priceUnavailable, estimated: valuation.estimated }))
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   // Закрытые позиции (погашенные, вклады с истёкшим сроком) в портфеле уже не лежат —
   // движок их не оценивает, и без фильтра они попадали в разрезы как «цена недоступна».
@@ -1083,15 +876,13 @@ app.get('/api/portfolio/structure', async (request, response) => {
       }))
   const breakdown = (keyOf: (position: Position) => string | null): Breakdown[] => aggregateByKey(keyed(keyOf), aggregate.value)
   response.json({
-    byCurrency: aggregateByKey([...keyed((position) => position.instrument.currency || 'RUB'), ...cashKeyed((currency) => currency)]),
+    byCurrency: aggregateByKey(keyed((position) => position.instrument.currency || 'RUB')),
     byBroker: breakdown((position) => (position.account.type === 'broker' ? position.account.provider : null)),
     byBank: breakdown((position) => (position.account.type === 'bank' ? position.account.provider : null)),
     // «Где хранится» (CLIENT_FLOW_PLAN §4.1): банки и брокеры одним списком, включая
-    // записи без банка («Ручной ввод»). Свободные деньги — отдельной строкой (критик К5):
-    // к банку они не привязаны (пополнение вводится без счёта), но без них строки не
-    // складывались в итог портфеля.
-    byProvider: aggregateByKey([...keyed((position) => position.account.provider), ...cashKeyed(() => 'Свободные деньги')], aggregate.value),
-    byInstrument: aggregateByKey([...keyed((position) => position.instrument.name), ...cashKeyed((currency) => `Денежные средства, ${currency}`)]),
+    // записи без банка («Ручной ввод»).
+    byProvider: breakdown((position) => position.account.provider),
+    byInstrument: aggregateByKey(keyed((position) => position.instrument.name)),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
 })
@@ -1100,13 +891,12 @@ app.get('/api/portfolio/structure', async (request, response) => {
 // портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
 async function recommendationsFor(userId: string, positions: Position[], payouts: Payout[]) {
   const baseCurrency = await resolveBaseCurrency(db, userId)
-  // Доли считаются от всего портфеля, включая свободные деньги (§12); правила
-  // применяются к инструментам — сам денежный остаток инструментом не является.
+  // Доли считаются от всего портфеля.
   const context = await engineContext(baseCurrency)
-  const aggregate = aggregateByGroup(await portfolioEngineInputs(db, userId, positions), context)
+  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
   const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
   // Сумма к погашению — из календаря: всё ожидаемое по бумаге в дату погашения (номинал и
-  // последний купон), в базовой валюте. Так правило, «Требует внимания» и календарь называют
+  // последний купон), в базовой валюте. Так правило и календарь называют
   // одну и ту же сумму.
   const maturityAmountFor = (position: Position): number | undefined => {
     const date = position.instrument.maturityDate
@@ -1136,61 +926,13 @@ async function recommendationsFor(userId: string, positions: Position[], payouts
     const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
     return amount === null ? [] : [{ date: payout.date, amount, status: payout.status, type: payout.type }]
   })
-  // Целевая структура задана — отклонение от неё заменяет общее правило «группа занимает
-  // больше 25%»: 45% во вкладах при цели 45% — не проблема.
-  const targets = (await findPortfolio(db, userId))?.targetAllocation ?? {}
-  const hasTargets = Object.keys(targets).length > 0
-  const rebalance = rebalanceRecommendations(buildRebalance(aggregate.groups, aggregate.value, targets), context.baseCurrency)
   const recommendations = buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots)
-    .filter((item) => !(hasTargets && item.ruleType === 'concentration' && item.payload.kind === 'group'))
-  return { recommendations: [...rebalance, ...recommendations], valuationById }
+  return { recommendations, valuationById }
 }
 app.get('/api/recommendations', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const [positions, payouts] = await Promise.all([listPositions(db, userId), listPayouts(db, userId)])
   response.json((await recommendationsFor(userId, positions, payouts)).recommendations)
-})
-
-// «Требует внимания» (CLIENT_FLOW_PLAN §4.4): одна лента сигналов — просроченные и скорые
-// выплаты, деньги к реинвестированию, окончание вкладов, нет цены, ошибка брокера, правила §24.
-app.get('/api/attention', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  const [positions, payouts, tinkoff] = await Promise.all([
-    listPositions(db, userId), listPayouts(db, userId), findBrokerConnection(db, userId, 'tinkoff'),
-  ])
-  const { recommendations, valuationById } = await recommendationsFor(userId, positions, payouts)
-  response.json(buildAttention({
-    today: localToday(),
-    positions: positions.map((position) => ({
-      id: position.id,
-      instrumentId: position.instrumentId,
-      accountId: position.accountId,
-      name: position.instrument.name,
-      institution: position.account.provider,
-      isCash: position.instrument.groupType === 'cash',
-      maturityDate: position.instrument.maturityDate,
-      termEndDate: position.instrument.termEndDate,
-      closedOn: position.closedOn,
-      priceUnavailable: valuationById.get(position.id)?.priceUnavailable ?? false,
-      forecastNote: couponForecastGap(position, position.instrument) ?? undefined,
-      source: position.source,
-    })),
-    payouts: payouts.map((payout) => ({
-      id: payout.id,
-      instrumentId: payout.instrumentId,
-      accountId: payout.accountId,
-      title: payout.description ?? '',
-      date: payout.date,
-      type: payout.type,
-      amount: payout.amount,
-      currency: payout.currency,
-      status: payout.status,
-      institution: payout.institution,
-      reinvested: Boolean(payout.reinvestedAt),
-    })),
-    brokers: tinkoff ? [{ name: 'Т-Инвестиции', status: tinkoff.status, lastSyncAt: tinkoff.lastSyncAt }] : [],
-    recommendations,
-  }))
 })
 
 // ---------------------------------------------------------------------------
@@ -1271,13 +1013,6 @@ app.post('/api/payouts', async (request, response) => {
     response.status(201).json(payoutToWire(payout, await engineContext(await resolveBaseCurrency(db, userId))))
   } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось сохранить выплату') }) }
 })
-// Отметка «уже реинвестировано» (снимает напоминание в «Требует внимания»). Сохраняется
-// время первой отметки; повторная отметка его не сдвигает.
-function reinvestedAt(value: unknown, current: string | undefined): string | undefined {
-  if (value === undefined) return current
-  if (typeof value !== 'boolean') throw new Error('reinvested: ожидается true или false')
-  return value ? current ?? new Date().toISOString() : undefined
-}
 app.patch('/api/payouts/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   try {
@@ -1299,7 +1034,6 @@ app.patch('/api/payouts/:id', async (request, response) => {
       date: body.date !== undefined ? requiredDate(body.date, 'date') : existing.date,
       type: body.type !== undefined ? payoutType(body.type, existing.type) : existing.type,
       status: body.status !== undefined ? payoutStatus(body.status, existing.status) : existing.status,
-      reinvestedAt: reinvestedAt((request.body as { reinvested?: unknown }).reinvested, existing.reinvestedAt),
       // Правка прогнозной строки означает, что пользователь взял её под свой контроль:
       // дальше она живёт как ручная и переживает пересчёт, а прогноз на ту же дату/тип
       // повторно не создаётся благодаря дедупликации по (инструмент, дата, тип).
@@ -1318,7 +1052,7 @@ app.delete('/api/payouts/:id', async (request, response) => {
   const existing = await findPayout(db, userId, request.params.id)
   if (!existing) return response.status(404).json({ error: 'Выплата не найдена' })
   // Выплата и её операция — одни и те же деньги (как в syncPayoutForTransaction):
-  // удалённая выплата не оставляет в свободных деньгах сумму, которой больше нет.
+  // удалённая выплата не оставляет в результате сумму, которой больше нет.
   await withTransaction(db, async (client) => {
     await deletePayout(client, userId, existing.id)
     if (existing.transactionId && existing.source !== 'broker') await deleteTransaction(client, userId, existing.transactionId)
@@ -1330,12 +1064,10 @@ app.delete('/api/payouts/:id', async (request, response) => {
 // Операции (§11 Transaction)
 // ---------------------------------------------------------------------------
 
-const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'DEPOSIT', 'WITHDRAW', 'COUPON', 'DIVIDEND', 'INTEREST', 'FEE', 'TAX', 'REDEMPTION', 'OTHER']
-// Денежные операции позиции не меняют: остаток считается из самих операций
-// (sumCashBalances → portfolioEngineInputs, §12, BUG-05).
+const TRANSACTION_TYPES: TransactionType[] = ['BUY', 'SELL', 'COUPON', 'DIVIDEND', 'INTEREST', 'FEE', 'TAX', 'REDEMPTION', 'OTHER']
+// Денежные операции позиции не меняют.
 const POSITION_TYPES: TransactionType[] = ['BUY', 'SELL']
 // Доход можно привязать к инструменту (необязательно): выплата попадёт в его карточку (§9).
-// На денежный остаток привязка не влияет — он считается по валюте, а не по счёту (§12).
 const INCOME_TYPES: TransactionType[] = ['COUPON', 'DIVIDEND', 'INTEREST']
 
 function transactionType(value: unknown): TransactionType {
@@ -1465,8 +1197,7 @@ async function buildTransaction(client: Db, userId: string, id: string, body: Po
   const price = POSITION_TYPES.includes(type)
     ? (optionalNumber(body.price) ?? (quantity ? amount / quantity : undefined))
     : undefined
-  // Пополнение и вывод без инструмента могут быть в USD или CNY (§12, Т36): валюта операции
-  // и есть валюта свободных денег, на которые она ложится.
+  // Пополнение и вывод без инструмента могут быть в USD или CNY (§12, Т36).
   const requested = optionalText(body.currency)?.toUpperCase()
   if (requested && !SUPPORTED_CURRENCIES.includes(requested)) {
     throw new Error(`Валюта ${requested} пока не поддерживается: доступны ${SUPPORTED_CURRENCIES.join(', ')}`)
@@ -1561,11 +1292,7 @@ app.use('/api', (_request, response) => { response.status(404).json({ error: 'Н
 app.use((error: Error, request: Request, response: Response, _next: express.NextFunction) => {
   // Слишком большое тело — не «внутренняя ошибка», а понятная просьба (тестировщик Т16).
   if ((error as { type?: string }).type === 'entity.too.large') {
-    return response.status(413).json({
-      error: STATEMENT_IMPORT_PATH.test(request.path)
-        ? `Файл выписки слишком большой (больше ${STATEMENT_LIMIT_MB} МБ). Выгрузите выписку за более короткий период.`
-        : 'Запрос слишком большой',
-    })
+    return response.status(413).json({ error: 'Запрос слишком большой' })
   }
   // Битый JSON в теле — ошибка запроса, а не сервера (П16).
   if ((error as { type?: string }).type === 'entity.parse.failed') {

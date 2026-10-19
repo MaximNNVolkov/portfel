@@ -35,7 +35,7 @@ export interface BrokerOperation {
   externalId: string
   accountExternalId: string
   instrumentExternalId?: string
-  type: 'BUY' | 'SELL' | 'DEPOSIT' | 'WITHDRAW' | 'COUPON' | 'DIVIDEND' | 'INTEREST' | 'FEE' | 'TAX' | 'REDEMPTION' | 'OTHER'
+  type: 'BUY' | 'SELL' | 'COUPON' | 'DIVIDEND' | 'INTEREST' | 'FEE' | 'TAX' | 'REDEMPTION' | 'OTHER'
   date: string
   quantity?: number
   price?: number
