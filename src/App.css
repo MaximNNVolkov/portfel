@@ -89,47 +89,18 @@
 }
 /* Два коротких поля в строку (количество и цена операции). */
 .modal-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-/* Целевая структура в настройках: поля долей по категориям. */
-.target-card { margin-top: 18px; }
-.target-card h2 { margin: 0 0 6px; color: var(--ink); font: 700 16px 'Manrope', sans-serif; }
-.target-card p { margin: 0; font-size: 12px; }
-.target-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.target-card .form-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.target-hint { margin: 10px 0 0; font-size: 12px; }
-@media (max-width: 680px) { .target-grid { grid-template-columns: 1fr 1fr; } }
 .result-breakdown { margin: 8px 0 0; font-size: 11px; }
 
 /* Предупреждения («цена недоступна», «данные неполные») — янтарные, не мятные: мятный
    фон читается как «всё хорошо» (критик К18). */
 .demo-note.warn { border-color: var(--border-warning); color: var(--text-secondary); background: #fffaf0; }
 :root[data-theme="dark"] .demo-note.warn { background: rgba(226,181,90,.1); }
-/* Ссылка-подсказка про целевую структуру: в тёмной теме синий браузерный цвет не читался (К20). */
-.target-hint a { color: var(--mint); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
 /* Пустая аналитика и доходность по периодам (К14, К15). */
 .empty-state { display: grid; justify-items: start; gap: 12px; padding: 24px; border: 1px dashed var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); }
 .period-returns { margin-top: 24px; }
 .period-returns h2 { margin: 0 0 12px; font-size: 18px; }
 .small-note { margin-top: 8px; font-size: 12px; }
-/* Страница «Налоги». */
-.tax-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
-.tax-controls select { margin-left: 6px; }
-.tax-row { display: grid; gap: 4px; }
-/* Импорт выписки. */
-.file-picker { display: flex; align-items: center; gap: 12px; padding: 18px; border: 1px dashed var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); cursor: pointer; }
-.file-picker input { max-width: 100%; }
-.import-mapping { margin: 20px 0 12px; }
-.import-mapping h2 { margin: 0 0 10px; font-size: 18px; }
-.import-mapping-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-.import-mapping-grid label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.file-picker { position: relative; }
-.file-picker:focus-within { outline: 2px solid var(--mint); outline-offset: 2px; }
-.import-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-bottom: 12px; }
-.import-options label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-.import-row { grid-template-columns: auto 1fr; column-gap: 10px; }
-.import-row > input[type="checkbox"] { grid-row: span 2; align-self: center; }
-.import-row > :not(input) { grid-column: 2; }
 /* Банковские описания без пробелов («ОПЛАТА_ПО_ДОГОВОРУ_…») не вылезают за карточку (Т25). */
-.confirm-card, .detail-line span, .import-row > :not(input), .list-row-details { overflow-wrap: anywhere; min-width: 0; }
+.confirm-card, .detail-line span, .list-row-details { overflow-wrap: anywhere; min-width: 0; }
 /* Интеграция с Hermes: вторая карточка на «Интеграциях». */
 .integration-card + .integration-card { margin-top: 18px; }.integration-subtitle { margin: 22px 0 6px; color: var(--ink); font: 700 13px 'Manrope', sans-serif; }.integration-card > .outline-button { margin-top: 12px; }.inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }.detail-line .inline-actions { margin-top: 0; }.secret-value { display: block; margin: 8px 0; padding: 8px 10px; border-radius: 5px; background: var(--paper); color: var(--ink); font-size: 11px; overflow-wrap: anywhere; user-select: all; }.integration-card > .modal-form { margin-top: 14px; }.inline-actions .inline-link-button { font-size: 12px; }

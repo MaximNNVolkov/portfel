@@ -170,7 +170,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
     patch:
       tags: [settings]
-      summary: Изменить название портфеля, базовую валюту (§13) и целевую структуру
+      summary: Изменить название портфеля и базовую валюту (§13)
       requestBody:
         required: true
         content:
@@ -180,7 +180,6 @@ paths:
               properties:
                 portfolioName: { type: string }
                 baseCurrency: { type: string, enum: [RUB, USD, CNY] }
-                targetAllocation: { $ref: '#/components/schemas/TargetAllocation' }
       responses:
         '200': { $ref: '#/components/responses/Settings' }
         '400': { $ref: '#/components/responses/Error' }
@@ -615,146 +614,6 @@ paths:
                     percent: { type: [number, 'null'] }
         '401': { $ref: '#/components/responses/Error' }
 
-  /api/imports/statement/preview:
-    post:
-      tags: [transactions]
-      summary: Предпросмотр импорта банковской выписки (CSV)
-      description: |
-        Разбирает CSV, угадывает колонки (или берёт выбранные) и показывает, сколько строк
-        найдено, сколько с ошибкой и сколько уже загружалось. Ничего не записывает.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StatementImportRequest' }
-      responses:
-        '200':
-          description: Колонки, выбранное сопоставление, строки и счётчики
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  headers: { type: array, items: { type: string } }
-                  mapping: { $ref: '#/components/schemas/StatementMapping' }
-                  rows:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        line: { type: integer }
-                        date: { type: string, format: date }
-                        amount: { type: number }
-                        type: { type: string, enum: [DEPOSIT, WITHDRAW, INTEREST] }
-                        currency: { type: string }
-                        description: { type: string }
-                        error: { type: string }
-                        duplicate: { type: boolean }
-                        skipped: { type: boolean }
-                  counts: { $ref: '#/components/schemas/StatementImportCounts' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-
-  /api/imports/statement:
-    post:
-      tags: [transactions]
-      summary: Загрузить операции из банковской выписки
-      description: Строки с ошибкой и уже загруженные пропускаются; повторная загрузка того же файла ничего не задваивает.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StatementImportRequest' }
-      responses:
-        '201':
-          description: Сколько операций добавлено и пропущено
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  imported: { type: integer }
-                  duplicates: { type: integer }
-                  errors: { type: integer }
-                  skipped: { type: integer }
-                  batch: { type: string, description: 'Идентификатор загрузки для отмены' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-
-  /api/imports/statement/{batch}:
-    delete:
-      tags: [transactions]
-      summary: Отменить загрузку выписки
-      description: Удаляет операции, добавленные этой загрузкой, вместе с их выплатами.
-      parameters:
-        - { name: batch, in: path, required: true, schema: { type: string } }
-      responses:
-        '200':
-          description: Сколько операций удалено
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  deleted: { type: integer }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-
-  /api/tax/estimate:
-    get:
-      tags: [portfolio]
-      summary: Оценка НДФЛ за год по операциям
-      description: |
-        Оценка, а не расчёт налогового агента: валюта пересчитывается по текущему курсу ЦБ,
-        убытки прошлых лет, ИИС и льготы не учитываются. Проценты по вкладам облагаются
-        сверх 1 млн ₽ × максимальная ключевая ставка года.
-      parameters:
-        - { name: year, in: query, schema: { type: integer }, description: Год, по умолчанию текущий }
-      responses:
-        '200':
-          description: Строки оценки и итог
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  year: { type: integer }
-                  lines:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        key: { type: string, enum: [deposit_interest, coupons, dividends, sales] }
-                        label: { type: string }
-                        income: { type: number }
-                        exempt: { type: number }
-                        taxBase: { type: number }
-                        how: { type: string }
-                  taxBase: { type: number }
-                  tax: { type: number }
-                  withheld: { type: number }
-                  toPay: { type: number }
-                  keyRate: { type: number }
-                  keyRateAssumed: { type: boolean }
-                  unconverted: { type: array, items: { type: string } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-
-  /api/tax/export:
-    get:
-      tags: [portfolio]
-      summary: Доходы за год в CSV для 3-НДФЛ
-      parameters:
-        - { name: year, in: query, schema: { type: integer }, description: Год, по умолчанию текущий }
-      responses:
-        '200':
-          description: CSV для Excel (точка с запятой, UTF-8 с BOM)
-          content:
-            text/csv:
-              schema: { type: string }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-
   /api/portfolio/structure:
     get:
       tags: [portfolio]
@@ -793,18 +652,6 @@ paths:
                     ruleType: { type: string, enum: [concentration, maturity, drawdown, payout_gap] }
                     text: { type: string }
                   additionalProperties: true
-        '401': { $ref: '#/components/responses/Error' }
-
-  /api/attention:
-    get:
-      tags: [portfolio]
-      summary: 'Лента «Что требует внимания»: выплаты, погашения, ошибки брокера, аналитика'
-      responses:
-        '200':
-          description: Пункты ленты, срочные первыми
-          content:
-            application/json:
-              schema: { type: array, items: { $ref: '#/components/schemas/AttentionItem' } }
         '401': { $ref: '#/components/responses/Error' }
 
   /api/payouts:
@@ -1015,7 +862,6 @@ components:
         type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
         status: { type: string, enum: [expected, received] }
         overdue: { type: boolean, description: 'Ожидалась, но дата прошла' }
-        reinvested: { type: boolean, description: 'Пришедшие деньги отмечены вложенными — напоминание «Реинвестировать» снято' }
         source: { type: string }
         instrumentId: { type: [string, 'null'] }
         accountId: { type: string }
@@ -1041,20 +887,9 @@ components:
         institution: { type: [string, 'null'], description: 'Банк или брокер счёта' }
         source: { type: string }
 
-    TargetAllocation:
-      type: object
-      description: 'Целевые доли категорий, % (в сумме 100). Пустой объект — цель снята'
-      properties:
-        Вклады: { type: number }
-        Облигации: { type: number }
-        Акции: { type: number }
-        Фонды: { type: number }
-        Деньги: { type: number }
-        Прочее: { type: number }
-      additionalProperties: false
-
     TransactionType:
       type: string
+      description: 'DEPOSIT и WITHDRAW бывают только у старых записей: новые операции этих типов не принимаются'
       enum: [BUY, SELL, DEPOSIT, WITHDRAW, COUPON, DIVIDEND, INTEREST, FEE, TAX, REDEMPTION, OTHER]
 
     PositionInput:
@@ -1098,7 +933,6 @@ components:
         type: { type: string, enum: [COUPON, DIVIDEND, INTEREST, DEPOSIT_PRINCIPAL, REDEMPTION, OTHER] }
         status: { type: string, enum: [expected, received] }
         positionId: { type: [string, 'null'], description: 'Привязка к инструменту; валюта берётся из него' }
-        reinvested: { type: boolean, description: 'Только при изменении: отметить пришедшие деньги вложенными (true) или снять отметку (false)' }
     TransactionInput:
       type: object
       description: При создании обязательны type, amount, date; для BUY и SELL — positionId. COUPON, DIVIDEND и INTEREST можно привязать к позиции (positionId, null — отвязать)
@@ -1112,24 +946,7 @@ components:
         price: { type: number, exclusiveMinimum: 0 }
         commission: { type: number }
         tax: { type: number }
-        currency: { type: string, enum: [RUB, USD, CNY], description: 'Валюта операции без инструмента (пополнение, вывод, выплата). У операции с позицией — валюта инструмента' }
-
-    AttentionItem:
-      type: object
-      required: [id, kind, severity, title, text, action]
-      properties:
-        id: { type: string }
-        kind: { type: string, enum: [payout_overdue, payout_received, payout_soon, maturity_soon, broker_error, price_unavailable, forecast_missing, insight] }
-        severity: { type: integer, enum: [1, 2, 3], description: '1 — срочно, 2 — важно, 3 — к сведению' }
-        title: { type: string }
-        text: { type: string }
-        action: { type: string, enum: [mark_received, reinvest, open_position, edit_position, refresh_prices, open_integrations, open_payments, open_analytics] }
-        date: { type: string, format: date }
-        amount: { type: number }
-        currency: { type: string }
-        institution: { type: string }
-        positionId: { type: string }
-        payoutIds: { type: array, items: { type: string } }
+        currency: { type: string, enum: [RUB, USD, CNY], description: 'Валюта операции без инструмента (выплата, комиссия, налог). У операции с позицией — валюта инструмента' }
 
     Breakdown:
       type: object
@@ -1164,17 +981,6 @@ components:
         groups: { type: array, items: { type: object, additionalProperties: true } }
         valueChange: { type: [number, 'null'], description: 'Изменение цены позиций (стоимость − вложено)' }
         realized: { type: number, description: 'Реализованный результат: продажи и погашения минус вложенное в них' }
-        rebalance:
-          type: array
-          description: 'Целевая структура по категориям; пусто, если цель не задана'
-          items:
-            type: object
-            properties:
-              group: { type: string }
-              target: { type: number, description: 'Целевая доля, %' }
-              actual: { type: number, description: 'Текущая доля, %' }
-              deviation: { type: number, description: 'Текущая минус целевая, п. п.' }
-              toTarget: { type: number, description: 'Докупить (> 0) или выше цели (< 0), в базовой валюте' }
         valuation:
           type: object
           properties:
@@ -1249,7 +1055,6 @@ components:
               portfolioName: { type: string }
               baseCurrency: { type: string }
               availableCurrencies: { type: array, items: { type: string } }
-              targetAllocation: { $ref: '#/components/schemas/TargetAllocation' }
     Position:
       description: Позиция
       content:

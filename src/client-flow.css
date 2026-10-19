@@ -15,16 +15,11 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .instrument-hero { margin-top: 24px; }
 .instrument-hero .muted { margin: 6px 0 0; font-size: 12px; }
 
-/* «Требует внимания»: название + банк/дата, ниже — что случилось и одно действие. */
-.attention-row { display: flex; align-items: center; gap: 12px; }
-.attention-row .product-row-summary { flex: 1; min-width: 0; }
-.attention-meta { flex: 0 0 auto; font-size: 11px; white-space: nowrap; }
+/* Пометка под строкой инструмента и кнопки действия к ней. */
 .attention-text { display: block; margin-top: 4px; padding-left: 15px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
 .attention-actions { flex: 0 0 190px; padding: 10px 16px 10px 0; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .attention-actions .outline-button { display: inline-block; white-space: nowrap; }
-.list-row:not(.attention-row) > .attention-actions { align-items: flex-start; padding: 0 16px 12px 31px; }
-.attention-section + .attention-section { margin-top: 26px; }
-.attention-badge { position: absolute; top: -6px; right: -10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; color: #17423e; background: #e6b961; font: 700 10px/16px 'DM Sans', sans-serif; text-align: center; }
+.list-row > .attention-actions { align-items: flex-start; padding: 0 16px 12px 31px; }
 
 /* Категории на главной: кольцо слева, строки категорий справа. */
 .category-block { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 24px; }
@@ -73,19 +68,14 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
   .category-block { grid-template-columns: 1fr; gap: 16px; }
   .category-block .donut-wrap { display: none; }
   .slice-totals { grid-template-columns: 1fr 1fr; padding: 14px; }
-  .attention-row { flex-direction: column; align-items: stretch; gap: 0; }
-  .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
+    .attention-actions { flex-basis: auto; padding: 0 16px 12px 31px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
   .page-heading .primary-button .label-short { display: inline; }
   .page-heading .primary-button .label-full { display: none; }
 }
 
-.icon-button { display: inline-flex; align-items: center; }
-.bell-icon { display: block; }
 /* Просроченная выплата: короткая кнопка остаётся справа и на телефоне. */
 @media (max-width: 680px) {
-  .attention-row-compact { flex-direction: row; align-items: center; }
-  .attention-row-compact .attention-actions { flex: 0 0 auto; padding: 0 14px 0 0; }
-}
+    }
 .connection-state { white-space: nowrap; }
 
 /* Аналитика: доля разреза полоской под строкой — сравнивать глазом, а не читать проценты. */

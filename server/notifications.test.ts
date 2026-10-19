@@ -1,5 +1,5 @@
 // Ad-hoc проверка уведомлений для Hermes (docs/HERMES.md). Тот же паттерн, что и
-// attention.test.ts: без фреймворка — `npx tsx server/notifications.test.ts`.
+// у остальных server/*.test.ts: без фреймворка — `npx tsx server/notifications.test.ts`.
 
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'

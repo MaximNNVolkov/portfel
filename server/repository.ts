@@ -17,6 +17,8 @@ export type { Pool }
 export type DataSource = 'manual' | 'ocr' | 'broker'
 export type AssetGroupType = 'deposit' | 'bond' | 'share' | 'fund' | 'cash' | 'other'
 export type AccountType = 'broker' | 'bank' | 'cash' | 'other'
+// DEPOSIT и WITHDRAW больше не заводятся (пополнения и снятия убраны, docs/CLAUDE.md),
+// но старые записи этих типов остаются в базе и читаются как есть.
 export type TransactionType =
   | 'BUY' | 'SELL' | 'DEPOSIT' | 'WITHDRAW' | 'COUPON' | 'DIVIDEND'
   | 'INTEREST' | 'FEE' | 'TAX' | 'REDEMPTION' | 'OTHER'
@@ -27,7 +29,7 @@ export type PayoutStatus = 'expected' | 'received'
 export type PayoutSource = 'manual' | 'forecast' | 'broker'
 export type BrokerStatus = 'disconnected' | 'pending' | 'connected' | 'error'
 
-export type Portfolio = { id: string; name: string; baseCurrency: string; targetAllocation: Record<string, number> }
+export type Portfolio = { id: string; name: string; baseCurrency: string }
 export type Account = {
   id: string; portfolioId: string; type: AccountType; provider: string
   accountNumberMasked?: string; currency: string; status: string
@@ -124,8 +126,6 @@ export type Payout = {
   description?: string
   /** Банк или брокер счёта (accounts.provider). Только для чтения — выводится джойном. */
   institution?: string
-  /** Когда клиент отметил пришедшие деньги вложенными — напоминание «реинвестировать» снято. */
-  reinvestedAt?: string
 }
 
 export type BrokerConnection = {
@@ -180,12 +180,12 @@ function paginate(options: ListOptions | undefined, nextParam: number): { clause
 // ---------------------------------------------------------------------------
 
 function mapPortfolio(row: any): Portfolio {
-  return { id: row.id, name: row.name, baseCurrency: row.base_currency, targetAllocation: row.target_allocation ?? {} }
+  return { id: row.id, name: row.name, baseCurrency: row.base_currency }
 }
 
 export async function findPortfolio(db: Db, userId: string): Promise<Portfolio | undefined> {
   const result = await db.query(
-    'SELECT id, name, base_currency, target_allocation FROM portfolio.portfolios WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
+    'SELECT id, name, base_currency FROM portfolio.portfolios WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
     [userId],
   )
   return result.rows[0] ? mapPortfolio(result.rows[0]) : undefined
@@ -206,7 +206,7 @@ export async function ensurePortfolio(db: Db, userId: string, id: string, baseCu
   if (existing) return existing
   const result = await db.query(
     `INSERT INTO portfolio.portfolios (id, user_id, name, base_currency) VALUES ($1, $2, 'Основной портфель', $3)
-     RETURNING id, name, base_currency, target_allocation`,
+     RETURNING id, name, base_currency`,
     [id, userId, baseCurrency],
   )
   return mapPortfolio(result.rows[0])
@@ -215,12 +215,11 @@ export async function ensurePortfolio(db: Db, userId: string, id: string, baseCu
 // §13/§6.10: настройки портфеля (название, базовая валюта) — правит уже существующие
 // колонки Portfolio, а не отдельное JSONB-хранилище, чтобы не заводить второй источник
 // истины для полей, для которых схема §11 уже даёт первоклассные колонки.
-export async function updatePortfolio(db: Db, userId: string, portfolioId: string, patch: { name?: string; baseCurrency?: string; targetAllocation?: Record<string, number> }): Promise<Portfolio> {
+export async function updatePortfolio(db: Db, userId: string, portfolioId: string, patch: { name?: string; baseCurrency?: string }): Promise<Portfolio> {
   const result = await db.query(
-    `UPDATE portfolio.portfolios SET name = COALESCE($3, name), base_currency = COALESCE($4, base_currency),
-       target_allocation = COALESCE($5::jsonb, target_allocation)
-     WHERE id = $1 AND user_id = $2 RETURNING id, name, base_currency, target_allocation`,
-    [portfolioId, userId, patch.name ?? null, patch.baseCurrency ?? null, patch.targetAllocation ? JSON.stringify(patch.targetAllocation) : null],
+    `UPDATE portfolio.portfolios SET name = COALESCE($3, name), base_currency = COALESCE($4, base_currency)
+     WHERE id = $1 AND user_id = $2 RETURNING id, name, base_currency`,
+    [portfolioId, userId, patch.name ?? null, patch.baseCurrency ?? null],
   )
   return mapPortfolio(result.rows[0])
 }
@@ -716,44 +715,6 @@ export async function insertTransaction(db: Db, transaction: Transaction): Promi
   )
 }
 
-// Импорт выписки кладёт десятки тысяч строк (тестировщик Т15): по одному INSERT это
-// минута и 504 от прокси, пачками по 500 — секунды.
-export async function insertTransactions(db: Db, transactions: Transaction[]): Promise<void> {
-  const COLUMNS = 15
-  for (let start = 0; start < transactions.length; start += 500) {
-    const chunk = transactions.slice(start, start + 500)
-    const values: unknown[] = []
-    const rows = chunk.map((transaction, index) => {
-      values.push(transaction.id, ...transactionValues(transaction), transaction.source, transaction.externalId ?? null)
-      return `(${Array.from({ length: COLUMNS }, (_, column) => `$${index * COLUMNS + column + 1}`).join(', ')})`
-    })
-    await db.query(
-      `INSERT INTO portfolio.transactions (
-         id, account_id, instrument_id, type, tx_date, quantity, price, amount, currency,
-         commission, tax, description, cost_basis, source, external_id
-       ) VALUES ${rows.join(', ')}`,
-      values,
-    )
-  }
-}
-
-// Отмена загрузки выписки: операции с общим префиксом внешнего id и их выплаты — двумя
-// запросами, а не по строке.
-export async function deleteTransactionsByExternalPrefix(db: Db, userId: string, prefix: string): Promise<number> {
-  const pattern = `${prefix.replace(/[\\%_]/g, '\\$&')}%`
-  await db.query(
-    `DELETE FROM portfolio.payouts WHERE transaction_id IN (
-       SELECT t.id FROM portfolio.transactions t WHERE t.external_id LIKE $1 AND ${OWNED_TRANSACTION}
-     )`,
-    [pattern, userId],
-  )
-  const result = await db.query(
-    `DELETE FROM portfolio.transactions t WHERE t.external_id LIKE $1 AND ${OWNED_TRANSACTION}`,
-    [pattern, userId],
-  )
-  return result.rowCount ?? 0
-}
-
 const OWNED_TRANSACTION = `t.account_id IN (
   SELECT a.id FROM portfolio.accounts a JOIN portfolio.portfolios f ON f.id = a.portfolio_id WHERE f.user_id = $2
 )`
@@ -835,7 +796,7 @@ export async function sumRealizedSales(db: Db, userId: string): Promise<MoneyRow
 
 const PAYOUT_FIELDS = `
   o.id, o.account_id, o.instrument_id, o.transaction_id, o.payout_date, o.type,
-  o.amount, o.currency, o.status, o.source, o.description, o.reinvested_at, a.provider AS account_provider`
+  o.amount, o.currency, o.status, o.source, o.description, a.provider AS account_provider`
 
 const PAYOUT_FROM = `
   FROM portfolio.payouts o
@@ -856,7 +817,6 @@ function mapPayout(row: any): Payout {
     transactionId: text(row.transaction_id),
     description: text(row.description),
     institution: text(row.account_provider),
-    reinvestedAt: row.reinvested_at ? new Date(row.reinvested_at).toISOString() : undefined,
   }
 }
 
@@ -882,16 +842,14 @@ function payoutValues(payout: Payout): unknown[] {
   return [
     payout.accountId, payout.instrumentId ?? null, payout.transactionId ?? null, payout.date,
     payout.type, payout.amount, payout.currency, payout.status, payout.source, payout.description ?? null,
-    payout.reinvestedAt ?? null,
   ]
 }
 
 export async function insertPayout(db: Db, payout: Payout): Promise<void> {
   await db.query(
     `INSERT INTO portfolio.payouts (
-       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, source, description,
-       reinvested_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+       id, account_id, instrument_id, transaction_id, payout_date, type, amount, currency, status, source, description
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [payout.id, ...payoutValues(payout)],
   )
 }
@@ -904,7 +862,7 @@ export async function updatePayout(db: Db, userId: string, payout: Payout): Prom
   const result = await db.query(
     `UPDATE portfolio.payouts o SET
        account_id = $3, instrument_id = $4, transaction_id = $5, payout_date = $6, type = $7,
-       amount = $8, currency = $9, status = $10, source = $11, description = $12, reinvested_at = $13
+       amount = $8, currency = $9, status = $10, source = $11, description = $12
      WHERE o.id = $1 AND ${OWNED_PAYOUT}`,
     [payout.id, userId, ...payoutValues(payout)],
   )

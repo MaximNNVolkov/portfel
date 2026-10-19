@@ -23,6 +23,6 @@ await api('/api/transactions',{method:'POST',token:t,body:{type:'DIVIDEND',amoun
 await api('/api/transactions',{method:'POST',token:t,body:{type:'BUY',amount:28000,date:'2026-08-01',positionId:ids[3],quantity:100,price:280,commission:50}})
 await api('/api/payouts',{method:'POST',token:t,body:{title:'Купон ОФЗ 26238',amount:17750,date:'2026-10-20',type:'COUPON',positionId:ids[2]}})
 await api('/api/payouts',{method:'POST',token:t,body:{title:'Старый купон',amount:1000,date:'2026-09-01',type:'COUPON'}})
-for(let i=0;i<25;i++) await api('/api/transactions',{method:'POST',token:t,body:{type:'DEPOSIT',amount:1000+i,date:'2026-0'+(1+i%9)+'-1'+(i%9),title:'Пополнение '+i}})
+for(let i=0;i<25;i++) await api('/api/transactions',{method:'POST',token:t,body:{type:'FEE',amount:10+i,date:'2026-0'+(1+i%9)+'-1'+(i%9),title:'Комиссия '+i}})
 }
 console.log(JSON.stringify({token:t}))
