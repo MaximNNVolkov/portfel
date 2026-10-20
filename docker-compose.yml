@@ -26,6 +26,10 @@ services:
       dockerfile: Dockerfile.backend
     container_name: portfel-backend
     restart: unless-stopped
+    # Hermes (docs/HERMES.md) слушает вебхук на самом сервере, а не в Docker: так
+    # контейнер видит сервер по имени host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
@@ -104,6 +108,10 @@ services:
       dockerfile: Dockerfile.backend
     container_name: portfel-scheduler
     restart: unless-stopped
+    # Hermes (docs/HERMES.md) слушает вебхук на самом сервере, а не в Docker: так
+    # контейнер видит сервер по имени host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["node", "dist-server/scheduler.js"]
     env_file:
       - .env

@@ -135,11 +135,11 @@ async function staleDocumentLoop(): Promise<void> {
 }
 
 // Уведомления во вебхук Hermes (docs/HERMES.md). Свой цикл раз в час, а не в суточном:
-// суточный цикл стартует при каждом деплое, и сообщение пришло бы в три часа ночи. Каждое
-// событие уходит один раз (notification_log), поэтому частый цикл не повторяет сообщений.
+// суточный цикл стартует при каждом деплое, и сообщение пришло бы в три часа ночи. Сводка
+// уходит раз в день в час, выбранный владельцем (sendPendingNotifications), и не позже
+// NOTIFY_TO_HOUR: если планировщик не работал до вечера, сводка ждёт следующего дня.
 const NOTIFY_INTERVAL_SECONDS = Number(process.env.NOTIFY_INTERVAL_SECONDS || 3600)
 const NOTIFY_TIMEZONE = process.env.NOTIFY_TIMEZONE || 'Europe/Moscow'
-const NOTIFY_FROM_HOUR = Number(process.env.NOTIFY_FROM_HOUR ?? 9)
 const NOTIFY_TO_HOUR = Number(process.env.NOTIFY_TO_HOUR ?? 22)
 
 function zonedNow(): { date: string; hour: number } {
@@ -152,10 +152,10 @@ function zonedNow(): { date: string; hour: number } {
 async function notificationLoop(): Promise<void> {
   for (;;) {
     const { date, hour } = zonedNow()
-    if (hour >= NOTIFY_FROM_HOUR && hour < NOTIFY_TO_HOUR) {
+    if (hour < NOTIFY_TO_HOUR) {
       const userIds = await listWebhookUsers(db).catch((error) => { logError('scheduler.notify-users', error); return [] as string[] })
       for (const userId of userIds) {
-        await sendPendingNotifications(db, userId, date).catch((error) => logError('scheduler.notify', error))
+        await sendPendingNotifications(db, userId, date, hour).catch((error) => logError('scheduler.notify', error))
       }
     }
     await sleep(NOTIFY_INTERVAL_SECONDS)

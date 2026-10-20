@@ -21,6 +21,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist-server ./dist-server
 COPY db ./db
+# Навык Hermes: его файлы вшиваются в установщик ссылки «Подключить Hermes» (server/hermes-connect.ts).
+COPY integrations ./integrations
 COPY tessdata ./tessdata
 
 RUN mkdir -p server/uploads && chown -R node:node server/uploads

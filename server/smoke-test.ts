@@ -683,7 +683,7 @@ async function run() {
       assert.equal(json.invested, 0)
     })
 
-    await test('ключ Hermes: читает, добавляет вклад, больше ничего; отзыв ключа', async () => {
+    await test('ключ Hermes: управляет портфелем, но не аккаунтом и доступами; отзыв ключа', async () => {
       const created = await api('/api/integrations/hermes/keys', { method: 'POST', token: tokenA, body: { name: 'Hermes' } })
       assert.equal(created.status, 201)
       const key = created.json.key as string
@@ -706,19 +706,28 @@ async function run() {
       })
       assert.equal(deposit.status, 201, JSON.stringify(deposit.json))
       assert.equal(deposit.json.institution, 'Альфа-Банк')
-      // Правка, удаление, настройки, управление ключами и выход — только из сессии.
+      // Полное управление портфелем: правка, операции, выплаты, настройки, удаление.
+      const edited = await asKey(`/api/positions/${deposit.json.id}`, 'PATCH', { rate: 19 })
+      assert.equal(edited.status, 200, JSON.stringify(edited.json))
+      assert.equal(edited.json.rate, 19)
+      const fee = await asKey('/api/transactions', 'POST', { type: 'FEE', amount: 100, date: '2026-01-20', title: 'Комиссия от Hermes' })
+      assert.equal(fee.status, 201, JSON.stringify(fee.json))
+      assert.equal((await asKey(`/api/transactions/${fee.json.id}`, 'DELETE')).status, 204)
+      assert.equal((await asKey('/api/settings', 'PATCH', {})).status, 200)
+      // Аккаунт, ключи, вебхук и токен брокера — только из сессии.
       for (const [path, method] of [
-        [`/api/positions/${deposit.json.id}`, 'DELETE'], [`/api/positions/${deposit.json.id}`, 'PATCH'],
-        ['/api/transactions', 'POST'], ['/api/settings', 'PATCH'], ['/api/integrations/hermes', 'GET'],
-        ['/api/integrations/hermes/keys', 'POST'], ['/api/auth/me', 'GET'], ['/api/auth/me', 'DELETE'],
+        ['/api/integrations/hermes', 'GET'], ['/api/integrations/hermes/keys', 'POST'], ['/api/integrations/hermes/webhook', 'PUT'],
+        ['/api/auth/me', 'GET'], ['/api/auth/me', 'DELETE'], ['/api/brokers/tinkoff/connect', 'POST'],
       ] as const) {
         const { status } = await asKey(path, method, method === 'GET' || method === 'DELETE' ? undefined : {})
         assert.equal(status, 403, `${method} ${path}`)
       }
+      // Выбор уведомлений ключу доступен; без вебхука — понятное «не подключены».
+      assert.equal((await asKey('/api/integrations/hermes/notifications')).status, 404)
       const list = await api('/api/integrations/hermes', { token: tokenA })
       assert.equal(list.json.keys.length, 1)
       assert.ok(list.json.keys[0].lastUsedAt, 'отмечено последнее использование')
-      assert.equal((await api(`/api/positions/${deposit.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
+      assert.equal((await asKey(`/api/positions/${deposit.json.id}`, 'DELETE')).status, 204)
       assert.equal((await api(`/api/integrations/hermes/keys/${created.json.id}`, { method: 'DELETE', token: tokenA })).status, 204)
       assert.equal((await asKey('/api/portfolio/summary')).status, 401)
     })
@@ -740,6 +749,20 @@ async function run() {
         assert.equal(noSecret.status, 400)
         const saved = await api('/api/integrations/hermes/webhook', { method: 'PUT', token: tokenA, body: { url: `http://127.0.0.1:${port}/webhooks/portfel`, secret } })
         assert.equal(saved.status, 200, JSON.stringify(saved.json))
+        // По умолчанию — только важное, сводка в 10 утра.
+        assert.deepEqual(saved.json.events, ['payout_received', 'position_closed', 'maturity_soon', 'broker_error'])
+        assert.equal(saved.json.sendHour, 10)
+        const chosen = await api('/api/integrations/hermes/notifications', {
+          method: 'PATCH', token: tokenA, body: { events: ['weekly_summary', 'payout_received'], sendHour: 8 },
+        })
+        assert.equal(chosen.status, 200, JSON.stringify(chosen.json))
+        assert.deepEqual(chosen.json.events, ['payout_received', 'weekly_summary'])
+        assert.equal(chosen.json.sendHour, 8)
+        const wrong = await api('/api/integrations/hermes/notifications', { method: 'PATCH', token: tokenA, body: { events: ['spam'] } })
+        assert.equal(wrong.status, 400)
+        // Повторное сохранение адреса выбор не сбрасывает.
+        const resaved = await api('/api/integrations/hermes/webhook', { method: 'PUT', token: tokenA, body: { url: `http://127.0.0.1:${port}/webhooks/portfel` } })
+        assert.deepEqual(resaved.json.events, ['payout_received', 'weekly_summary'])
         const sent = await api('/api/integrations/hermes/webhook/test', { method: 'POST', token: tokenA })
         assert.equal(sent.status, 200, JSON.stringify(sent.json))
         assert.equal(received.length, 1)
@@ -758,6 +781,62 @@ async function run() {
         assert.match(failedSend.json.error, /не отвечает/)
         assert.equal((await api('/api/integrations/hermes/webhook', { method: 'DELETE', token: tokenA })).status, 204)
         assert.equal((await api('/api/integrations/hermes', { token: tokenA })).json.webhook, null)
+      } finally {
+        hook.close()
+      }
+    })
+
+    await test('подключение Hermes одной ссылкой: инструкция, установщик, обмен на ключ, одноразовость', async () => {
+      const { createServer } = await import('node:http')
+      const received: string[] = []
+      const hook = createServer((request, response) => {
+        let body = ''
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => { if (request.method === 'POST') received.push(`${request.url} ${body}`); response.writeHead(202).end('{}') })
+      })
+      await new Promise<void>((resolve) => hook.listen(0, '127.0.0.1', resolve))
+      const port = (hook.address() as { port: number }).port
+      try {
+        const connect = async () => {
+          const created = await api('/api/integrations/hermes/connect', { method: 'POST', token: tokenA })
+          assert.equal(created.status, 201, JSON.stringify(created.json))
+          assert.match(created.json.link, /\/api\/hermes\/connect\/[0-9a-f]{48}$/)
+          return new URL(created.json.link).pathname
+        }
+        const path = await connect()
+        const instructions = await fetch(`${BASE_URL}${path}`)
+        assert.equal(instructions.status, 200)
+        assert.match(await instructions.text(), /install\.py' \| python3 -/)
+        const installer = await (await fetch(`${BASE_URL}${path}/install.py`)).text()
+        assert.match(installer, /webhook_subscriptions\.json/)
+        assert.match(installer, /portfel\.py/)
+        const claim = (body: unknown) => fetch(`${BASE_URL}${path}/claim`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'portfel' }, body: JSON.stringify(body),
+        })
+        assert.equal((await claim({ secret: 'short', port })).status, 400)
+        const claimed = await claim({ secret: 'link-secret-0123456789', port, route: 'portfel-digest' })
+        assert.equal(claimed.status, 200)
+        const result = await claimed.json() as { apiKey: string; delivered: boolean }
+        assert.match(result.apiKey, /^pfk_/)
+        assert.equal(result.delivered, true)
+        assert.match(received[0], /^\/webhooks\/portfel-digest /)
+        const summary = await fetch(`${BASE_URL}/api/portfolio/summary`, { headers: { Authorization: `Bearer ${result.apiKey}` } })
+        assert.equal(summary.status, 200)
+        // Ссылка одноразовая.
+        assert.equal((await claim({ secret: 'link-secret-0123456789', port })).status, 410)
+        assert.equal((await fetch(`${BASE_URL}${path}`)).status, 410)
+        // Повторное подключение заменяет ключ прежней ссылки.
+        const again = await connect()
+        const second = await fetch(`${BASE_URL}${again}/claim`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'portfel' },
+          body: JSON.stringify({ secret: 'link-secret-9876543210', port }),
+        })
+        assert.equal(second.status, 200)
+        const old = await fetch(`${BASE_URL}/api/portfolio/summary`, { headers: { Authorization: `Bearer ${result.apiKey}` } })
+        assert.equal(old.status, 401)
+        const state = await api('/api/integrations/hermes', { token: tokenA })
+        assert.equal(state.json.keys.filter((key: { name: string }) => key.name === 'Hermes (по ссылке)').length, 1)
+        assert.equal(state.json.webhook.url, `http://127.0.0.1:${port}/webhooks/portfel-digest`)
       } finally {
         hook.close()
       }

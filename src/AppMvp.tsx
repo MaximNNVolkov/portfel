@@ -4133,9 +4133,30 @@ function Integrations({
   );
 }
 type HermesKey = { id: string; name: string; preview: string; createdAt: string; lastUsedAt: string | null };
-type HermesWebhook = { url: string; enabled: boolean; lastSentAt: string | null; lastError: string | null };
-// Hermes — ИИ-агент владельца (docs/HERMES.md): по ключу читает портфель и добавляет вклады,
-// а «Портфель» шлёт ему уведомления в вебхук.
+type HermesWebhook = {
+  url: string;
+  enabled: boolean;
+  events: string[];
+  sendHour: number;
+  lastSentAt: string | null;
+  lastError: string | null;
+};
+// Что может прийти в ежедневной сводке (NOTIFICATION_KINDS в server/notifications.ts).
+// Первые четыре включены по умолчанию — только важное.
+const HERMES_EVENTS: Array<{ kind: string; title: string; hint: string }> = [
+  { kind: "payout_received", title: "Пришли выплаты", hint: "купоны, дивиденды, проценты" },
+  { kind: "position_closed", title: "Вклад закрыт, облигация погашена", hint: "и сколько вернулось" },
+  { kind: "maturity_soon", title: "Скоро закончится срок", hint: "за неделю до окончания вклада или погашения облигации" },
+  { kind: "broker_error", title: "Ошибка брокера", hint: "данные Т-Инвестиций не обновились" },
+  { kind: "payout_soon", title: "Выплаты в ближайшие три дня", hint: "предупреждение заранее" },
+  { kind: "payout_overdue", title: "Выплата не отмечена полученной", hint: "срок прошёл, а отметки нет" },
+  { kind: "weekly_summary", title: "Недельная сводка", hint: "по понедельникам: стоимость и изменение за неделю" },
+];
+const HERMES_DEFAULT_EVENTS = ["payout_received", "position_closed", "maturity_soon", "broker_error"];
+const HERMES_SEND_HOURS = Array.from({ length: 16 }, (_, index) => index + 6);
+// Hermes — ИИ-агент владельца (docs/HERMES.md): по ключу управляет портфелем,
+// а «Портфель» раз в день шлёт ему сводку в вебхук. Подключается одной ссылкой:
+// установщик по ней сам получает ключ и заводит маршрут вебхука (server/hermes-connect.ts).
 function HermesIntegration() {
   const [keys, setKeys] = useState<HermesKey[]>([]);
   const [webhook, setWebhook] = useState<HermesWebhook | null>(null);
@@ -4144,6 +4165,9 @@ function HermesIntegration() {
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [events, setEvents] = useState<string[]>(HERMES_DEFAULT_EVENTS);
+  const [sendHour, setSendHour] = useState(10);
+  const [link, setLink] = useState<{ link: string; expiresAt: string } | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -4163,6 +4187,8 @@ function HermesIntegration() {
     if (result.webhook) {
       setUrl(result.webhook.url);
       setEnabled(result.webhook.enabled);
+      setEvents(result.webhook.events);
+      setSendHour(result.webhook.sendHour);
     }
   };
   useEffect(() => {
@@ -4195,7 +4221,10 @@ function HermesIntegration() {
   const saveWebhook = (event: FormEvent) => {
     event.preventDefault();
     run(async () => {
-      await request("/webhook", { method: "PUT", body: JSON.stringify({ url, secret: secret || undefined, enabled }) });
+      await request("/webhook", {
+        method: "PUT",
+        body: JSON.stringify({ url, secret: secret || undefined, ...(webhook ? {} : { events, sendHour }) }),
+      });
       setSecret("");
       await load();
       setMessage("Вебхук сохранён");
@@ -4213,8 +4242,29 @@ function HermesIntegration() {
       setUrl("");
       setSecret("");
       setEnabled(true);
+      setEvents(HERMES_DEFAULT_EVENTS);
+      setSendHour(10);
       await load();
     }, "Не удалось отключить уведомления");
+  const toggleEvent = (kind: string, checked: boolean) =>
+    setEvents((current) => (checked ? [...current, kind] : current.filter((item) => item !== kind)));
+  const createLink = () =>
+    run(async () => {
+      const result = (await request("/connect", { method: "POST" })) as { link: string; expiresAt: string };
+      setLink(result);
+    }, "Не удалось получить ссылку");
+  const copyLink = () =>
+    navigator.clipboard
+      ?.writeText(`Подключись к Портфелю: ${link?.link ?? ""}`)
+      .then(() => setMessage("Сообщение скопировано"), () => undefined);
+  const saveNotifications = (event: FormEvent) => {
+    event.preventDefault();
+    run(async () => {
+      await request("/notifications", { method: "PATCH", body: JSON.stringify({ enabled, events, sendHour }) });
+      await load();
+      setMessage("Настройки уведомлений сохранены");
+    }, "Не удалось сохранить настройки уведомлений");
+  };
 
   const state = keys.length || webhook ? "connected" : "disconnected";
   return (
@@ -4223,119 +4273,199 @@ function HermesIntegration() {
         <div className="broker-logo">H</div>
         <div>
           <h2>Hermes</h2>
-          <p>ИИ-агент: отвечает про финансы, добавляет вклады, присылает уведомления</p>
+          <p>ИИ-агент: отвечает про финансы, ведёт портфель, раз в день присылает сводку</p>
         </div>
         <span className={`connection-state ${state}`}>{state === "connected" ? "Подключено" : "Не подключено"}</span>
       </div>
 
-      <h3 className="integration-subtitle">Ключ доступа</h3>
+      <h3 className="integration-subtitle">{state === "connected" ? "Переподключение" : "Подключение"}</h3>
       <small className="field-hint">
-        Ключ вставляется в навык Hermes (переменная PORTFEL_API_KEY). Он даёт только чтение
-        портфеля и добавление продуктов — изменить или удалить что-либо по нему нельзя.
+        Нажмите кнопку и отправьте ссылку Hermes в Telegram. Он сам поставит навык, получит доступ
+        и настроит ежедневную сводку. Ссылка одноразовая и действует сутки. По ней Hermes полностью
+        ведёт портфель, но не может менять аккаунт, ключи и токен брокера.
       </small>
-      {keys.length > 0 && (
-        <div className="integration-facts">
-          {keys.map((key) => (
-            <div className="detail-line" key={key.id}>
-              <span>
-                {key.name} · {key.preview}
-                <br />
-                <small>
-                  {key.lastUsedAt ? `Использован ${formatDateTime(key.lastUsedAt)}` : "Ещё не использовался"}
-                </small>
-              </span>
-              {confirmRevoke === key.id ? (
-                <span className="inline-actions">
-                  <button className="outline-button danger-text" type="button" disabled={busy} onClick={() => revokeKey(key.id)}>
-                    Отозвать
-                  </button>
-                  <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke("")}>
-                    Отмена
-                  </button>
-                </span>
-              ) : (
-                <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke(key.id)}>
-                  Отозвать…
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-      {newKey && (
+      {link ? (
         <div className="demo-note">
-          Скопируйте ключ сейчас — больше он показан не будет:
-          <code className="secret-value">{newKey}</code>
-          <button
-            className="outline-button"
-            type="button"
-            onClick={() => navigator.clipboard?.writeText(newKey).then(() => setMessage("Ключ скопирован"), () => undefined)}
-          >
-            Скопировать
-          </button>
+          Отправьте Hermes это сообщение:
+          <code className="secret-value">Подключись к Портфелю: {link.link}</code>
+          <span className="inline-actions">
+            <button className="primary-button" type="button" onClick={copyLink}>
+              Скопировать
+            </button>
+            <small>Действует до {formatDateTime(link.expiresAt)}</small>
+          </span>
         </div>
-      )}
-      <button className="outline-button" type="button" disabled={busy} onClick={createKey}>
-        {keys.length ? "Выпустить ещё ключ" : "Выпустить ключ"}
-      </button>
-
-      <h3 className="integration-subtitle">Уведомления</h3>
-      <small className="field-hint">
-        Раз в час с 9 до 22 «Портфель» отправляет в Hermes новые события: выплаты в ближайшие
-        три дня, неотмеченные выплаты, закрытые вклады и погашенные облигации, ошибки брокера.
-        Каждое событие приходит один раз.
-      </small>
-      {webhook?.lastSentAt && (
-        <div className="integration-facts">
-          <div className="detail-line">
-            <span>Последняя отправка</span>
-            <span>{formatDateTime(webhook.lastSentAt)}</span>
-          </div>
-        </div>
-      )}
-      {webhook?.lastError && <div className="demo-note warn">⚠ {webhook.lastError}</div>}
-      <form className="modal-form" onSubmit={saveWebhook}>
-        <label>
-          Адрес вебхука Hermes
-          <input
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            placeholder="http://127.0.0.1:8644/webhooks/portfel"
-            inputMode="url"
-            required
-          />
-        </label>
-        <label>
-          Секрет подписи
-          <input
-            value={secret}
-            onChange={(event) => setSecret(event.target.value)}
-            type="password"
-            placeholder={webhook ? "Сохранён — введите, чтобы заменить" : "Тот же, что в маршруте Hermes"}
-            required={!webhook}
-            minLength={16}
-          />
-        </label>
-        <label className="checkbox-label">
-          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-          Присылать уведомления
-        </label>
-        <button className="primary-button" type="submit" disabled={busy}>
-          {webhook ? "Сохранить" : "Подключить уведомления"}
+      ) : (
+        <button className="primary-button" type="button" disabled={busy} onClick={createLink}>
+          {state === "connected" ? "Получить новую ссылку" : "Подключить Hermes"}
         </button>
-      </form>
-      {webhook && (
-        <div className="inline-actions">
-          <button className="outline-button" type="button" disabled={busy} onClick={testWebhook}>
-            Отправить проверку
-          </button>
-          <button className="inline-link-button" type="button" disabled={busy} onClick={removeWebhook}>
-            Отключить уведомления
-          </button>
-        </div>
       )}
+
+      {webhook && (
+        <>
+          <h3 className="integration-subtitle">Уведомления</h3>
+          <small className="field-hint">
+            Раз в день в выбранный час «Портфель» отправляет в Hermes сводку с новыми событиями.
+            Нет событий — нет и сообщения. Каждое событие приходит один раз.
+          </small>
+          {webhook.lastSentAt && (
+            <div className="integration-facts">
+              <div className="detail-line">
+                <span>Последняя отправка</span>
+                <span>{formatDateTime(webhook.lastSentAt)}</span>
+              </div>
+            </div>
+          )}
+          {webhook.lastError && <div className="demo-note warn">⚠ {webhook.lastError}</div>}
+          <form className="modal-form" onSubmit={saveNotifications}>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+              Присылать уведомления
+            </label>
+            <HermesEventOptions enabled={enabled} events={events} toggle={toggleEvent} sendHour={sendHour} setSendHour={setSendHour} />
+            <button className="primary-button" type="submit" disabled={busy}>
+              Сохранить
+            </button>
+          </form>
+          <div className="inline-actions">
+            <button className="outline-button" type="button" disabled={busy} onClick={testWebhook}>
+              Отправить проверку
+            </button>
+            <button className="inline-link-button" type="button" disabled={busy} onClick={removeWebhook}>
+              Отключить уведомления
+            </button>
+          </div>
+        </>
+      )}
+
+      {keys.length > 0 && (
+        <>
+          <h3 className="integration-subtitle">Ключи доступа</h3>
+          <small className="field-hint">Утёк ключ или Hermes больше не нужен — отзовите ключ.</small>
+          <div className="integration-facts">
+            {keys.map((key) => (
+              <div className="detail-line" key={key.id}>
+                <span>
+                  {key.name} · {key.preview}
+                  <br />
+                  <small>
+                    {key.lastUsedAt ? `Использован ${formatDateTime(key.lastUsedAt)}` : "Ещё не использовался"}
+                  </small>
+                </span>
+                {confirmRevoke === key.id ? (
+                  <span className="inline-actions">
+                    <button className="outline-button danger-text" type="button" disabled={busy} onClick={() => revokeKey(key.id)}>
+                      Отозвать
+                    </button>
+                    <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke("")}>
+                      Отмена
+                    </button>
+                  </span>
+                ) : (
+                  <button className="inline-link-button" type="button" onClick={() => setConfirmRevoke(key.id)}>
+                    Отозвать…
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <details className="details-block">
+        <summary>Настроить вручную</summary>
+        <div className="details-fields">
+          <small className="field-hint">
+            Если Hermes не может выполнить команду из ссылки: ключ вписывается в ~/.hermes/.env
+            как PORTFEL_API_KEY, вебхук — маршрут Hermes с тем же секретом (docs/HERMES.md).
+          </small>
+          {newKey && (
+            <div className="demo-note">
+              Скопируйте ключ сейчас — больше он показан не будет:
+              <code className="secret-value">{newKey}</code>
+              <button
+                className="outline-button"
+                type="button"
+                onClick={() => navigator.clipboard?.writeText(newKey).then(() => setMessage("Ключ скопирован"), () => undefined)}
+              >
+                Скопировать
+              </button>
+            </div>
+          )}
+          <button className="outline-button" type="button" disabled={busy} onClick={createKey}>
+            Выпустить ключ
+          </button>
+          <form className="modal-form" onSubmit={saveWebhook}>
+            <label>
+              Адрес вебхука Hermes
+              <input
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="http://host.docker.internal:8644/webhooks/portfel"
+                inputMode="url"
+                required
+              />
+            </label>
+            <label>
+              Секрет подписи
+              <input
+                value={secret}
+                onChange={(event) => setSecret(event.target.value)}
+                type="password"
+                placeholder={webhook ? "Сохранён — введите, чтобы заменить" : "Тот же, что в маршруте Hermes"}
+                required={!webhook}
+                minLength={16}
+              />
+            </label>
+            {!webhook && (
+              <HermesEventOptions enabled events={events} toggle={toggleEvent} sendHour={sendHour} setSendHour={setSendHour} />
+            )}
+            <button className="outline-button" type="submit" disabled={busy}>
+              Сохранить вебхук
+            </button>
+          </form>
+        </div>
+      </details>
       {message && <div className="demo-note">{message}</div>}
     </div>
+  );
+}
+function HermesEventOptions(props: {
+  enabled: boolean;
+  events: string[];
+  toggle: (kind: string, checked: boolean) => void;
+  sendHour: number;
+  setSendHour: (hour: number) => void;
+}) {
+  return (
+    <>
+      <fieldset className="hermes-events" disabled={!props.enabled}>
+        <legend>О чём сообщать</legend>
+        {HERMES_EVENTS.map((item) => (
+          <label className="checkbox-label" key={item.kind}>
+            <input
+              type="checkbox"
+              checked={props.events.includes(item.kind)}
+              onChange={(event) => props.toggle(item.kind, event.target.checked)}
+            />
+            <span>
+              {item.title}
+              <small>{item.hint}</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <label>
+        Время сводки (по Москве)
+        <select value={props.sendHour} disabled={!props.enabled} onChange={(event) => props.setSendHour(Number(event.target.value))}>
+          {HERMES_SEND_HOURS.map((hour) => (
+            <option key={hour} value={hour}>
+              {String(hour).padStart(2, "0")}:00
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
   );
 }
 function ComingSoonPage({ title, text }: { title: string; text: string }) {
