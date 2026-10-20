@@ -13,9 +13,9 @@ info:
     `portfel_session` (её ставят `/api/auth/register` и `/api/auth/login`, ими же выдаётся
     токен). Изменяющий запрос (не GET/HEAD/OPTIONS) без Bearer должен нести заголовок
     `X-Requested-With: portfel`, иначе 403 — защита от CSRF. Ключ внешнего клиента
-    (`pfk_…`, выпускается в `/api/integrations/hermes/keys`) передаётся тем же Bearer, но даёт
-    только GET-запросы (кроме `/api/auth/*` и `/api/integrations/*`) и `POST /api/positions`,
-    остальное — 403. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
+    (`pfk_…`, выпускается в `/api/integrations/hermes/keys`) передаётся тем же Bearer и даёт
+    полное управление портфелем, кроме `/api/auth/*`, `/api/integrations/*` (доступна только
+    `/api/integrations/hermes/notifications`) и `POST /api/brokers/tinkoff/connect` — там 403. Ошибки — JSON `{ "error": "текст", "field"?: "поле" }`.
 
     Пагинация списков — `limit` (1–500) и `offset`. Без них возвращается весь список.
 
@@ -254,6 +254,8 @@ paths:
                         properties:
                           url: { type: string }
                           enabled: { type: boolean }
+                          events: { type: array, items: { $ref: '#/components/schemas/NotificationKind' } }
+                          sendHour: { type: integer, minimum: 6, maximum: 21 }
                           lastSentAt: { type: [string, 'null'], format: date-time }
                           lastError: { type: [string, 'null'] }
         '401': { $ref: '#/components/responses/Error' }
@@ -304,7 +306,8 @@ paths:
         Тело уведомления — JSON `{ event, text, items, sentAt }`, подпись в формате Generic V2
         вебхуков Hermes: `X-Webhook-Timestamp` (секунды Unix) и `X-Webhook-Signature-V2` —
         HMAC-SHA256 в hex от `<timestamp>.<тело>`. Секрет обязателен при первом сохранении,
-        дальше — только чтобы заменить.
+        дальше — только чтобы заменить. Сводка уходит раз в день в `sendHour` (по
+        `NOTIFY_TIMEZONE`) и содержит только события из `events`; без них — важное по умолчанию.
       requestBody:
         required: true
         content:
@@ -316,6 +319,8 @@ paths:
                 url: { type: string, format: uri }
                 secret: { type: string, minLength: 16 }
                 enabled: { type: boolean, default: true }
+                events: { type: array, items: { $ref: '#/components/schemas/NotificationKind' } }
+                sendHour: { type: integer, minimum: 6, maximum: 21, default: 10 }
       responses:
         '200': { description: 'Сохранено' }
         '400': { $ref: '#/components/responses/Error' }
@@ -326,6 +331,43 @@ paths:
       responses:
         '204': { description: 'Вебхук удалён' }
         '401': { $ref: '#/components/responses/Error' }
+
+  /api/integrations/hermes/notifications:
+    get:
+      tags: [integrations]
+      summary: Какие события и во сколько присылать
+      description: Доступно и по ключу Hermes. 404 — вебхук ещё не подключён.
+      responses:
+        '200':
+          description: Настройки уведомлений
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationSettings' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [integrations]
+      summary: Изменить выбор событий, час сводки или выключить уведомления
+      description: Доступно и по ключу Hermes. Адрес и секрет вебхука здесь не меняются.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                events: { type: array, items: { $ref: '#/components/schemas/NotificationKind' } }
+                sendHour: { type: integer, minimum: 6, maximum: 21 }
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Сохранено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationSettings' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   /api/integrations/hermes/webhook/test:
     post:
@@ -767,6 +809,21 @@ components:
       schema: { type: integer, minimum: 0 }
 
   schemas:
+    NotificationKind:
+      type: string
+      description: |
+        payout_received — пришли выплаты; position_closed — вклад закрыт, облигация погашена;
+        maturity_soon — за неделю до окончания срока; broker_error — ошибка брокера;
+        payout_soon — выплаты в ближайшие три дня; payout_overdue — выплата не отмечена
+        полученной; weekly_summary — недельная сводка по понедельникам.
+      enum: [payout_received, position_closed, maturity_soon, payout_soon, payout_overdue, broker_error, weekly_summary]
+    NotificationSettings:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        events: { type: array, items: { $ref: '#/components/schemas/NotificationKind' } }
+        sendHour: { type: integer, minimum: 6, maximum: 21 }
+        available: { type: array, items: { $ref: '#/components/schemas/NotificationKind' } }
     ApiKey:
       type: object
       properties:

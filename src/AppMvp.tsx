@@ -4133,9 +4133,29 @@ function Integrations({
   );
 }
 type HermesKey = { id: string; name: string; preview: string; createdAt: string; lastUsedAt: string | null };
-type HermesWebhook = { url: string; enabled: boolean; lastSentAt: string | null; lastError: string | null };
-// Hermes — ИИ-агент владельца (docs/HERMES.md): по ключу читает портфель и добавляет вклады,
-// а «Портфель» шлёт ему уведомления в вебхук.
+type HermesWebhook = {
+  url: string;
+  enabled: boolean;
+  events: string[];
+  sendHour: number;
+  lastSentAt: string | null;
+  lastError: string | null;
+};
+// Что может прийти в ежедневной сводке (NOTIFICATION_KINDS в server/notifications.ts).
+// Первые четыре включены по умолчанию — только важное.
+const HERMES_EVENTS: Array<{ kind: string; title: string; hint: string }> = [
+  { kind: "payout_received", title: "Пришли выплаты", hint: "купоны, дивиденды, проценты" },
+  { kind: "position_closed", title: "Вклад закрыт, облигация погашена", hint: "и сколько вернулось" },
+  { kind: "maturity_soon", title: "Скоро закончится срок", hint: "за неделю до окончания вклада или погашения облигации" },
+  { kind: "broker_error", title: "Ошибка брокера", hint: "данные Т-Инвестиций не обновились" },
+  { kind: "payout_soon", title: "Выплаты в ближайшие три дня", hint: "предупреждение заранее" },
+  { kind: "payout_overdue", title: "Выплата не отмечена полученной", hint: "срок прошёл, а отметки нет" },
+  { kind: "weekly_summary", title: "Недельная сводка", hint: "по понедельникам: стоимость и изменение за неделю" },
+];
+const HERMES_DEFAULT_EVENTS = ["payout_received", "position_closed", "maturity_soon", "broker_error"];
+const HERMES_SEND_HOURS = Array.from({ length: 16 }, (_, index) => index + 6);
+// Hermes — ИИ-агент владельца (docs/HERMES.md): по ключу управляет портфелем,
+// а «Портфель» раз в день шлёт ему сводку в вебхук.
 function HermesIntegration() {
   const [keys, setKeys] = useState<HermesKey[]>([]);
   const [webhook, setWebhook] = useState<HermesWebhook | null>(null);
@@ -4144,6 +4164,8 @@ function HermesIntegration() {
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [events, setEvents] = useState<string[]>(HERMES_DEFAULT_EVENTS);
+  const [sendHour, setSendHour] = useState(10);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -4163,6 +4185,8 @@ function HermesIntegration() {
     if (result.webhook) {
       setUrl(result.webhook.url);
       setEnabled(result.webhook.enabled);
+      setEvents(result.webhook.events);
+      setSendHour(result.webhook.sendHour);
     }
   };
   useEffect(() => {
@@ -4195,10 +4219,13 @@ function HermesIntegration() {
   const saveWebhook = (event: FormEvent) => {
     event.preventDefault();
     run(async () => {
-      await request("/webhook", { method: "PUT", body: JSON.stringify({ url, secret: secret || undefined, enabled }) });
+      await request("/webhook", {
+        method: "PUT",
+        body: JSON.stringify({ url, secret: secret || undefined, enabled, events, sendHour }),
+      });
       setSecret("");
       await load();
-      setMessage("Вебхук сохранён");
+      setMessage("Настройки уведомлений сохранены");
     }, "Не удалось сохранить вебхук");
   };
   const testWebhook = () =>
@@ -4213,8 +4240,12 @@ function HermesIntegration() {
       setUrl("");
       setSecret("");
       setEnabled(true);
+      setEvents(HERMES_DEFAULT_EVENTS);
+      setSendHour(10);
       await load();
     }, "Не удалось отключить уведомления");
+  const toggleEvent = (kind: string, checked: boolean) =>
+    setEvents((current) => (checked ? [...current, kind] : current.filter((item) => item !== kind)));
 
   const state = keys.length || webhook ? "connected" : "disconnected";
   return (
@@ -4223,15 +4254,16 @@ function HermesIntegration() {
         <div className="broker-logo">H</div>
         <div>
           <h2>Hermes</h2>
-          <p>ИИ-агент: отвечает про финансы, добавляет вклады, присылает уведомления</p>
+          <p>ИИ-агент: отвечает про финансы, ведёт портфель, раз в день присылает сводку</p>
         </div>
         <span className={`connection-state ${state}`}>{state === "connected" ? "Подключено" : "Не подключено"}</span>
       </div>
 
       <h3 className="integration-subtitle">Ключ доступа</h3>
       <small className="field-hint">
-        Ключ вставляется в навык Hermes (переменная PORTFEL_API_KEY). Он даёт только чтение
-        портфеля и добавление продуктов — изменить или удалить что-либо по нему нельзя.
+        Ключ вставляется в навык Hermes (переменная PORTFEL_API_KEY). По нему Hermes полностью
+        ведёт портфель: смотрит, добавляет, правит и удаляет продукты, операции и выплаты.
+        Аккаунт, ключи, уведомления и токен брокера по ключу не меняются. Утёк ключ — отзовите его.
       </small>
       {keys.length > 0 && (
         <div className="integration-facts">
@@ -4281,9 +4313,8 @@ function HermesIntegration() {
 
       <h3 className="integration-subtitle">Уведомления</h3>
       <small className="field-hint">
-        Раз в час с 9 до 22 «Портфель» отправляет в Hermes новые события: выплаты в ближайшие
-        три дня, неотмеченные выплаты, закрытые вклады и погашенные облигации, ошибки брокера.
-        Каждое событие приходит один раз.
+        Раз в день в выбранный час «Портфель» отправляет в Hermes сводку с новыми событиями.
+        Нет событий — нет и сообщения. Каждое событие приходит один раз.
       </small>
       {webhook?.lastSentAt && (
         <div className="integration-facts">
@@ -4319,6 +4350,32 @@ function HermesIntegration() {
         <label className="checkbox-label">
           <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
           Присылать уведомления
+        </label>
+        <fieldset className="hermes-events" disabled={!enabled}>
+          <legend>О чём сообщать</legend>
+          {HERMES_EVENTS.map((item) => (
+            <label className="checkbox-label" key={item.kind}>
+              <input
+                type="checkbox"
+                checked={events.includes(item.kind)}
+                onChange={(event) => toggleEvent(item.kind, event.target.checked)}
+              />
+              <span>
+                {item.title}
+                <small>{item.hint}</small>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        <label>
+          Время сводки (по Москве)
+          <select value={sendHour} disabled={!enabled} onChange={(event) => setSendHour(Number(event.target.value))}>
+            {HERMES_SEND_HOURS.map((hour) => (
+              <option key={hour} value={hour}>
+                {String(hour).padStart(2, "0")}:00
+              </option>
+            ))}
+          </select>
         </label>
         <button className="primary-button" type="submit" disabled={busy}>
           {webhook ? "Сохранить" : "Подключить уведомления"}

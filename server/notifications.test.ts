@@ -3,7 +3,9 @@
 
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { buildNotificationItems, digestText, signatureHeaders, validateWebhookUrl } from './notifications.ts'
+import {
+  buildNotificationItems, digestText, signatureHeaders, validateNotificationKinds, validateSendHour, validateWebhookUrl,
+} from './notifications.ts'
 import type { Instrument, Payout, Position } from './repository.ts'
 
 let failed = 0
@@ -72,7 +74,7 @@ test('неотмеченная выплата — за последние две
       payout('p2', { date: '2026-09-01', description: 'Старый купон' }),
       payout('p3', { date: '2026-10-11', status: 'received' }),
     ],
-  })
+  }).filter((item) => item.kind !== 'payout_received')
   assert.equal(items.length, 1)
   assert.equal(items[0].kind, 'payout_overdue')
   assert.match(items[0].text, /^Купон: купон 1 000 ₽ — ожидалось 10\.10\.2026/)
@@ -98,6 +100,71 @@ test('ошибка брокера — одно событие в день', () =
   const items = buildNotificationItems({ today, positions: [], payouts: [], broker: { name: 'Т-Инвестиции', status: 'error' } })
   assert.deepEqual(items.map((item) => item.key), ['broker-error:2026-10-18'])
   assert.equal(buildNotificationItems({ today, positions: [], payouts: [], broker: { name: 'Т-Инвестиции', status: 'connected' } }).length, 0)
+})
+
+test('пришедший купон — событие; отмеченный задним числом старее недели — нет', () => {
+  const items = buildNotificationItems({
+    today,
+    positions: [position('b', 'ОФЗ 26238', {}, { groupType: 'bond' })],
+    payouts: [
+      payout('p1', { instrumentId: 'i-b', date: '2026-10-16', amount: 17750, status: 'received', source: 'broker' }),
+      payout('p2', { instrumentId: 'i-b', date: '2026-09-16', status: 'received' }),
+    ],
+  })
+  assert.deepEqual(items.map((item) => item.key), ['received:i-b@acc:2026-10-16'])
+  assert.equal(items[0].text, 'ОФЗ 26238: купон 17 750 ₽, 16.10.2026')
+})
+test('выплаты в день закрытия вклада — только в событии «закрыто»', () => {
+  const items = buildNotificationItems({
+    today,
+    positions: [position('d', 'Вклад', { closedOn: '2026-10-15' })],
+    payouts: [
+      payout('p1', { instrumentId: 'i-d', date: '2026-10-15', type: 'DEPOSIT_PRINCIPAL', amount: 300000, status: 'received' }),
+      payout('p2', { instrumentId: 'i-d', date: '2026-10-15', type: 'INTEREST', amount: 12500, status: 'received' }),
+    ],
+  })
+  assert.deepEqual(items.map((item) => item.kind), ['position_closed'])
+})
+test('вклад заканчивается через неделю — событие; с автопролонгацией и через месяц — нет', () => {
+  const items = buildNotificationItems({
+    today,
+    positions: [
+      position('d', 'Вклад Надёжный', {}, { termEndDate: '2026-10-23' }),
+      position('p', 'Вклад с пролонгацией', {}, { termEndDate: '2026-10-20', autoProlongation: true }),
+      position('l', 'Длинный вклад', {}, { termEndDate: '2026-11-30' }),
+      position('b', 'ОФЗ 26238', {}, { groupType: 'bond', maturityDate: '2026-10-19' }),
+    ],
+    payouts: [
+      payout('p1', { instrumentId: 'i-d', date: '2026-10-23', type: 'DEPOSIT_PRINCIPAL', amount: 300000 }),
+      payout('p2', { instrumentId: 'i-d', date: '2026-10-23', type: 'INTEREST', amount: 4500 }),
+    ],
+  }).filter((item) => item.kind === 'maturity_soon')
+  assert.deepEqual(items.map((item) => item.key), ['maturity:d:2026-10-23', 'maturity:b:2026-10-19'])
+  assert.equal(items[0].text, 'Вклад Надёжный (ВТБ): вклад заканчивается 23.10.2026, через 5 дней, придёт 304 500 ₽')
+  assert.equal(items[1].text, 'ОФЗ 26238 (ВТБ): погашение облигации завтра')
+})
+test('недельная сводка — только по понедельникам', () => {
+  const snapshots = [
+    { date: '2026-10-12', value: 1000000, result: 50000 },
+    { date: '2026-10-18', value: 1020000, result: 58000 },
+  ]
+  const payouts = [payout('p1', { date: '2026-10-15', amount: 3000, status: 'received' })]
+  assert.equal(buildNotificationItems({ today, positions: [], payouts, snapshots }).filter((item) => item.kind === 'weekly_summary').length, 0)
+  const monday = buildNotificationItems({ today: '2026-10-19', positions: [], payouts, snapshots, baseCurrency: 'RUB' })
+    .filter((item) => item.kind === 'weekly_summary')
+  assert.deepEqual(monday.map((item) => item.key), ['weekly:2026-10-19'])
+  assert.equal(monday[0].text, 'Стоимость 1 020 000 ₽ (за неделю +20 000 ₽, финансовый результат +8 000 ₽); выплат за неделю 3 000 ₽')
+})
+
+console.log('\nНастройки')
+test('типы событий и час отправки проверяются', () => {
+  assert.deepEqual(validateNotificationKinds(['broker_error', 'payout_received']), ['payout_received', 'broker_error'])
+  assert.deepEqual(validateNotificationKinds([]), [])
+  assert.throws(() => validateNotificationKinds(['spam']), /Неизвестный/)
+  assert.throws(() => validateNotificationKinds('payout_received'), /массивом/)
+  assert.equal(validateSendHour(9), 9)
+  assert.throws(() => validateSendHour(3), /от 6 до 21/)
+  assert.throws(() => validateSendHour(9.5), /от 6 до 21/)
 })
 
 console.log('\nТекст и подпись')
