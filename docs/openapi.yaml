@@ -332,6 +332,89 @@ paths:
         '204': { description: 'Вебхук удалён' }
         '401': { $ref: '#/components/responses/Error' }
 
+  /api/integrations/hermes/connect:
+    post:
+      tags: [integrations]
+      summary: Одноразовая ссылка «Подключить Hermes»
+      description: |
+        Только из сессии. Ссылку пользователь отдаёт Hermes; по ней агент получает
+        инструкцию с одной командой установки. Ссылка действует сутки и работает один раз.
+      responses:
+        '201':
+          description: Ссылка выдана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link: { type: string, format: uri }
+                  expiresAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /api/hermes/connect/{token}:
+    parameters:
+      - $ref: '#/components/parameters/connectToken'
+    get:
+      tags: [integrations]
+      summary: Инструкция для Hermes по ссылке подключения
+      security: []
+      responses:
+        '200': { description: 'Текст для агента (text/plain) с командой установки' }
+        '410': { description: 'Ссылка использована или устарела (text/plain)' }
+
+  /api/hermes/connect/{token}/install.py:
+    parameters:
+      - $ref: '#/components/parameters/connectToken'
+    get:
+      tags: [integrations]
+      summary: Установщик навыка и уведомлений для сервера Hermes
+      description: |
+        Скрипт на Python (только стандартная библиотека) со вшитыми адресом и токеном: ставит
+        навык в `~/.hermes/skills/portfel`, заводит динамический маршрут вебхука в
+        `~/.hermes/webhook_subscriptions.json` и обменивает ссылку на ключ (`…/claim`).
+      security: []
+      responses:
+        '200': { description: 'Скрипт (text/x-python)' }
+        '410': { description: 'Ссылка использована или устарела' }
+
+  /api/hermes/connect/{token}/claim:
+    parameters:
+      - $ref: '#/components/parameters/connectToken'
+    post:
+      tags: [integrations]
+      summary: Обменять ссылку на ключ API и сохранить вебхук
+      description: |
+        Вызывает установщик. Гасит ссылку, выпускает ключ «Hermes (по ссылке)» (прежний такой
+        ключ отзывается), сохраняет вебхук `http://<HERMES_WEBHOOK_HOST>:<port>/webhooks/<route>`
+        с переданным секретом и сразу шлёт проверочное сообщение.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret]
+              properties:
+                secret: { type: string, minLength: 16 }
+                port: { type: integer, minimum: 1, maximum: 65535, default: 8644 }
+                route: { type: string, default: portfel-digest }
+      responses:
+        '200':
+          description: Подключено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  apiKey: { type: string, pattern: '^pfk_[0-9a-f]{64}$' }
+                  delivered: { type: boolean }
+                  error: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+
   /api/integrations/hermes/notifications:
     get:
       tags: [integrations]
@@ -799,6 +882,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    connectToken:
+      name: token
+      in: path
+      required: true
+      description: Одноразовый токен из ссылки «Подключить Hermes» (48 hex-символов).
+      schema: { type: string, pattern: '^[0-9a-f]{48}$' }
     limit:
       name: limit
       in: query

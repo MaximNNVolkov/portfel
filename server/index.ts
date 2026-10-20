@@ -24,6 +24,10 @@ import {
 } from './portfolio-engine.ts'
 import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
+  CONNECT_TOKEN_PATTERN, CONNECT_TTL_HOURS, connectInstructions, hashConnectToken, hermesWebhookUrl, installScript,
+  newConnectToken, validatePort, validateRoute,
+} from './hermes-connect.ts'
+import {
   DEFAULT_NOTIFICATION_KINDS, DEFAULT_SEND_HOUR, NOTIFICATION_KINDS, sendTestNotification, validateNotificationKinds, validateSendHour,
   validateWebhookUrl,
 } from './notifications.ts'
@@ -425,6 +429,18 @@ const apiKeyToWire = (row: ApiKeyRow) => ({
   createdAt: new Date(row.created_at).toISOString(), lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
 })
 const MAX_API_KEYS = 10
+// Сам ключ показывается один раз, в ответе; в базе — только sha256 и последние символы.
+async function issueApiKey(client: Db, userId: string, name: string): Promise<{ row: ApiKeyRow; key: string }> {
+  const key = `${API_KEY_PREFIX}${randomBytes(32).toString('hex')}`
+  const result = await client.query(
+    `INSERT INTO api_keys (id, user_id, name, key_hash, key_preview) VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, name, key_preview, created_at, last_used_at`,
+    [randomUUID(), userId, name, hashToken(key), `${API_KEY_PREFIX}…${key.slice(-4)}`],
+  )
+  return { row: result.rows[0] as ApiKeyRow, key }
+}
+// Адрес «Портфеля», который увидит Hermes: за nginx — внешний (trust proxy, X-Forwarded-Proto).
+const publicOrigin = (request: Request) => `${request.protocol}://${request.get('host')}`
 app.get('/api/integrations/hermes', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   const [keys, webhook] = await Promise.all([
@@ -445,14 +461,8 @@ app.post('/api/integrations/hermes/keys', async (request, response) => {
   const name = (optionalText(request.body?.name) ?? 'Hermes').slice(0, 100)
   const count = await db.query('SELECT COUNT(*)::int AS count FROM api_keys WHERE user_id = $1', [userId])
   if (count.rows[0].count >= MAX_API_KEYS) return response.status(400).json({ error: `Ключей не больше ${MAX_API_KEYS} — отзовите ненужный` })
-  // Сам ключ показывается один раз, в ответе; в базе — только sha256 и последние символы.
-  const key = `${API_KEY_PREFIX}${randomBytes(32).toString('hex')}`
-  const result = await db.query(
-    `INSERT INTO api_keys (id, user_id, name, key_hash, key_preview) VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, name, key_preview, created_at, last_used_at`,
-    [randomUUID(), userId, name, hashToken(key), `${API_KEY_PREFIX}…${key.slice(-4)}`],
-  )
-  response.status(201).json({ ...apiKeyToWire(result.rows[0] as ApiKeyRow), key })
+  const { row, key } = await issueApiKey(db, userId, name)
+  response.status(201).json({ ...apiKeyToWire(row), key })
 })
 app.delete('/api/integrations/hermes/keys/:id', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
@@ -518,6 +528,68 @@ app.delete('/api/integrations/hermes/webhook', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return
   await db.query('DELETE FROM notification_webhooks WHERE user_id = $1', [userId])
   response.status(204).send()
+})
+// Подключение одной ссылкой (server/hermes-connect.ts): ссылку выдаёт сессия, а открывает
+// и обменивает на ключ сам Hermes — без входа, доступом служит одноразовый токен в адресе.
+app.post('/api/integrations/hermes/connect', async (request, response) => {
+  const userId = await currentUserId(request, response); if (!userId) return
+  const { token, hash } = newConnectToken()
+  const expiresAt = new Date(Date.now() + CONNECT_TTL_HOURS * 3_600_000)
+  await db.query('DELETE FROM hermes_connect_tokens WHERE user_id = $1 AND (used_at IS NOT NULL OR expires_at < NOW())', [userId])
+  await db.query('INSERT INTO hermes_connect_tokens (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [hash, userId, expiresAt])
+  response.status(201).json({ link: `${publicOrigin(request)}/api/hermes/connect/${token}`, expiresAt: expiresAt.toISOString() })
+})
+async function activeConnectToken(token: string): Promise<boolean> {
+  if (!CONNECT_TOKEN_PATTERN.test(token)) return false
+  const result = await db.query('SELECT 1 FROM hermes_connect_tokens WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()', [hashConnectToken(token)])
+  return Boolean(result.rowCount)
+}
+const HERMES_LINK_KEY_NAME = 'Hermes (по ссылке)'
+const CONNECT_EXPIRED = 'Ссылка для подключения Hermes уже использована или устарела. Новую можно получить в «Портфель → Интеграции → Hermes».'
+app.get('/api/hermes/connect/:token', async (request, response) => {
+  response.type('text/plain; charset=utf-8')
+  if (!await activeConnectToken(request.params.token)) return response.status(410).send(`${CONNECT_EXPIRED}\n`)
+  response.send(connectInstructions(`${publicOrigin(request)}/api/hermes/connect/${request.params.token}`))
+})
+app.get('/api/hermes/connect/:token/install.py', async (request, response) => {
+  response.type('text/x-python; charset=utf-8')
+  if (!await activeConnectToken(request.params.token)) {
+    return response.status(410).send(`print(${JSON.stringify(CONNECT_EXPIRED)})\nraise SystemExit(1)\n`)
+  }
+  response.send(installScript(publicOrigin(request), request.params.token))
+})
+app.post('/api/hermes/connect/:token/claim', async (request, response) => {
+  try {
+    const secret = optionalText(request.body?.secret)
+    if (!secret || secret.length < 16) throw new Error('Секрет вебхука должен быть не короче 16 символов')
+    const url = hermesWebhookUrl(validatePort(request.body?.port), validateRoute(request.body?.route))
+    const token = String(request.params.token)
+    const claimed = !CONNECT_TOKEN_PATTERN.test(token) ? undefined : await withTransaction(db, async (client) => {
+      const used = await client.query(
+        'UPDATE hermes_connect_tokens SET used_at = NOW() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING user_id',
+        [hashConnectToken(token)],
+      )
+      const userId = used.rows[0]?.user_id as string | undefined
+      if (!userId) return undefined
+      // Новая ссылка заменяет прежнее подключение: ключ, выданный прошлой ссылкой, больше
+      // не нужен — установщик перезаписал его у Hermes. Ключи, выпущенные вручную, не трогаем.
+      await client.query('DELETE FROM api_keys WHERE user_id = $1 AND name = $2', [userId, HERMES_LINK_KEY_NAME])
+      const { key } = await issueApiKey(client, userId, HERMES_LINK_KEY_NAME)
+      // Выбор событий и час сводки, если уже настраивались, сохраняются.
+      await client.query(
+        `INSERT INTO notification_webhooks (user_id, url, encrypted_secret, enabled) VALUES ($1, $2, $3, TRUE)
+          ON CONFLICT (user_id) DO UPDATE SET url = EXCLUDED.url, encrypted_secret = EXCLUDED.encrypted_secret,
+            enabled = TRUE, last_error = NULL, updated_at = NOW()`,
+        [userId, url, encryptToken(secret)],
+      )
+      return { userId, key }
+    })
+    if (!claimed) return response.status(410).json({ error: CONNECT_EXPIRED })
+    // Проверка связи — уже после записи: Hermes мог ещё не включить вебхуки, это не повод
+    // терять выданный ключ.
+    const delivery = await sendTestNotification(db, claimed.userId).then(() => ({ delivered: true }), (error: Error) => ({ delivered: false, error: error.message }))
+    response.json({ url: publicOrigin(request), apiKey: claimed.key, ...delivery })
+  } catch (error) { response.status(400).json({ error: clientError(error, 'Не удалось подключить Hermes') }) }
 })
 app.post('/api/integrations/hermes/webhook/test', async (request, response) => {
   const userId = await currentUserId(request, response); if (!userId) return

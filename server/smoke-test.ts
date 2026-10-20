@@ -786,6 +786,62 @@ async function run() {
       }
     })
 
+    await test('подключение Hermes одной ссылкой: инструкция, установщик, обмен на ключ, одноразовость', async () => {
+      const { createServer } = await import('node:http')
+      const received: string[] = []
+      const hook = createServer((request, response) => {
+        let body = ''
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => { if (request.method === 'POST') received.push(`${request.url} ${body}`); response.writeHead(202).end('{}') })
+      })
+      await new Promise<void>((resolve) => hook.listen(0, '127.0.0.1', resolve))
+      const port = (hook.address() as { port: number }).port
+      try {
+        const connect = async () => {
+          const created = await api('/api/integrations/hermes/connect', { method: 'POST', token: tokenA })
+          assert.equal(created.status, 201, JSON.stringify(created.json))
+          assert.match(created.json.link, /\/api\/hermes\/connect\/[0-9a-f]{48}$/)
+          return new URL(created.json.link).pathname
+        }
+        const path = await connect()
+        const instructions = await fetch(`${BASE_URL}${path}`)
+        assert.equal(instructions.status, 200)
+        assert.match(await instructions.text(), /install\.py' \| python3 -/)
+        const installer = await (await fetch(`${BASE_URL}${path}/install.py`)).text()
+        assert.match(installer, /webhook_subscriptions\.json/)
+        assert.match(installer, /portfel\.py/)
+        const claim = (body: unknown) => fetch(`${BASE_URL}${path}/claim`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'portfel' }, body: JSON.stringify(body),
+        })
+        assert.equal((await claim({ secret: 'short', port })).status, 400)
+        const claimed = await claim({ secret: 'link-secret-0123456789', port, route: 'portfel-digest' })
+        assert.equal(claimed.status, 200)
+        const result = await claimed.json() as { apiKey: string; delivered: boolean }
+        assert.match(result.apiKey, /^pfk_/)
+        assert.equal(result.delivered, true)
+        assert.match(received[0], /^\/webhooks\/portfel-digest /)
+        const summary = await fetch(`${BASE_URL}/api/portfolio/summary`, { headers: { Authorization: `Bearer ${result.apiKey}` } })
+        assert.equal(summary.status, 200)
+        // Ссылка одноразовая.
+        assert.equal((await claim({ secret: 'link-secret-0123456789', port })).status, 410)
+        assert.equal((await fetch(`${BASE_URL}${path}`)).status, 410)
+        // Повторное подключение заменяет ключ прежней ссылки.
+        const again = await connect()
+        const second = await fetch(`${BASE_URL}${again}/claim`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'portfel' },
+          body: JSON.stringify({ secret: 'link-secret-9876543210', port }),
+        })
+        assert.equal(second.status, 200)
+        const old = await fetch(`${BASE_URL}/api/portfolio/summary`, { headers: { Authorization: `Bearer ${result.apiKey}` } })
+        assert.equal(old.status, 401)
+        const state = await api('/api/integrations/hermes', { token: tokenA })
+        assert.equal(state.json.keys.filter((key: { name: string }) => key.name === 'Hermes (по ссылке)').length, 1)
+        assert.equal(state.json.webhook.url, `http://127.0.0.1:${port}/webhooks/portfel-digest`)
+      } finally {
+        hook.close()
+      }
+    })
+
     await test('удаление аккаунта пользователя A', async () => {
       const { status } = await api('/api/auth/me', { method: 'DELETE', token: tokenA })
       assert.equal(status, 204)

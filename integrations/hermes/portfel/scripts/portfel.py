@@ -5,7 +5,8 @@
 и выплаты, запускает синхронизацию брокера, выбирает уведомления. Любая запись — только
 после подтверждения владельца (см. SKILL.md); у записывающих команд есть --dry-run.
 
-Переменные окружения:
+Адрес и ключ установщик ссылки «Подключить Hermes» кладёт в config.json рядом с навыком.
+Переменные окружения, если заданы, важнее (ручная настройка):
   PORTFEL_URL      адрес приложения, например https://portfel.example.ru
   PORTFEL_API_KEY  ключ из «Интеграции → Hermes» (начинается с pfk_)
 
@@ -15,6 +16,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import pathlib
 import sys
 import urllib.error
 import urllib.request
@@ -48,13 +50,20 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent / "config.json"
+
+
 def config() -> tuple[str, str]:
-    url = os.environ.get("PORTFEL_URL", "").rstrip("/")
-    key = os.environ.get("PORTFEL_API_KEY", "")
-    if not url:
-        fail("не задан PORTFEL_URL")
-    if not key.startswith("pfk_"):
-        fail("не задан PORTFEL_API_KEY (ключ из «Интеграции → Hermes», начинается с pfk_)")
+    saved = {}
+    if CONFIG_PATH.exists():
+        try:
+            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except ValueError:
+            fail(f"{CONFIG_PATH} повреждён — попросите владельца прислать новую ссылку подключения")
+    url = (os.environ.get("PORTFEL_URL") or saved.get("url") or "").rstrip("/")
+    key = os.environ.get("PORTFEL_API_KEY") or saved.get("apiKey") or ""
+    if not url or not key.startswith("pfk_"):
+        fail("«Портфель» не подключён — попросите владельца нажать «Подключить Hermes» в «Портфель → Интеграции → Hermes» и прислать ссылку")
     return url, key
 
 
@@ -76,7 +85,7 @@ def api(method: str, path: str, body: dict | None = None):
         except Exception:
             message = None
         if error.code == 401:
-            fail("ключ не принят — возможно, его отозвали в «Интеграции → Hermes»")
+            fail("ключ не принят — возможно, его отозвали; попросите владельца прислать новую ссылку из «Интеграции → Hermes»")
         fail(message or f"сервер ответил {error.code}")
     except urllib.error.URLError as error:
         fail(f"нет связи с «Портфелем» ({error.reason})")
