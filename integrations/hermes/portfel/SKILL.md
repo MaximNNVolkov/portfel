@@ -24,7 +24,7 @@ metadata:
 - «Какие у меня вклады / облигации / где что лежит» → `products` (с `--type`);
   подробно про один → `product <название>`.
 - «Что придёт / ближайшие выплаты / когда купон» → `payouts`.
-- «Что требует внимания» → `recommendations` и `payouts` (не отмеченные полученными).
+- «Что требует внимания» → `payouts` (не отмеченные полученными).
 - «Я открыл вклад …» → `add-deposit`; «купил 10 ОФЗ 26238 по 600» → `add --type bond --ticker …`;
   другое (деньги, золото, прочее) → `add --type cash|other`.
 - «Ставка по вкладу теперь 19%», «поправь дату» → `edit`.
@@ -42,7 +42,6 @@ $P summary
 $P products [--type deposit|bond|stock|fund|cash|other]
 $P product "<id или часть названия>"
 $P payouts [--days 30]
-$P recommendations
 $P operations [--limit 20]
 
 $P add-deposit --name "Накопительный" --bank "Сбербанк" --amount 300000 --date 2026-10-18 --rate 18.5 \

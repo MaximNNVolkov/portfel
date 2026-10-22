@@ -699,7 +699,6 @@ async function run() {
         return { status: response.status, json: text ? JSON.parse(text) : undefined }
       }
       assert.equal((await asKey('/api/portfolio/summary')).status, 200)
-      assert.equal((await asKey('/api/recommendations')).status, 200)
       const deposit = await asKey('/api/positions', 'POST', {
         type: 'deposit', name: 'Вклад от Hermes', institution: 'Альфа-Банк', amount: 100000, date: '2026-01-15',
         rate: 18, termEndDate: '2027-01-15', interestPayoutFrequency: 'monthly',

@@ -759,26 +759,6 @@ paths:
                   byIssuer: { type: array, items: { $ref: '#/components/schemas/Breakdown' } }
         '401': { $ref: '#/components/responses/Error' }
 
-  /api/recommendations:
-    get:
-      tags: [portfolio]
-      summary: Аналитические уведомления — 4 базовых правила (§24)
-      description: Не являются индивидуальными инвестиционными рекомендациями.
-      responses:
-        '200':
-          description: Список уведомлений
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    ruleType: { type: string, enum: [concentration, maturity, drawdown, payout_gap] }
-                    text: { type: string }
-                  additionalProperties: true
-        '401': { $ref: '#/components/responses/Error' }
-
   /api/payouts:
     get:
       tags: [payouts]

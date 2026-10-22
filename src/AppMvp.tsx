@@ -371,15 +371,12 @@ const themeKey = "capital-theme-preference";
 type ThemePreference = "light" | "dark" | "system";
 
 const navItems = [
-  ["Портфель", "◈", "/portfolio", false],
-  ["Инструменты", "▦", "/products", false],
-  ["Операции", "↕", "/transactions", false],
-  ["Выплаты", "◷", "/payments", false],
-  ["Аналитика", "⌁", "/analytics", false],
-  ["Рекомендации", "✦", "/recommendations", false],
-  ["Отчёты", "▤", "/reports", true],
-  ["Интеграции", "⇄", "/integrations", false],
-  ["Импорт", "⇩", "/import", true],
+  ["Портфель", "◈", "/portfolio"],
+  ["Инструменты", "▦", "/products"],
+  ["Операции", "↕", "/transactions"],
+  ["Выплаты", "◷", "/payments"],
+  ["Аналитика", "⌁", "/analytics"],
+  ["Интеграции", "⇄", "/integrations"],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -1534,7 +1531,7 @@ function AppMvp() {
           <span className="chevron">⌄</span>
         </div>
         <nav className="nav-list" aria-label="Основная навигация">
-          {navItems.map(([label, icon, path, isV2]) => (
+          {navItems.map(([label, icon, path]) => (
             <NavLink
               className={({ isActive }) =>
                 `nav-item ${isActive ? "active" : ""}`
@@ -1544,7 +1541,6 @@ function AppMvp() {
             >
               <span className="nav-icon">{icon}</span>
               {label}
-              {isV2 && <span className="v2-badge">v2</span>}
             </NavLink>
           ))}
         </nav>
@@ -1726,31 +1722,9 @@ function AppMvp() {
             }
           />
           <Route
-            path="/recommendations"
-            element={<Recommendations token={token} />}
-          />
-          <Route
             path="/integrations"
             element={
               <Integrations token={token} onStatusChange={withErrorToast(refreshBrokerStatus, "Не удалось обновить статус брокера")} onDataChange={withErrorToast(refreshAfterBrokerSync, "Не удалось обновить данные портфеля")} />
-            }
-          />
-          <Route
-            path="/reports"
-            element={
-              <ComingSoonPage
-                title="Отчёты"
-                text="PDF-отчёты по портфелю появятся в следующей версии приложения."
-              />
-            }
-          />
-          <Route
-            path="/import"
-            element={
-              <ComingSoonPage
-                title="Импорт"
-                text="Импорт выписок CSV и Excel появится в следующей версии приложения."
-              />
             }
           />
           <Route
@@ -3752,86 +3726,6 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
     </section>
   );
 }
-type RecommendationRuleType =
-  | "concentration"
-  | "maturity"
-  | "drawdown"
-  | "payout_gap";
-type RecommendationItem = {
-  ruleType: RecommendationRuleType;
-  text: string;
-  payload: Record<string, unknown>;
-};
-// Иконка и стиль карточки по типу правила (§24) — просадка/концентрация/погашение
-// требуют внимания в ближайшее время, разрыв в выплатах — нейтральная информация о прогнозе.
-const RECOMMENDATION_STYLE: Record<
-  RecommendationRuleType,
-  { label: string; color: string; warning: boolean }
-> = {
-  concentration: { label: "Концентрация", color: "coral", warning: true },
-  maturity: { label: "Погашение", color: "amber", warning: true },
-  drawdown: { label: "Просадка", color: "pink", warning: true },
-  payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
-};
-
-function Recommendations({ token }: { token: string }) {
-  const [items, setItems] = useState<RecommendationItem[] | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const response = await apiFetch(`${apiUrl}/recommendations`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) throw new Error("Не удалось загрузить рекомендации");
-        const result = (await response.json()) as RecommendationItem[];
-        if (!cancelled) setItems(result);
-      } catch {
-        if (!cancelled) setError("Не удалось загрузить рекомендации");
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  return (
-    <Page
-      title="Рекомендации"
-      subtitle="Аналитические уведомления на основе текущего портфеля — не являются индивидуальной инвестиционной рекомендацией"
-    >
-      {error && <p className="form-error">{error}</p>}
-      {!error && items === null && <p>Загрузка…</p>}
-      {!error && items !== null && items.length === 0 && (
-        <p>Пока нет замечаний по портфелю.</p>
-      )}
-      {!error && items !== null && items.length > 0 && (
-        <div className="product-list">
-          {items.map((item, index) => {
-            const style = RECOMMENDATION_STYLE[item.ruleType];
-            return (
-              <article className="list-row" key={`${item.ruleType}-${index}`}>
-                <div className="product-row-summary product-row-static recommendation-row">
-                  <i className={`legend type-dot ${style.color}`} title={style.label} />
-                  <span>
-                    <strong>{item.text}</strong>
-                    <small className={style.warning ? "warning-text" : "muted"}>
-                      {style.label}
-                      {style.warning ? " · требует внимания" : ""}
-                    </small>
-                  </span>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </Page>
-  );
-}
 const currencyLabels: Record<string, string> = {
   RUB: "RUB — российский рубль",
   USD: "USD — доллар США",
@@ -4466,17 +4360,6 @@ function HermesEventOptions(props: {
         </select>
       </label>
     </>
-  );
-}
-function ComingSoonPage({ title, text }: { title: string; text: string }) {
-  return (
-    <Page title={title} subtitle="Скоро">
-      <div className="empty-portfolio">
-        <p className="eyebrow">v2</p>
-        <h1>Этот раздел появится в следующей версии</h1>
-        <p>{text}</p>
-      </div>
-    </Page>
   );
 }
 // Загружены ли данные портфеля (BUG-18). Пока нет — страница записи по прямой ссылке

@@ -186,16 +186,6 @@ def cmd_payouts(args) -> None:
             print(f"• {date_ru(p['date'])} — {p.get('title') or kind}: {money(p.get('amount'), p.get('currency', 'RUB'))} (id {p['id']})")
 
 
-def cmd_recommendations(args) -> None:
-    items = api("GET", "/recommendations")
-    if args.json:
-        return print(json.dumps(items, ensure_ascii=False, indent=2))
-    if not items:
-        return print("Замечаний по портфелю нет.")
-    for item in items:
-        print(f"• {item.get('text')}")
-
-
 def cmd_add_deposit(args) -> None:
     for value, name in ((args.date, "--date"), (args.end, "--end")):
         if value:
@@ -476,9 +466,6 @@ def main() -> None:
     payouts.add_argument("--json", action="store_true")
     payouts.set_defaults(handler=cmd_payouts)
 
-    recommendations = sub.add_parser("recommendations", help="аналитические замечания по портфелю")
-    recommendations.add_argument("--json", action="store_true")
-    recommendations.set_defaults(handler=cmd_recommendations)
 
     deposit = sub.add_parser("add-deposit", help="добавить вклад")
     deposit.add_argument("--name", required=True, help="название вклада")
