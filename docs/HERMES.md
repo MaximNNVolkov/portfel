@@ -26,7 +26,7 @@
   (`POST /api/brokers/tinkoff/connect`). Утёкший ключ отзывается одной кнопкой.
 - **Навык** — `integrations/hermes/portfel/`: `SKILL.md` и `scripts/portfel.py`
   (только стандартная библиотека Python). Чтение: `summary`, `products`, `product`,
-  `payouts`, `recommendations`, `operations`. Запись: `add-deposit`, `add`, `edit`,
+  `payouts`, `operations`. Запись: `add-deposit`, `add`, `edit`,
   `delete`, `mark-received`, `add-payout`, `delete-payout`, `add-operation`,
   `delete-operation`, `sync`, `refresh-prices`, `notifications`. У записывающих команд
   есть `--dry-run`; навык требует от Hermes подтверждения владельца перед любой записью.

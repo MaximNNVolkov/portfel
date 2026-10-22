@@ -1,5 +1,5 @@
 // Ad-hoc проверка прогноза выплат (SPEC §15, §22). Тот же паттерн, что и
-// recommendations.test.ts: без фреймворка, запускается напрямую —
+// portfolio-engine.test.ts: без фреймворка, запускается напрямую —
 // `npx tsx server/payout-forecast.test.ts`. Ненулевой код возврата = провал.
 
 import assert from 'node:assert/strict'

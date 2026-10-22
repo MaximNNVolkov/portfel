@@ -22,7 +22,6 @@ import {
   aggregateByGroup, aggregateByKey, convertCurrency, evaluatePosition, sumInBase,
   type Breakdown, type EngineContext, type KeyedValuation,
 } from './portfolio-engine.ts'
-import { buildRecommendations, type PayoutSnapshot, type PositionSnapshot } from './recommendations.ts'
 import {
   CONNECT_TOKEN_PATTERN, CONNECT_TTL_HOURS, connectInstructions, hashConnectToken, hermesWebhookUrl, installScript,
   newConnectToken, validatePort, validateRoute,
@@ -999,54 +998,6 @@ app.get('/api/portfolio/structure', async (request, response) => {
     byInstrument: aggregateByKey(keyed((position) => position.instrument.name)),
     byIssuer: breakdown((position) => position.instrument.issuer || null),
   })
-})
-
-// §24 (Этап 5): 4 базовых правила рекомендаций. Считаются на лету из текущего состояния
-// портфеля — как и /api/portfolio/summary, а не персистятся (см. обоснование в recommendations.ts).
-async function recommendationsFor(userId: string, positions: Position[], payouts: Payout[]) {
-  const baseCurrency = await resolveBaseCurrency(db, userId)
-  // Доли считаются от всего портфеля.
-  const context = await engineContext(baseCurrency)
-  const aggregate = aggregateByGroup(portfolioEngineInputs(positions), context)
-  const valuationById = new Map(aggregate.positions.map((valuation) => [valuation.id, valuation]))
-  // Сумма к погашению — из календаря: всё ожидаемое по бумаге в дату погашения (номинал и
-  // последний купон), в базовой валюте. Так правило и календарь называют
-  // одну и ту же сумму.
-  const maturityAmountFor = (position: Position): number | undefined => {
-    const date = position.instrument.maturityDate
-    if (!date) return undefined
-    const due = payouts.filter((payout) => payout.status === 'expected' && payout.instrumentId === position.instrumentId
-      && payout.accountId === position.accountId && payout.date === date)
-    if (!due.some((payout) => payout.type === 'REDEMPTION')) return undefined
-    const amounts = due.map((payout) => convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates))
-    return amounts.some((amount) => amount === null) ? undefined : amounts.reduce((sum: number, amount) => sum + (amount ?? 0), 0)
-  }
-  const positionSnapshots: PositionSnapshot[] = positions.filter((position) => !position.closedOn).map((position) => {
-    const valuation = valuationById.get(position.id)
-    return {
-      id: position.id,
-      instrumentId: position.instrumentId,
-      name: position.instrument.name,
-      group: valuation?.group ?? GROUP_LABELS[position.instrument.groupType] ?? 'Прочее',
-      issuer: position.instrument.issuer,
-      maturityDate: position.instrument.maturityDate,
-      maturityAmount: maturityAmountFor(position),
-      valueBase: valuation?.valueBase ?? null,
-      pnlPercent: valuation?.pnlPercent ?? null,
-    }
-  })
-  // Разрывы в выплатах ищутся по суммам в базовой валюте: 100 USD и 100 ₽ — не одно и то же.
-  const payoutSnapshots: PayoutSnapshot[] = payouts.flatMap((payout) => {
-    const amount = convertCurrency(payout.amount, payout.currency, context.baseCurrency, context.rates)
-    return amount === null ? [] : [{ date: payout.date, amount, status: payout.status, type: payout.type }]
-  })
-  const recommendations = buildRecommendations(positionSnapshots, aggregate.value, payoutSnapshots)
-  return { recommendations, valuationById }
-}
-app.get('/api/recommendations', async (request, response) => {
-  const userId = await currentUserId(request, response); if (!userId) return
-  const [positions, payouts] = await Promise.all([listPositions(db, userId), listPayouts(db, userId)])
-  response.json((await recommendationsFor(userId, positions, payouts)).recommendations)
 })
 
 // ---------------------------------------------------------------------------

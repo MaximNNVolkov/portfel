@@ -1,5 +1,5 @@
 // Ad-hoc проверка логики восстановления пароля — тот же паттерн, что и
-// payout-forecast.test.ts/recommendations.test.ts: без фреймворка, без БД,
+// payout-forecast.test.ts: без фреймворка, без БД,
 // запускается напрямую: `npx tsx server/password-reset.test.ts`.
 // Ненулевой код возврата = провал.
 //

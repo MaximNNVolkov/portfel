@@ -1,7 +1,7 @@
 // Восстановление пароля по почте: генерация/проверка одноразовых токенов сброса и
 // ограничение частоты писем на один email. Вынесено из index.ts в отдельный модуль,
 // чтобы логику токенов можно было юнит-тестировать без поднятия HTTP-сервера/БД
-// (см. password-reset.test.ts) — тот же приём, что и payout-forecast.ts/recommendations.ts.
+// (см. password-reset.test.ts) — тот же приём, что и payout-forecast.ts.
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { Db } from './repository.ts'

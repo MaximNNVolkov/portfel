@@ -1176,7 +1176,6 @@ export async function deleteUserData(db: Db, userId: string): Promise<string[]> 
   await db.query('DELETE FROM portfolio.instruments WHERE owner_user_id = $1', [userId])
   await db.query('DELETE FROM portfolio.broker_connections WHERE user_id = $1', [userId])
   await db.query('DELETE FROM portfolio.uploaded_documents WHERE user_id = $1', [userId])
-  await db.query('DELETE FROM portfolio.recommendations WHERE user_id = $1', [userId])
   await db.query('DELETE FROM sessions WHERE user_id = $1', [userId])
   await db.query('DELETE FROM users WHERE id = $1', [userId])
   return files.rows.map((row) => row.file_path as string)

@@ -371,15 +371,11 @@ const themeKey = "capital-theme-preference";
 type ThemePreference = "light" | "dark" | "system";
 
 const navItems = [
-  ["Портфель", "◈", "/portfolio", false],
-  ["Инструменты", "▦", "/products", false],
-  ["Операции", "↕", "/transactions", false],
-  ["Выплаты", "◷", "/payments", false],
-  ["Аналитика", "⌁", "/analytics", false],
-  ["Рекомендации", "✦", "/recommendations", false],
-  ["Отчёты", "▤", "/reports", true],
-  ["Интеграции", "⇄", "/integrations", false],
-  ["Импорт", "⇩", "/import", true],
+  ["Портфель", "◈", "/portfolio"],
+  ["Инструменты", "▦", "/products"],
+  ["Операции", "↕", "/transactions"],
+  ["Выплаты", "◷", "/payments"],
+  ["Интеграции", "⇄", "/integrations"],
 ] as const;
 const typeColors: Record<AssetType, string> = {
   Облигации: "teal",
@@ -837,9 +833,50 @@ function StorageList({ items, display }: { items: StructureBreakdown[]; display:
     </div>
   );
 }
-const STRUCTURE_CUTS = { type: "По типам", bank: "По банкам", currency: "По валютам" } as const;
+const STRUCTURE_CUTS = {
+  type: "По типам",
+  bank: "По банкам",
+  currency: "По валютам",
+  instrument: "По бумагам",
+  issuer: "По эмитентам",
+} as const;
 type StructureCut = keyof typeof STRUCTURE_CUTS;
 const currencyNames: Record<string, string> = { RUB: "Рубли", USD: "Доллары", CNY: "Юани" };
+// Разрезы по инструментам и эмитентам (§23) — byInstrument и byIssuer из
+// /api/portfolio/structure. Строк может быть много, поэтому со своей пагинацией (§40.3).
+function ShareList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
+  return (
+    <PagedRows
+      items={items}
+      render={(item) => {
+        const pnl = pnlDisplay(item.pnl, item.pnlPercent);
+        return (
+          <div className="list-row" key={item.key}>
+            <div className="product-row-summary product-row-static">
+              <span className="product-row-line1">
+                <span className="product-row-name">
+                  <strong>{item.key}</strong>
+                </span>
+                <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : display(item.value)}</span>
+              </span>
+              <span className="product-row-line2 product-row-line2-flush">
+                <span className="muted product-row-meta">
+                  {`${item.positions} ${pluralPositions(item.positions)}`}
+                  {!unvalued(item) && item.share !== null && ` · ${Math.round(item.share)}% портфеля`}
+                  {item.priceUnavailable > 0 && <span className="danger-text"> · без цены: {item.priceUnavailable}</span>}
+                </span>
+                <span className={pnl.className}>{pnl.percentText}</span>
+              </span>
+              <span className="share-bar" aria-hidden="true">
+                <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
+              </span>
+            </div>
+          </div>
+        );
+      }}
+    />
+  );
+}
 // Разрез по валютам — byCurrency из /api/portfolio/structure; суммы уже в базовой валюте.
 // Фильтра по валюте в списке инструментов нет, поэтому строки без перехода.
 function CurrencyList({ items, display }: { items: StructureBreakdown[]; display: (value: number) => string }) {
@@ -952,6 +989,9 @@ function AppMvp() {
   const [loadedStructure, setStructure] = useState<PortfolioStructure | null>(null);
   const structure = apiOnline ? loadedStructure : null;
   const storage = structure?.byProvider ?? null;
+  // Доходность за день/месяц/год по ежедневным снимкам (§23); null — не загружена.
+  const [loadedReturns, setReturns] = useState<PeriodReturn[] | null>(null);
+  const returns = apiOnline ? loadedReturns : null;
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrUploadResult | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
@@ -1058,8 +1098,8 @@ function AppMvp() {
     const timer = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
-  // Любая правка позиций, выплат или статуса брокера меняет разрез по банкам —
-  // перезапрашиваем его вслед за основными данными.
+  // Любая правка позиций, выплат или статуса брокера меняет разрезы и доходность
+  // по периодам — перезапрашиваем их вслед за основными данными.
   useEffect(() => {
     if (!apiOnline || !token) return;
     let cancelled = false;
@@ -1070,6 +1110,14 @@ function AppMvp() {
       })
       .catch(() => {
         if (!cancelled) setStructure(null);
+      });
+    void apiFetch(`${apiUrl}/portfolio/returns`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(async (returnsResponse) => {
+        if (cancelled) return;
+        setReturns(returnsResponse.ok ? ((await returnsResponse.json()) as PeriodReturn[]) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setReturns(null);
       });
     return () => {
       cancelled = true;
@@ -1125,8 +1173,7 @@ function AppMvp() {
     if (response.ok) setBrokerStatus((await response.json()) as BrokerStatus);
   }
   // Синхронизация брокера меняет состав портфеля целиком: без перезагрузки
-  // всех наборов «Портфель» оставался пустым до F5, хотя Аналитика (своя загрузка) уже
-  // показывала импортированные позиции.
+  // всех наборов «Портфель» оставался пустым до F5.
   async function refreshAfterBrokerSync() {
     const [transactionsResponse, historyResponse] = await Promise.all([
       apiFetch(`${apiUrl}/transactions`, { headers: authHeaders }),
@@ -1534,7 +1581,7 @@ function AppMvp() {
           <span className="chevron">⌄</span>
         </div>
         <nav className="nav-list" aria-label="Основная навигация">
-          {navItems.map(([label, icon, path, isV2]) => (
+          {navItems.map(([label, icon, path]) => (
             <NavLink
               className={({ isActive }) =>
                 `nav-item ${isActive ? "active" : ""}`
@@ -1544,7 +1591,6 @@ function AppMvp() {
             >
               <span className="nav-icon">{icon}</span>
               {label}
-              {isV2 && <span className="v2-badge">v2</span>}
             </NavLink>
           ))}
         </nav>
@@ -1618,6 +1664,9 @@ function AppMvp() {
                 brokerStatus={brokerStatus}
                 storage={storage}
                 currencies={structure?.byCurrency ?? null}
+                instruments={structure?.byInstrument ?? null}
+                issuers={structure?.byIssuer ?? null}
+                returns={returns}
               />
             }
           />
@@ -1720,37 +1769,9 @@ function AppMvp() {
             }
           />
           <Route
-            path="/analytics"
-            element={
-              <AnalyticsPage summary={summary} token={token} />
-            }
-          />
-          <Route
-            path="/recommendations"
-            element={<Recommendations token={token} />}
-          />
-          <Route
             path="/integrations"
             element={
               <Integrations token={token} onStatusChange={withErrorToast(refreshBrokerStatus, "Не удалось обновить статус брокера")} onDataChange={withErrorToast(refreshAfterBrokerSync, "Не удалось обновить данные портфеля")} />
-            }
-          />
-          <Route
-            path="/reports"
-            element={
-              <ComingSoonPage
-                title="Отчёты"
-                text="PDF-отчёты по портфелю появятся в следующей версии приложения."
-              />
-            }
-          />
-          <Route
-            path="/import"
-            element={
-              <ComingSoonPage
-                title="Импорт"
-                text="Импорт выписок CSV и Excel появится в следующей версии приложения."
-              />
             }
           />
           <Route
@@ -1808,6 +1829,9 @@ function Dashboard({
   brokerStatus,
   storage,
   currencies,
+  instruments,
+  issuers,
+  returns,
 }: {
   summary: PortfolioSummary | null;
   products: Product[];
@@ -1819,17 +1843,26 @@ function Dashboard({
   brokerStatus: BrokerStatus | null;
   storage: StructureBreakdown[] | null;
   currencies: StructureBreakdown[] | null;
+  instruments: StructureBreakdown[] | null;
+  issuers: StructureBreakdown[] | null;
+  returns: PeriodReturn[] | null;
 }) {
   const dataLoaded = useContext(DataLoadedContext);
   // Разрез структуры (П31): «Категории» и «Где хранится» — один блок с переключателем.
   // Выбор в адресе (?cut=), чтобы «назад» из списка инструментов возвращал тот же разрез.
   const [searchParams, setSearchParams] = useSearchParams();
   const cutParam = searchParams.get("cut");
-  const cut: StructureCut =
-    cutParam === "bank" && storage?.length ? "bank" : cutParam === "currency" && currencies?.length ? "currency" : "type";
+  const cutItems: Record<StructureCut, StructureBreakdown[] | null> = {
+    type: null,
+    bank: storage,
+    currency: currencies,
+    instrument: instruments,
+    issuer: issuers,
+  };
   const availableCuts = (Object.keys(STRUCTURE_CUTS) as StructureCut[]).filter(
-    (key) => key === "type" || (key === "bank" ? storage?.length : currencies?.length),
+    (key) => key === "type" || Boolean(cutItems[key]?.length),
   );
+  const cut: StructureCut = availableCuts.find((key) => key === cutParam) ?? "type";
   function selectCut(next: StructureCut) {
     const params = new URLSearchParams(searchParams);
     if (next === "type") params.delete("cut");
@@ -2011,6 +2044,8 @@ function Dashboard({
         <StorageList items={storage} display={display} />
       ) : cut === "currency" && currencies ? (
         <CurrencyList items={currencies} display={display} />
+      ) : (cut === "instrument" || cut === "issuer") && cutItems[cut] ? (
+        <ShareList items={cutItems[cut] ?? []} display={display} />
       ) : (
         <>
           <div className="category-block">
@@ -2099,6 +2134,7 @@ function Dashboard({
           </div>
         )}
       </article>
+      <PeriodReturns rows={returns} display={display} />
       {!apiOnline && (
         <div className="demo-note">
           <span>✦</span> Нет связи с сервером — данные сохраняются только
@@ -3523,199 +3559,6 @@ type PortfolioStructure = {
   byProvider?: StructureBreakdown[];
 };
 
-function BreakdownList({
-  title,
-  items,
-  emptyHint,
-  linkOf,
-}: {
-  title: string;
-  items: StructureBreakdown[];
-  emptyHint: string;
-  // Разрез, у которого есть свой список (категория, банк), — строка ведёт в него.
-  linkOf?: (item: StructureBreakdown) => string;
-}) {
-  const { isFolded, toggle } = useFolded();
-  if (items.length === 0) {
-    return (
-      <section className="breakdown-section">
-        <div className="breakdown-heading">
-          <h2>{title}</h2>
-          <span className="muted">{emptyHint}</span>
-        </div>
-      </section>
-    );
-  }
-  return (
-    <FoldSection
-      className="breakdown-section"
-      title={title}
-      count={items.length}
-      folded={isFolded(title)}
-      onToggle={() => toggle(title)}
-    >
-      <PagedRows
-        items={items}
-        render={(item) => {
-          const pnl = pnlDisplay(item.pnl, item.pnlPercent);
-          const content = (
-            <>
-                  <span className="product-row-line1">
-                    <span className="product-row-name">
-                      <strong>{item.key}</strong>
-                    </span>
-                    <span className="product-row-sum">{unvalued(item) ? "Оценка недоступна" : money(item.value)}</span>
-                  </span>
-                  <span className="product-row-line2 product-row-line2-flush">
-                    <span className="muted product-row-meta">
-                      {unvalued(item) ? (
-                        <span className="danger-text">цена недоступна</span>
-                      ) : (
-                        <>
-                          {Math.round(item.share ?? 0)}% портфеля
-                          {item.priceUnavailable > 0 && (
-                            <span className="danger-text"> · цена недоступна ({item.priceUnavailable})</span>
-                          )}
-                        </>
-                      )}
-                    </span>
-                    <span className={pnl.className} title={`Прирост: ${pnl.amountText}`}>
-                      {pnl.percentText}
-                    </span>
-                  </span>
-                  <span className="share-bar" aria-hidden="true">
-                    <i style={{ width: `${Math.min(100, Math.max(0, item.share ?? 0))}%` }} />
-                  </span>
-            </>
-          );
-          const href = linkOf?.(item);
-          return (
-            <div className="list-row" key={item.key}>
-              {href ? (
-                <Link className="product-row-summary" to={href}>
-                  {content}
-                </Link>
-              ) : (
-                <div className="product-row-summary product-row-static">{content}</div>
-              )}
-            </div>
-          );
-        }}
-      />
-    </FoldSection>
-  );
-}
-
-function AnalyticsPage({
-  summary,
-  token,
-}: {
-  summary: PortfolioSummary | null;
-  token: string;
-}) {
-  const current = summary ?? localSummary([], []);
-  const { groups } = current;
-  const result = portfolioResult(current);
-  // Категории (классы активов) уже посчитаны в summary.groups — тем же движком (§10).
-  const byGroup: StructureBreakdown[] = groups.map((group) => ({ ...group, key: group.group }));
-  const [structure, setStructure] = useState<PortfolioStructure | null>(null);
-  const [structureError, setStructureError] = useState("");
-  const topInstrument = structure?.byInstrument[0];
-  const [returns, setReturns] = useState<PeriodReturn[] | null>(null);
-  const isEmpty = groups.length === 0;
-
-  useEffect(() => {
-    let cancelled = false;
-    apiFetch(`${apiUrl}/portfolio/returns`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((response) => (response.ok ? (response.json() as Promise<PeriodReturn[]>) : []))
-      .then((rows) => { if (!cancelled) setReturns(rows); })
-      .catch(() => { if (!cancelled) setReturns([]); });
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const response = await apiFetch(`${apiUrl}/portfolio/structure`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) throw new Error("Не удалось загрузить структуру портфеля");
-        const result = (await response.json()) as PortfolioStructure;
-        if (!cancelled) setStructure(result);
-      } catch {
-        if (!cancelled) setStructureError("Не удалось загрузить структуру портфеля");
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  return (
-    <Page title="Аналитика" subtitle="Базовые показатели портфеля">
-      {/* Пустой портфель — не «+0,00%» и «₽ 0» (критик К15), а приглашение добавить актив. */}
-      {isEmpty ? (
-        <div className="empty-state">
-          <p>Аналитика появится, когда в портфеле будет хотя бы один актив.</p>
-          <Link className="primary-button" to="/products/new">Добавить актив</Link>
-        </div>
-      ) : (
-      <>
-      <div className="stat-strip">
-        <article className="stat-card">
-          <span>Доходность</span>
-          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
-            {signedPercent(result.percent)}
-          </strong>
-          <small>простая, за всё время</small>
-        </article>
-        <article className="stat-card">
-          <span>Результат</span>
-          <strong className={result.tone === "negative" ? "danger-text" : result.tone === "positive" ? "teal-text" : "muted"}>
-            {signedMoney(result.result, money)}
-          </strong>
-          <small>цена + выплаты + продажи − комиссии и налоги</small>
-        </article>
-        <article className="stat-card">
-          <span>Крупнейшая позиция</span>
-          <strong>{topInstrument ? `${Math.round(topInstrument.share ?? 0)}%` : "—"}</strong>
-          <small className="ellipsis-text">{topInstrument?.key ?? "нет данных"}</small>
-        </article>
-      </div>
-      <PeriodReturns rows={returns} />
-      <BreakdownList
-        title="По категориям"
-        items={byGroup}
-        emptyHint="Портфель пуст"
-        linkOf={(item) => (item.key === "Деньги" ? "/transactions" : `/products?group=${encodeURIComponent(item.key)}`)}
-      />
-      {structureError && <p className="form-error">{structureError}</p>}
-      {structure && (
-        <>
-          <BreakdownList
-            title="По банкам и брокерам"
-            items={structure.byProvider ?? [...structure.byBroker, ...structure.byBank]}
-            emptyHint="Нет счетов"
-            linkOf={(item) => `/products?bank=${encodeURIComponent(item.key)}`}
-          />
-          <BreakdownList title="По валютам" items={structure.byCurrency} emptyHint="Нет данных" />
-          <BreakdownList title="По инструментам" items={structure.byInstrument} emptyHint="Нет данных" />
-          <BreakdownList
-            title="По эмитентам"
-            items={structure.byIssuer}
-            emptyHint="Эмитент не указан ни у одного инструмента"
-          />
-        </>
-      )}
-      </>
-      )}
-    </Page>
-  );
-}
 type PeriodReturn = { period: "day" | "month" | "year" | "all"; from: string; result: number; percent: number | null };
 const PERIOD_LABELS: Record<PeriodReturn["period"], string> = {
   day: "За день",
@@ -3725,11 +3568,15 @@ const PERIOD_LABELS: Record<PeriodReturn["period"], string> = {
 };
 // §23: доходность за периоды считает бэкенд по ежедневным снимкам. Пока истории меньше
 // двух дней — честно говорим, что считать не из чего, а не рисуем нули.
-function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
+function PeriodReturns({ rows, display }: { rows: PeriodReturn[] | null; display: (value: number) => string }) {
   if (rows === null) return null;
   return (
     <section className="period-returns">
-      <h2>Доходность по периодам</h2>
+      <section className="section-heading">
+        <div>
+          <h2>Доходность по периодам</h2>
+        </div>
+      </section>
       {rows.length === 0 ? (
         <p className="muted">Появится со второго дня: считается по ежедневным снимкам портфеля.</p>
       ) : (
@@ -3741,7 +3588,7 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
                 <span>{PERIOD_LABELS[row.period]}</span>
                 <strong className={tone}>{row.percent === null ? "—" : signedPercent(row.percent)}</strong>
                 <small>
-                  {signedMoney(row.result, money)} с {dateLabel(row.from)}
+                  {signedMoney(row.result, display)} с {dateLabel(row.from)}
                 </small>
               </article>
             );
@@ -3750,86 +3597,6 @@ function PeriodReturns({ rows }: { rows: PeriodReturn[] | null }) {
       )}
       <p className="muted small-note">Изменение результата портфеля за период: цена, выплаты и продажи. Покупки ростом не считаются, процент — к среднему вложенному за период.</p>
     </section>
-  );
-}
-type RecommendationRuleType =
-  | "concentration"
-  | "maturity"
-  | "drawdown"
-  | "payout_gap";
-type RecommendationItem = {
-  ruleType: RecommendationRuleType;
-  text: string;
-  payload: Record<string, unknown>;
-};
-// Иконка и стиль карточки по типу правила (§24) — просадка/концентрация/погашение
-// требуют внимания в ближайшее время, разрыв в выплатах — нейтральная информация о прогнозе.
-const RECOMMENDATION_STYLE: Record<
-  RecommendationRuleType,
-  { label: string; color: string; warning: boolean }
-> = {
-  concentration: { label: "Концентрация", color: "coral", warning: true },
-  maturity: { label: "Погашение", color: "amber", warning: true },
-  drawdown: { label: "Просадка", color: "pink", warning: true },
-  payout_gap: { label: "Разрыв в выплатах", color: "slate", warning: false },
-};
-
-function Recommendations({ token }: { token: string }) {
-  const [items, setItems] = useState<RecommendationItem[] | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const response = await apiFetch(`${apiUrl}/recommendations`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) throw new Error("Не удалось загрузить рекомендации");
-        const result = (await response.json()) as RecommendationItem[];
-        if (!cancelled) setItems(result);
-      } catch {
-        if (!cancelled) setError("Не удалось загрузить рекомендации");
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  return (
-    <Page
-      title="Рекомендации"
-      subtitle="Аналитические уведомления на основе текущего портфеля — не являются индивидуальной инвестиционной рекомендацией"
-    >
-      {error && <p className="form-error">{error}</p>}
-      {!error && items === null && <p>Загрузка…</p>}
-      {!error && items !== null && items.length === 0 && (
-        <p>Пока нет замечаний по портфелю.</p>
-      )}
-      {!error && items !== null && items.length > 0 && (
-        <div className="product-list">
-          {items.map((item, index) => {
-            const style = RECOMMENDATION_STYLE[item.ruleType];
-            return (
-              <article className="list-row" key={`${item.ruleType}-${index}`}>
-                <div className="product-row-summary product-row-static recommendation-row">
-                  <i className={`legend type-dot ${style.color}`} title={style.label} />
-                  <span>
-                    <strong>{item.text}</strong>
-                    <small className={style.warning ? "warning-text" : "muted"}>
-                      {style.label}
-                      {style.warning ? " · требует внимания" : ""}
-                    </small>
-                  </span>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </Page>
   );
 }
 const currencyLabels: Record<string, string> = {
@@ -4466,17 +4233,6 @@ function HermesEventOptions(props: {
         </select>
       </label>
     </>
-  );
-}
-function ComingSoonPage({ title, text }: { title: string; text: string }) {
-  return (
-    <Page title={title} subtitle="Скоро">
-      <div className="empty-portfolio">
-        <p className="eyebrow">v2</p>
-        <h1>Этот раздел появится в следующей версии</h1>
-        <p>{text}</p>
-      </div>
-    </Page>
   );
 }
 // Загружены ли данные портфеля (BUG-18). Пока нет — страница записи по прямой ссылке
