@@ -70,8 +70,8 @@ npm test   # server/smoke-test.ts, поднимает API на порту 3091, 
 1. `seed.mjs` создаёт пользователя с полным портфелем (8 инструментов всех групп,
    операции, выплаты, 25+ операций для пагинации) и пустого пользователя.
 2. `walk.mjs` обходит `/`, `/portfolio`, `/products`, `/transactions`,
-   `/payments`, `/analytics`, `/recommendations`, `/integrations`, `/settings`,
-   `/reports`, `/import`, формы добавления, `/ocr-summary` и 404 на 390 и 1440 px.
+   `/payments`, `/integrations`, `/settings`, формы добавления, `/ocr-summary`
+   и 404 на 390 и 1440 px.
 3. На каждой странице: нет горизонтального скролла, нет «NaN / undefined / Invalid Date /
    null / [object Object]», нет ошибок консоли и HTTP 4xx/5xx. Скриншоты затем
    просматриваются вручную.

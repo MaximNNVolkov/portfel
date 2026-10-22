@@ -42,7 +42,6 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .fold-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fold-count { color: var(--muted); font: 600 12px 'DM Sans', sans-serif; }
 .fold-total { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.breakdown-section.fold-section .fold-header { font-size: 16px; letter-spacing: -.3px; }
 .slice-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 18px; margin: 24px 0 18px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
 .slice-totals > div { display: grid; gap: 4px; min-width: 0; }
 .slice-totals span { color: var(--muted); font-size: 11px; }
@@ -78,11 +77,9 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
     }
 .connection-state { white-space: nowrap; }
 
-/* Аналитика: доля разреза полоской под строкой — сравнивать глазом, а не читать проценты. */
+/* Разрезы по бумагам и эмитентам: доля полоской под строкой — сравнивать глазом, а не читать проценты. */
 .share-bar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .share-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--mint); }
-.stat-card .ellipsis-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.breakdown-section .product-row-summary { display: block; }
 @media (max-width: 720px) {
   .stat-strip { grid-template-columns: 1fr; }
   .stat-strip .stat-card + .stat-card { border-left: 0; border-top: 1px solid var(--line); }
@@ -156,4 +153,15 @@ a.product-row-summary, a.product-row-summary:visited, a.product-row-summary:hove
 .security-picked .muted { font-size: 12px; }
 
 /* П31: переключатель разреза «Структура» на главном экране. */
-.structure-cut { margin: 0 0 12px; }
+.structure-cut { flex-wrap: wrap; margin: 0 0 12px; }
+
+/* Доходность по периодам на главной: плитки в ряд (их 2-4, «за год» — когда есть история),
+   на телефоне — по две, непарная последняя на всю ширину. */
+.period-returns .stat-strip { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+@media (max-width: 720px) {
+  .period-returns .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; }
+  .period-returns .stat-strip .stat-card + .stat-card { border-top: 0; border-left: 0; }
+  .period-returns .stat-strip .stat-card:nth-child(even) { border-left: 1px solid var(--line); }
+  .period-returns .stat-strip .stat-card:nth-child(n + 3) { border-top: 1px solid var(--line); }
+  .period-returns .stat-strip .stat-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
